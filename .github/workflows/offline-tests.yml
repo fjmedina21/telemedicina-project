@@ -1,0 +1,69 @@
+name: Harness offline tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run offline unit tests
+        run: PYTHONPATH=.ai/src python -m unittest discover -s .ai/tests -v
+      - name: Smoke test agent team (mock)
+        run: PYTHONPATH=.ai/src python -m teleharness team --provider mock --actor mobile --area frontend --module M04 --task "Smoke test de roles" --workspace .
+
+  flutter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Flutter app
+        id: detect
+        run: |
+          if [ -f app/src/pubspec.yaml ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Flutter aún sin scaffold: checks omitidos"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: subosito/flutter-action@v2
+        if: steps.detect.outputs.ready == 'true'
+        with:
+          channel: stable
+      - name: Install dependencies
+        if: steps.detect.outputs.ready == 'true'
+        working-directory: app/src
+        run: flutter pub get
+      - name: Static analysis
+        if: steps.detect.outputs.ready == 'true'
+        working-directory: app/src
+        run: flutter analyze
+      - name: Widget and unit tests
+        if: steps.detect.outputs.ready == 'true'
+        working-directory: app/src
+        run: flutter test
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect .NET project
+        id: detect
+        run: |
+          if find api/src -name '*.csproj' -print -quit | grep -q .; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo ".NET aún sin scaffold: checks omitidos"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-dotnet@v6
+        if: steps.detect.outputs.ready == 'true'
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore and test
+        if: steps.detect.outputs.ready == 'true'
+        run: dotnet test api/src --configuration Release

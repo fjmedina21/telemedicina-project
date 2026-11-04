@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "collaborators": {
+    "backend_mobile": {
+      "description": "Responsable backend y colaborador Flutter",
+      "allowed_areas": ["frontend", "backend", "portal", "fullstack"]
+    },
+    "mobile": {
+      "description": "Colaborador Flutter",
+      "allowed_areas": ["frontend", "portal"]
+    }
+  },
+  "areas": {
+    "frontend": {"write_paths": ["app/src/"]},
+    "backend": {"write_paths": ["api/src/"]},
+    "portal": {"write_paths": ["portalweb/src/"]},
+    "fullstack": {"write_paths": ["app/src/", "api/src/", "portalweb/src/"]}
+  },
+  "review_policy": {
+    "pull_request_required": true,
+    "peer_review_required": true,
+    "never_commit_runs_or_secrets": true
+  }
+}

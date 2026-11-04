@@ -1,0 +1,7 @@
+# Reemplazar los handles por los dos usuarios reales de GitHub y renombrar a CODEOWNERS.
+# No activar con placeholders: GitHub ignorará entradas inválidas.
+/api/src/ @github-backend-owner
+/app/src/ @github-backend-owner @github-mobile-owner
+/portalweb/src/ @github-backend-owner @github-mobile-owner
+/.ai/agents/ @github-backend-owner @github-mobile-owner
+/.ai/specs/ @github-backend-owner @github-mobile-owner

@@ -1,0 +1,37 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.venv/
+runs/
+.pytest_cache/
+.coverage
+*.log
+.DS_Store
+.idea/
+.vscode/
+# Flutter
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+**/build/
+**/coverage/
+*.iml
+# C# / .NET
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+# Local secrets and certificates
+**/secrets/
+*.pem
+*.p12
+*.pfx
+*.keystore
+*.jks
+# Local state
+*.sqlite
+*.db

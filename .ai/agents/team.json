@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "execution": "sequential_with_handoff",
+  "roles": [
+    {"name": "orchestrator", "prompt": "ORCHESTRATOR.md", "max_steps": 5},
+    {"name": "architect", "prompt": "ARCHITECT.md", "max_steps": 5},
+    {"name": "spec_creator", "prompt": "SPEC_CREATOR.md", "max_steps": 5},
+    {"name": "implementer", "prompt": "IMPLEMENTER.md", "max_steps": 8},
+    {"name": "validator", "prompt": "VALIDATOR.md", "max_steps": 5}
+  ]
+}
