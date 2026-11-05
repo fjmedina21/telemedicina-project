@@ -12,7 +12,7 @@ using Telemedicina.Api.Features.Notifications;
 
 namespace Telemedicina.Api.Features.Appointments;
 
-[ApiController, Authorize, Route("api/v1")]
+[ApiController, Authorize(Roles = "Patient,Admission"), Route("api/v1")]
 public sealed class AppointmentsController(Database database, NotificationService notifications) : ApiControllerBase(database)
 {
     [Authorize(Roles = "Patient"), HttpGet("appointments/me")]

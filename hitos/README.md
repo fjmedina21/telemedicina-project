@@ -23,7 +23,7 @@ Estado: completado para el alcance usable con datos sintéticos; no implica prod
 
 ### Hito 02 — Roles y operación de cuentas
 
-Estado: en planificación; planes por componente:
+Estado: **completado** en el alcance aprobado y verificado localmente. PR, UAT y go/no-go de piloto/producción son etapas posteriores:
 
 - [API](api/segundo-hito-api/PLAN.md)
 - [App](app/segundo-hito-app/PLAN.md)

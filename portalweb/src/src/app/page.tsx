@@ -1,2 +1,2 @@
-import PortalConsole from "@/shared/components/portal-console";
-export default function Page(){return <PortalConsole view="queue"/>;}
+import {redirect} from "next/navigation";
+export default function Page(){redirect("/cuenta");}

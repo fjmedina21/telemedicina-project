@@ -1,6 +1,6 @@
 # Plan de ejecución — segundo hito (transversal)
 
-**Estado:** propuesta de trabajo; pendiente de revisión del arquitecto y aprobación de matriz de permisos.  
+**Estado:** completado en alcance funcional local el 2026-11-05. Evidencia: [validación H02](../../../api/src/Tools/validation/H02-2026-11-05/VALIDACION.md). PR, UAT y go/no-go de piloto siguen fuera del cierre local.  
 **Módulos:** M01 Identidad y acceso, M12 Operación y auditoría (mínimo).  
 **Áreas:** `api/src/`, `app/src/`, `portalweb/src/`.  
 **Base:** primer hito usable ya integrado localmente. Este documento no afirma que el segundo hito esté implementado.

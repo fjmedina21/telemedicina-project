@@ -22,9 +22,13 @@ public static class ApplicationExtensions
         builder.Services.AddRateLimiter(options =>
         {
             options.RejectionStatusCode = 429;
-            options.AddPolicy("auth", context => RateLimitPartition.GetFixedWindowLimiter(
+            options.AddPolicy("auth", context => RateLimitPartition.GetTokenBucketLimiter(
                 context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-                _ => new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+                _ => new TokenBucketRateLimiterOptions
+                {
+                    TokenLimit = 30, TokensPerPeriod = 1, ReplenishmentPeriod = TimeSpan.FromSeconds(2),
+                    AutoReplenishment = true, QueueLimit = 0
+                }));
         });
     }
     public static void UseTelemedicina(this WebApplication app)

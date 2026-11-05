@@ -23,6 +23,14 @@ void main() {
           'accessToken': 'synthetic',
           'refreshToken': 'synthetic-refresh',
         };
+      } else if (path.endsWith('/auth/me')) {
+        data = {
+          'userId': 'synthetic-patient',
+          'email': 'synthetic@example.invalid',
+          'role': 'Patient',
+          'permissions': ['identity.self', 'profile.self', 'notifications.self'],
+          'accountVersion': 1,
+        };
       } else if (path.endsWith('/notifications/preferences')) {
         if (request.method == 'PATCH') {
           enabled = jsonDecode(request.body)['emailEnabled'] as bool;

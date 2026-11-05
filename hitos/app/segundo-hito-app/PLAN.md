@@ -1,6 +1,6 @@
 # Segundo hito Flutter — alcance de trabajo
 
-Plan coordinado con [el plan transversal de API](../../api/segundo-hito-api/PLAN.md). Estado: propuesta, no implementación.
+Plan coordinado con [el plan transversal de API](../../api/segundo-hito-api/PLAN.md). Estado: completado dentro del alcance aprobado; la app sigue limitada al rol paciente. Evidencia consolidada: [validación H02](../../../api/src/Tools/validation/H02-2026-11-05/VALIDACION.md). PR y UAT permanecen pendientes.
 
 ## Objetivo
 

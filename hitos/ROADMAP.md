@@ -1,14 +1,14 @@
 # Hoja de ruta de hitos — Telemedicina
 
 **Alcance:** primera versión usable y evolución del MVP de los módulos M01–M12.  
-**Estado:** planificación; los hitos 2–12 no están implementados ni aprobados para producción.
+**Estado:** hitos 01 y 02 completados en su alcance funcional local; UAT, PR y go/no-go de producción permanecen separados.
 
 ## Resumen
 
 | Hito | Módulos | Resultado verificable | Dependencias | Estado |
 |---|---|---|---|---|
 | 01. Base usable de paciente y citas | M01–M05 parcial, M12 mínimo | Paciente verificado explora catálogo y solicita/gestiona citas; admisión revisa solicitudes; auditoría básica | Plataforma y PostgreSQL | **Completado en alcance usable** |
-| 02. Roles y operación de cuentas | M01, M12 | Roles autorizados, cuentas sintéticas de personal y ciclo de vida auditable | Hito 01; matriz de permisos aprobada | En planificación |
+| 02. Roles y operación de cuentas | M01, M12 | Roles autorizados, cuentas sintéticas de personal y ciclo de vida auditable | Hito 01; matriz de permisos aprobada | **Completado** |
 | 03. Perfil completo y dependientes | M02 | Perfil/contacto y declaraciones del paciente con fuente; dependientes solo con vínculo verificado | Hito 02; política de tutoría para dependientes | Por iniciar |
 | 04. Catálogo y agendas operativas | M03 | Servicios, profesionales y horarios configurables; disponibilidad coherente | Hito 02; reglas de oferta y horarios | Por iniciar |
 | 05. Citas y cobertura | M04, M05 | Políticas aprobadas de reserva/cambio; revisión manual de cobertura sin afirmar autorización no recibida | Hitos 03–04; reglas administrativas y de cobertura | Por iniciar |

@@ -12,6 +12,7 @@ class PatientController extends ChangeNotifier {
   bool busy = false;
   bool _disposed = false;
   String message = '';
+  JsonMap? identity;
   JsonMap? profile;
   int profileVersion = 0;
   int preferencesVersion = 0;
@@ -40,6 +41,7 @@ class PatientController extends ChangeNotifier {
   }
 
   void _clearPrivateState() {
+    identity = null;
     profile = null;
     profileVersion = 0;
     preferencesVersion = 0;
@@ -71,6 +73,15 @@ class PatientController extends ChangeNotifier {
   }
 
   Future<void> load() async {
+    final me = Map<String, dynamic>.from(await api.request('GET', '/auth/me') as Map);
+    if (me['role'] != 'Patient') {
+      try {
+        await auth.logout();
+      } finally {
+        _clearPrivateState();
+      }
+      throw ApiFailure(403, 'Utiliza una cuenta de paciente en esta app.');
+    }
     final results = await Future.wait([
       api.request('GET', '/patients/me'),
       api.request('GET', '/services'),
@@ -78,7 +89,8 @@ class PatientController extends ChangeNotifier {
       api.request('GET', '/notifications/me'),
       api.request('GET', '/notifications/preferences'),
     ]);
-    if (_disposed) return;
+    if (_disposed || !authenticated) return;
+    identity = me;
     final data = results[0] as Map?;
     profile = data == null
         ? null

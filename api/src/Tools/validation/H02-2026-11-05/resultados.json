@@ -1,0 +1,69 @@
+{
+  "date": "2026-11-05T11:35:22.880859+00:00",
+  "synthetic": true,
+  "realSmtpUsed": false,
+  "stages": [
+    {
+      "name": "01-dotnet-tests",
+      "exitCode": 0,
+      "seconds": 0.98
+    },
+    {
+      "name": "02-migration",
+      "exitCode": 0,
+      "seconds": 3.13
+    },
+    {
+      "name": "03-migration-idempotence",
+      "exitCode": 0,
+      "seconds": 2.73
+    },
+    {
+      "name": "04-seed-admission",
+      "exitCode": 0,
+      "seconds": 14.68
+    },
+    {
+      "name": "05-seed-staff",
+      "exitCode": 0,
+      "seconds": 2.2
+    },
+    {
+      "name": "06-http-first-milestone",
+      "exitCode": 0,
+      "seconds": 114.73
+    },
+    {
+      "name": "07-http-second-milestone",
+      "exitCode": 1,
+      "seconds": 191.71
+    },
+    {
+      "name": "08-smtp-loopback",
+      "exitCode": 0,
+      "seconds": 11.06
+    },
+    {
+      "name": "09-playwright-first",
+      "exitCode": 0,
+      "seconds": 45.67
+    },
+    {
+      "name": "10-playwright-second",
+      "exitCode": 1,
+      "seconds": 91.24
+    }
+  ],
+  "earlierChecks": {
+    "portalBuild": "PASS",
+    "flutterAnalyze": "PASS",
+    "flutterTests": 15,
+    "flutterMacosBuild": "PASS",
+    "dotnetReleaseBuild": "PASS"
+  },
+  "openapi": {
+    "paths": 44,
+    "requiredContractsPresent": true
+  },
+  "testServicesStopped": true
+}

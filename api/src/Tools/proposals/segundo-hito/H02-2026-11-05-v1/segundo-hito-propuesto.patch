@@ -1,0 +1,2201 @@
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/005_staff_accounts.sql b/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/005_staff_accounts.sql
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/005_staff_accounts.sql
+@@ -0,0 +1,21 @@
++-- H02-SPEC-v1; review and apply explicitly. Never applied during startup.
++SET LOCAL search_path TO telemedicina_m1, public;
++DO $migration$
++BEGIN
++IF NOT EXISTS(SELECT 1 FROM schema_versions WHERE version=5) THEN
++    ALTER TABLE users DROP CONSTRAINT users_role_check;
++    ALTER TABLE users ADD CONSTRAINT users_role_check
++        CHECK(role IN ('Patient','Admission','Practitioner','Support','Administrator'));
++    ALTER TABLE users ADD COLUMN version integer NOT NULL DEFAULT 1 CHECK(version>0);
++    ALTER TABLE users ADD COLUMN created_at timestamptz NOT NULL DEFAULT now();
++    ALTER TABLE users ADD COLUMN created_by text REFERENCES users(id);
++    ALTER TABLE audit ADD COLUMN result text NOT NULL DEFAULT 'Legacy';
++    ALTER TABLE audit ADD CONSTRAINT audit_result_check CHECK(result IN ('Legacy','Success','Denied'));
++    CREATE TABLE staff_invitations(
++        token_hash text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id),
++        expires bigint NOT NULL, used boolean NOT NULL DEFAULT false,
++        issued_at bigint NOT NULL, created_by text NOT NULL REFERENCES users(id));
++    CREATE INDEX staff_invitations_user ON staff_invitations(user_id);
++    INSERT INTO schema_versions(version) VALUES(5);
++END IF;
++END $migration$;
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Authentication/AccessCatalog.cs b/api/src/Telemedicina.Api/Infrastructure/Authentication/AccessCatalog.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Infrastructure/Authentication/AccessCatalog.cs
+@@ -0,0 +1,19 @@
++namespace Telemedicina.Api.Infrastructure.Authentication;
++
++/// <summary>Closed server catalog. No inherited administrator/clinical permissions.</summary>
++public static class AccessCatalog
++{
++    public static bool IsManagedStaff(string role) => role is "Admission" or "Practitioner" or "Support";
++    public static string[] Permissions(string role) => role switch
++    {
++        "Patient" => ["identity.self", "catalog.read", "appointments.self", "profile.self", "notifications.self"],
++        "Admission" => ["identity.self", "catalog.read", "admission.manage", "catalog.manage",
++            "schedule.manage", "patient.state.change", "audit.read", "delivery.read"],
++        "Practitioner" or "Support" => ["identity.self"],
++        "Administrator" => ["identity.self", "staff.read", "staff.invite", "staff.role.change",
++            "staff.state.change", "staff.sessions.revoke", "staff.audit.read"],
++        _ => []
++    };
++    public static bool Allows(string role, string permission) =>
++        Array.IndexOf(Permissions(role), permission) >= 0;
++}
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Authentication/AccountGuard.cs b/api/src/Telemedicina.Api/Infrastructure/Authentication/AccountGuard.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Infrastructure/Authentication/AccountGuard.cs
+@@ -0,0 +1,42 @@
++using System.Security.Claims;
++using Npgsql;
++using static Telemedicina.Api.Infrastructure.Persistence.Database;
++
++namespace Telemedicina.Api.Infrastructure.Authentication;
++
++public sealed class SessionRejectedException(int status, string code) : Exception
++{
++    public int Status { get; } = status;
++    public string Code { get; } = code;
++}
++
++/// <summary>
++/// A protected write must lock its actor before any sessions/resources and revalidate.
++/// Administrative actor/target locks are acquired in ordinal ID order.
++/// Login, refresh, logout and staff activation use the same user-before-session order.
++/// </summary>
++public static class AccountGuard
++{
++    public static void LockUsers(NpgsqlConnection c, NpgsqlTransaction t, params string[] ids)
++    {
++        foreach (var id in ids.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
++            Scalar(c, t, "SELECT id FROM users WHERE id=@id FOR UPDATE", ("id", id));
++    }
++
++    public static string Require(NpgsqlConnection c, NpgsqlTransaction t, ClaimsPrincipal principal,
++        string? permission = null)
++    {
++        var actor = Security.UserId(principal);
++        // The caller holds the user row before checking the session.
++        var role = Scalar(c, t, """
++            SELECT u.role FROM users u JOIN sessions s ON s.user_id=u.id
++            WHERE u.id=@u AND s.id=@s AND NOT s.revoked AND s.access_expires>@now
++            AND s.expires>@now AND u.active AND u.verified
++            """, ("u", actor), ("s", principal.FindFirstValue("session_id")), ("now", Security.Now)) as string;
++        if (role is null) throw new SessionRejectedException(401, "SESSION_REQUIRED");
++        if (role != principal.FindFirstValue(ClaimTypes.Role) ||
++            (permission is not null && !AccessCatalog.Allows(role, permission)))
++            throw new SessionRejectedException(403, "ACCESS_DENIED");
++        return role;
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Features/Identity/StaffContracts.cs b/api/src/Telemedicina.Api/Features/Identity/StaffContracts.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Features/Identity/StaffContracts.cs
+@@ -0,0 +1,21 @@
++using System.ComponentModel.DataAnnotations;
++
++namespace Telemedicina.Api.Features.Identity;
++
++public sealed record InviteStaffRequest(
++    [Required, EmailAddress, MaxLength(254)] string Email,
++    [Required, RegularExpression("^(Admission|Practitioner|Support)$")] string Role);
++public sealed record StaffVersionRequest([Range(1, int.MaxValue)] int ExpectedVersion);
++public sealed record StaffRoleRequest(
++    [Required, RegularExpression("^(Admission|Practitioner|Support)$")] string Role,
++    [Range(1, int.MaxValue)] int ExpectedVersion);
++public sealed record StaffActiveRequest([property: System.Text.Json.Serialization.JsonRequired] bool Active, [Range(1, int.MaxValue)] int ExpectedVersion);
++public sealed record ActivateStaffRequest(
++    [Required, RegularExpression("^[A-Fa-f0-9]{64}$")] string Token,
++    [Required, MinLength(12), MaxLength(128)] string Password);
++public sealed record StaffAccount(string Id, string Email, string Role, string Status, int Version);
++public sealed record StaffPage(IReadOnlyList<StaffAccount> Items, string? Next);
++public sealed record StaffAuditPage(IReadOnlyList<Dictionary<string, object?>> Items, long? Next);
++
++public sealed record StaffActivationResult(bool Activated);
++public sealed record IdentityResponse(string UserId, string Email, string Role, string[] Permissions, int AccountVersion);
+diff --git a/api/src/Telemedicina.Api/Features/Identity/StaffInvitations.cs b/api/src/Telemedicina.Api/Features/Identity/StaffInvitations.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Features/Identity/StaffInvitations.cs
+@@ -0,0 +1,38 @@
++using Npgsql;
++using static Telemedicina.Api.Infrastructure.Persistence.Database;
++using static Telemedicina.Api.Infrastructure.Authentication.Security;
++
++namespace Telemedicina.Api.Features.Identity;
++
++internal static class StaffInvitations
++{
++    public static void RequireDevelopment(IHostEnvironment environment, IConfiguration config)
++    {
++        if (!environment.IsDevelopment() || !config.GetValue<bool>("Milestone:Enabled"))
++            throw new InvalidOperationException("Synthetic accounts require explicit Development configuration.");
++    }
++
++    public static void Revoke(NpgsqlConnection c, NpgsqlTransaction t, string user)
++    {
++        Execute(c, t, "UPDATE staff_invitations SET used=true WHERE user_id=@u AND NOT used", ("u", user));
++        Execute(c, t, "DELETE FROM dev_mailbox WHERE user_id=@u AND purpose='staff-activation'", ("u", user));
++    }
++
++    public static void Issue(NpgsqlConnection c, NpgsqlTransaction t, string user, string actor)
++    {
++        Revoke(c, t, user);
++        var token = NewToken();
++        var now = Now;
++        Execute(c, t, """
++            INSERT INTO staff_invitations(token_hash,user_id,expires,issued_at,created_by)
++            VALUES(@h,@u,@e,@n,@actor)
++            """, ("h", Hash(token)), ("u", user), ("e", now + 900), ("n", now), ("actor", actor));
++        // Only the existing private, key-protected dev mailbox can retrieve this token.
++        // No SMTP/outbox entry, token in HTTP responses, logging, or URL.
++        Execute(c, t, """
++            INSERT INTO dev_mailbox(user_id,purpose,token,expires)
++            VALUES(@u,'staff-activation',@token,@e)
++            ON CONFLICT(user_id,purpose) DO UPDATE SET token=excluded.token,expires=excluded.expires
++            """, ("u", user), ("token", token), ("e", now + 900));
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Features/Identity/StaffController.cs b/api/src/Telemedicina.Api/Features/Identity/StaffController.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Features/Identity/StaffController.cs
+@@ -0,0 +1,180 @@
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.AspNetCore.RateLimiting;
++using Npgsql;
++using Telemedicina.Api.Infrastructure.Authentication;
++using Telemedicina.Api.Infrastructure.Persistence;
++using Telemedicina.Api.Shared;
++using Telemedicina.Common.Models.ApiResponses;
++using static Telemedicina.Api.Infrastructure.Persistence.Database;
++using static Telemedicina.Api.Infrastructure.Authentication.Security;
++using static Telemedicina.Api.Infrastructure.Auditing.AuditLog;
++
++namespace Telemedicina.Api.Features.Identity;
++
++[ProducesResponseType(typeof(ErrorApiResponse), 400)]
++[ProducesResponseType(typeof(ErrorApiResponse), 401)]
++[ProducesResponseType(typeof(ErrorApiResponse), 403)]
++[ProducesResponseType(typeof(ErrorApiResponse), 404)]
++[ProducesResponseType(typeof(ErrorApiResponse), 409)]
++[ProducesResponseType(typeof(ErrorApiResponse), 429)]
++[ApiController, StaffDenialAudit, Authorize(Roles = "Administrator"), Route("api/v1/admin/staff")]
++public sealed class StaffController(Database database, IHostEnvironment environment,
++    IConfiguration configuration) : ApiControllerBase(database)
++{
++    private const string Managed = "role IN ('Admission','Practitioner','Support')";
++    private const string SelectAccount = """
++        SELECT id,email,role,version,
++        CASE WHEN NOT verified THEN 'PendingActivation' WHEN active THEN 'Active' ELSE 'Suspended' END AS status
++        FROM users
++        """;
++    private static StaffAccount Account(Dictionary<string, object?> row) =>
++        new((string)row["id"]!, (string)row["email"]!, (string)row["role"]!,
++            (string)row["status"]!, (int)row["version"]!);
++
++    private NpgsqlTransaction Authorized(NpgsqlConnection c, string permission, string? target = null)
++    {
++        var t = c.BeginTransaction();
++        try
++        {
++            AccountGuard.LockUsers(c, t, target is null ? [UserId(User)] : [UserId(User), target]);
++            AccountGuard.Require(c, t, User, permission);
++            return t;
++        }
++        catch { t.Dispose(); throw; }
++    }
++
++    [HttpGet, ProducesResponseType(typeof(ApiResponse<StaffPage>), 200)]
++    public IActionResult List([FromQuery] string? after = null, [FromQuery] int limit = 20,
++        [FromQuery] string? role = null, [FromQuery] string? status = null)
++    {
++        if (limit is < 1 or > 100 || (after is not null && !Guid.TryParseExact(after, "D", out _)) ||
++            (role is not null && !AccessCatalog.IsManagedStaff(role)) ||
++            (status is not null && status is not ("PendingActivation" or "Active" or "Suspended")))
++            return Fail(400, "VALIDATION_FAILED", "Filtros no válidos.");
++        using var c = Database.Open(); using var t = Authorized(c, "staff.read");
++        var rows = Rows(c, t, SelectAccount + """
++            WHERE role IN ('Admission','Practitioner','Support') AND id>@after
++            AND (@role='' OR role=@role)
++            AND (@status='' OR CASE WHEN NOT verified THEN 'PendingActivation'
++                 WHEN active THEN 'Active' ELSE 'Suspended' END=@status)
++            ORDER BY id LIMIT @limit
++            """, ("after", after ?? ""), ("role", role ?? ""), ("status", status ?? ""), ("limit", limit + 1));
++        var more = rows.Count > limit;
++        var items = rows.Take(limit).Select(Account).ToArray();
++        return Data(new StaffPage(items, more ? items[^1].Id : null));
++    }
++
++    [HttpPost("invitations"), EnableRateLimiting("auth")]
++    [ProducesResponseType(typeof(ApiResponse<StaffAccount>), 201)]
++    public IActionResult Invite(InviteStaffRequest request)
++    {
++        StaffInvitations.RequireDevelopment(environment, configuration);
++        using var c = Database.Open(); using var t = Authorized(c, "staff.invite");
++        var id = Guid.NewGuid().ToString();
++        var inserted = Execute(c, t, """
++            INSERT INTO users(id,email,password_hash,role,active,verified,created_by)
++            VALUES(@id,@email,@hash,@role,false,false,@actor) ON CONFLICT DO NOTHING
++            """, ("id", id), ("email", request.Email.Trim().ToLowerInvariant()),
++            ("hash", Password(NewToken())), ("role", request.Role), ("actor", UserId(User)));
++        if (inserted == 0)
++            return Denied(c, t, 409, "ACCOUNT_ALREADY_EXISTS", "staff.invite");
++        StaffInvitations.Issue(c, t, id, UserId(User));
++        Record(c, t, UserId(User), "staff.invited", id, HttpContext.TraceIdentifier);
++        var account = Account(Rows(c, t, SelectAccount + " WHERE id=@id", ("id", id))[0]);
++        t.Commit();
++        return Data(account, 201);
++    }
++
++    [HttpPost("{id:guid}/invitation"), EnableRateLimiting("auth")]
++    [ProducesResponseType(typeof(ApiResponse<StaffAccount>), 200)]
++    public IActionResult Reinvite(Guid id, StaffVersionRequest request) =>
++        Mutate(id, "staff.invite", request.ExpectedVersion, "invitation", null, null);
++
++    [HttpPatch("{id:guid}/role")]
++    [ProducesResponseType(typeof(ApiResponse<StaffAccount>), 200)]
++    public IActionResult Role(Guid id, StaffRoleRequest request) =>
++        Mutate(id, "staff.role.change", request.ExpectedVersion, "role", request.Role, null);
++
++    [HttpPatch("{id:guid}/active")]
++    [ProducesResponseType(typeof(ApiResponse<StaffAccount>), 200)]
++    public IActionResult Active(Guid id, StaffActiveRequest request) =>
++        Mutate(id, "staff.state.change", request.ExpectedVersion, "state", null, request.Active);
++
++    [HttpPost("{id:guid}/revoke-sessions")]
++    [ProducesResponseType(typeof(ApiResponse<StaffAccount>), 200)]
++    public IActionResult RevokeSessions(Guid id, StaffVersionRequest request) =>
++        Mutate(id, "staff.sessions.revoke", request.ExpectedVersion, "sessions", null, null);
++
++    private IActionResult Mutate(Guid id, string permission, int version, string operation, string? role, bool? active)
++    {
++        if (operation == "invitation") StaffInvitations.RequireDevelopment(environment, configuration);
++        using var c = Database.Open(); using var t = Authorized(c, permission, id.ToString());
++        if (id.ToString() == UserId(User))
++            return Denied(c, t, 403, "ACCESS_DENIED", "staff." + operation);
++        var row = Rows(c, t, SelectAccount + " WHERE id=@id AND " + Managed, ("id", id.ToString())).FirstOrDefault();
++        if (row is null) return Denied(c, t, 404, "NOT_FOUND", "staff." + operation);
++        var account = Account(row);
++        if (account.Version != version)
++            return Denied(c, t, 409, "ACCOUNT_VERSION_CONFLICT", "staff." + operation);
++        if (operation == "invitation")
++        {
++            if (account.Status != "PendingActivation")
++                return Denied(c, t, 409, "ACCOUNT_TRANSITION_INVALID", "staff.invitation");
++            var recent = Convert.ToInt64(Scalar(c, t,
++                "SELECT count(*) FROM staff_invitations WHERE user_id=@u AND issued_at>@n",
++                ("u", account.Id), ("n", Now - 60)));
++            if (recent > 0) return Denied(c, t, 429, "RATE_LIMITED", "staff.invitation");
++            StaffInvitations.Issue(c, t, account.Id, UserId(User));
++        }
++        else if (operation == "state")
++        {
++            if (account.Status == "PendingActivation" ||
++                (account.Status == "Active") == active!.Value)
++                return Denied(c, t, 409, "ACCOUNT_TRANSITION_INVALID", "staff.state");
++            Execute(c, t, "UPDATE users SET active=@active WHERE id=@u",
++                ("active", active.Value), ("u", account.Id));
++        }
++        else if (operation == "role")
++        {
++            if (role is null || !AccessCatalog.IsManagedStaff(role) || role == account.Role)
++                return Denied(c, t, 409, "ACCOUNT_TRANSITION_INVALID", "staff.role");
++            Execute(c, t, "UPDATE users SET role=@role WHERE id=@u", ("role", role), ("u", account.Id));
++        }
++        if (operation is "role" or "sessions" || (operation == "state" && active == false))
++        {
++            Execute(c, t, "UPDATE sessions SET revoked=true WHERE user_id=@u", ("u", account.Id));
++            StaffInvitations.Revoke(c, t, account.Id);
++        }
++        Execute(c, t, "UPDATE users SET version=version+1 WHERE id=@u", ("u", account.Id));
++        Record(c, t, UserId(User), "staff." + operation + "_changed", account.Id, HttpContext.TraceIdentifier);
++        var updated = Account(Rows(c, t, SelectAccount + " WHERE id=@id", ("id", account.Id))[0]);
++        t.Commit();
++        return Data(updated);
++    }
++
++    private IActionResult Denied(NpgsqlConnection c, NpgsqlTransaction t, int status, string code, string action)
++    {
++        // Neutral resource: no confirmation that a forbidden/missing target exists.
++        Record(c, t, UserId(User), action, "staff", HttpContext.TraceIdentifier, "Denied");
++        HttpContext.Items["staff.denial.recorded"] = true;
++        t.Commit();
++        return Fail(status, code, "No se pudo completar la operación.");
++    }
++
++    [HttpGet("audit-events"), ProducesResponseType(typeof(ApiResponse<StaffAuditPage>), 200)]
++    public IActionResult Audit([FromQuery] long after = 0, [FromQuery] int limit = 20)
++    {
++        if (after < 0 || limit is < 1 or > 100) return Fail(400, "VALIDATION_FAILED", "Filtros no válidos.");
++        using var c = Database.Open(); using var t = Authorized(c, "staff.audit.read");
++        var rows = Rows(c, t, """
++            SELECT sequence,id,actor_id AS "actorId",action,resource_id AS "resourceId",
++                occurred_at AS "occurredAt",result,trace_id AS "traceId"
++            FROM audit WHERE sequence>@after AND action LIKE 'staff.%'
++            ORDER BY sequence LIMIT @limit
++            """, ("after", after), ("limit", limit + 1));
++        var more = rows.Count > limit;
++        var items = rows.Take(limit).ToArray();
++        return Data(new StaffAuditPage(items, more ? (long)items[^1]["sequence"]! : null));
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Features/Identity/StaffActivationController.cs b/api/src/Telemedicina.Api/Features/Identity/StaffActivationController.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Features/Identity/StaffActivationController.cs
+@@ -0,0 +1,42 @@
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.AspNetCore.RateLimiting;
++using Telemedicina.Api.Infrastructure.Authentication;
++using Telemedicina.Api.Infrastructure.Persistence;
++using Telemedicina.Api.Shared;
++using static Telemedicina.Api.Infrastructure.Persistence.Database;
++using static Telemedicina.Api.Infrastructure.Authentication.Security;
++using static Telemedicina.Api.Infrastructure.Auditing.AuditLog;
++
++namespace Telemedicina.Api.Features.Identity;
++
++[ApiController, Route("api/v1/auth/staff"), EnableRateLimiting("auth")]
++public sealed class StaffActivationController(Database database, IHostEnvironment environment,
++    IConfiguration configuration) : ApiControllerBase(database)
++{
++    [HttpPost("activate"), ProducesResponseType(typeof(Telemedicina.Common.Models.ApiResponses.ApiResponse<StaffActivationResult>), 200)]
++    public IActionResult Activate(ActivateStaffRequest request)
++    {
++        StaffInvitations.RequireDevelopment(environment, configuration);
++        using var c = Database.Open(); using var t = c.BeginTransaction();
++        var hash = Hash(request.Token.ToUpperInvariant());
++        var user = Scalar(c, t,
++            "SELECT user_id FROM staff_invitations WHERE token_hash=@h", ("h", hash)) as string;
++        if (user is null) return Fail(400, "INVALID_CHALLENGE", "Invitación no válida.");
++        AccountGuard.LockUsers(c, t, user);
++        var row = Rows(c, t, """
++            SELECT i.token_hash,u.role FROM staff_invitations i JOIN users u ON u.id=i.user_id
++            WHERE i.token_hash=@h AND NOT i.used AND i.expires>@now AND NOT u.verified
++            AND NOT u.active AND u.role IN ('Admission','Practitioner','Support')
++            FOR UPDATE OF i
++            """, ("h", hash), ("now", Now)).FirstOrDefault();
++        if (row is null) return Fail(400, "INVALID_CHALLENGE", "Invitación no válida.");
++        Execute(c, t, """
++            UPDATE users SET password_hash=@hash,verified=true,active=true,failed_logins=0,
++            locked_until=0,version=version+1 WHERE id=@u
++            """, ("hash", Password(request.Password)), ("u", user));
++        StaffInvitations.Revoke(c, t, user);
++        Record(c, t, user, "staff.activated", user, HttpContext.TraceIdentifier);
++        t.Commit();
++        return Data(new StaffActivationResult(true));
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Auditing/AuditLog.cs b/api/src/Telemedicina.Api/Infrastructure/Auditing/AuditLog.cs
+--- a/api/src/Telemedicina.Api/Infrastructure/Auditing/AuditLog.cs
++++ b/api/src/Telemedicina.Api/Infrastructure/Auditing/AuditLog.cs
+@@ -5,8 +5,8 @@
+ public static class AuditLog
+ {
+     public static void Record(Npgsql.NpgsqlConnection c, Npgsql.NpgsqlTransaction t,
+-        string actor, string action, string resource, string trace) =>
+-        Execute(c, t, "INSERT INTO audit(id,actor_id,action,resource_id,trace_id) VALUES(@id,@a,@b,@r,@t)",
+-            ("id", Guid.NewGuid().ToString()), ("a", actor), ("b", action), ("r", resource), ("t", trace));
++        string actor, string action, string resource, string trace, string result = "Success") =>
++        Execute(c, t, "INSERT INTO audit(id,actor_id,action,resource_id,trace_id,result) VALUES(@id,@a,@b,@r,@t,@result)",
++            ("id", Guid.NewGuid().ToString()), ("a", actor), ("b", action), ("r", resource), ("t", trace), ("result", result));
+ 
+ }
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Authentication/SessionHandler.cs b/api/src/Telemedicina.Api/Infrastructure/Authentication/SessionHandler.cs
+--- a/api/src/Telemedicina.Api/Infrastructure/Authentication/SessionHandler.cs
++++ b/api/src/Telemedicina.Api/Infrastructure/Authentication/SessionHandler.cs
+@@ -20,7 +20,7 @@
+         if (string.IsNullOrEmpty(token) || token.Length > 128) return Task.FromResult(AuthenticateResult.NoResult());
+         using var c = services.GetRequiredService<Database>().Open();
+         var rows = Rows(c, null, """
+-            SELECT u.id,u.email,u.role,s.id AS session_id FROM sessions s JOIN users u ON u.id=s.user_id
++            SELECT u.id,u.email,u.role,u.version,s.id AS session_id FROM sessions s JOIN users u ON u.id=s.user_id
+             WHERE s.access_hash=@hash AND NOT s.revoked AND s.access_expires>@now
+             AND s.expires>@now AND u.active AND u.verified
+             """, ("hash", Security.Hash(token)), ("now", Security.Now));
+@@ -28,14 +28,26 @@
+         var row = rows[0];
+         var claims = new[] { new Claim(ClaimTypes.NameIdentifier,(string)row["id"]!),
+             new Claim(ClaimTypes.Name,(string)row["email"]!), new Claim(ClaimTypes.Role,(string)row["role"]!),
+-            new Claim("session_id",(string)row["session_id"]!) };
++            new Claim("session_id",(string)row["session_id"]!),
++            new Claim("account_version",((int)row["version"]!).ToString(System.Globalization.CultureInfo.InvariantCulture)) };
+         return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(
+             new ClaimsPrincipal(new ClaimsIdentity(claims, Security.Scheme)), Security.Scheme)));
+     }
+     protected override Task HandleChallengeAsync(AuthenticationProperties properties) =>
+         Reject(401, "SESSION_REQUIRED");
+-    protected override Task HandleForbiddenAsync(AuthenticationProperties properties) =>
+-        Reject(403, "ACCESS_DENIED");
++    protected override Task HandleForbiddenAsync(AuthenticationProperties properties)
++    {
++        if (Request.Path.StartsWithSegments("/api/v1/admin/staff") && Context.User.Identity?.IsAuthenticated == true)
++        {
++            using var c = services.GetRequiredService<Database>().Open();
++            using var t = c.BeginTransaction();
++            Telemedicina.Api.Infrastructure.Auditing.AuditLog.Record(c, t,
++                Security.UserId(Context.User), "staff.access_denied", "staff",
++                Context.TraceIdentifier, "Denied");
++            t.Commit();
++        }
++        return Reject(403, "ACCESS_DENIED");
++    }
+     private Task Reject(int status, string code)
+     {
+         Response.StatusCode = status;
+diff --git a/api/src/Telemedicina.Api/Shared/ApiControllerBase.cs b/api/src/Telemedicina.Api/Shared/ApiControllerBase.cs
+--- a/api/src/Telemedicina.Api/Shared/ApiControllerBase.cs
++++ b/api/src/Telemedicina.Api/Shared/ApiControllerBase.cs
+@@ -21,8 +21,14 @@
+     protected Npgsql.NpgsqlTransaction Begin(Npgsql.NpgsqlConnection c)
+     {
+         var t = c.BeginTransaction();
+-        Execute(c, t, "SELECT set_config('telemedicina.actor',@actor,true)", ("actor", UserId(User)));
+-        return t;
++        try
++        {
++            Telemedicina.Api.Infrastructure.Authentication.AccountGuard.LockUsers(c, t, UserId(User));
++            Telemedicina.Api.Infrastructure.Authentication.AccountGuard.Require(c, t, User);
++            Execute(c, t, "SELECT set_config('telemedicina.actor',@actor,true)", ("actor", UserId(User)));
++            return t;
++        }
++        catch { t.Dispose(); throw; }
+     }
+     protected void Log(Npgsql.NpgsqlConnection c, Npgsql.NpgsqlTransaction t, string action, string id) =>
+         Record(c, t, UserId(User), action, id, HttpContext.TraceIdentifier);
+diff --git a/api/src/Telemedicina.Api/Program.cs b/api/src/Telemedicina.Api/Program.cs
+--- a/api/src/Telemedicina.Api/Program.cs
++++ b/api/src/Telemedicina.Api/Program.cs
+@@ -5,6 +5,7 @@
+ using Telemedicina.Api.Infrastructure.Persistence;
+ using Telemedicina.Api.Infrastructure.Persistence.Seeding;
+ using Telemedicina.Api.Infrastructure.Email;
++using Telemedicina.Api.Infrastructure.Authentication;
+ using Telemedicina.Common.Models.ApiResponses;
+ 
+ var builder = WebApplication.CreateBuilder(args);
+@@ -43,7 +44,7 @@
+ 
+ var app = builder.Build();
+ 
+-if (args.Contains("--inspect") || args.Contains("--migrate") || args.Contains("--seed-synthetic"))
++if (args.Contains("--inspect") || args.Contains("--migrate") || args.Contains("--seed-synthetic") || args.Contains("--seed-staff-synthetic"))
+ {
+     if (!app.Environment.IsDevelopment() || !app.Configuration.GetValue<bool>("Milestone:Enabled"))
+         throw new InvalidOperationException("Milestone commands require explicit development configuration.");
+@@ -63,7 +64,9 @@
+     if (args.Contains("--migrate"))
+         database.Migrate(Path.Combine(app.Environment.ContentRootPath, "Infrastructure", "Persistence", "Migrations", "001_initial.sql"));
+     if (args.Contains("--seed-synthetic"))
+-        SyntheticDataSeeder.Seed(database, app.Configuration);
++        SyntheticDataSeeder.Seed(database, app.Configuration, app.Environment);
++    if (args.Contains("--seed-staff-synthetic"))
++        StaffSyntheticSeeder.Seed(database, app.Configuration, app.Environment);
+     return;
+ }
+ 
+@@ -97,6 +100,14 @@
+ {
+     exceptionHandlerApp.Run(async context =>
+     {
++        if (context.Features.Get<IExceptionHandlerFeature>()?.Error is SessionRejectedException rejected)
++        {
++            context.Response.StatusCode = rejected.Status;
++            await context.Response.WriteAsJsonAsync(
++                ApiErrors.Create(context, rejected.Status, rejected.Code, "Acceso no autorizado"),
++                contentType: "application/problem+json");
++            return;
++        }
+         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+         context.Response.ContentType = "application/problem+json";
+ 
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/SyntheticDataSeeder.cs b/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/SyntheticDataSeeder.cs
+--- a/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/SyntheticDataSeeder.cs
++++ b/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/SyntheticDataSeeder.cs
+@@ -6,8 +6,9 @@
+ 
+ public static class SyntheticDataSeeder
+ {
+-    public static void Seed(Database database, IConfiguration config)
++    public static void Seed(Database database, IConfiguration config, IHostEnvironment environment)
+     {
++        Telemedicina.Api.Features.Identity.StaffInvitations.RequireDevelopment(environment, config);
+         using var c = database.Open(); using var t = c.BeginTransaction();
+         Execute(c, t, "SELECT pg_advisory_xact_lock(19041302)");
+         const string service = "10000000-0000-4000-8000-000000000001";
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/StaffSyntheticSeeder.cs b/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/StaffSyntheticSeeder.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/StaffSyntheticSeeder.cs
+@@ -0,0 +1,36 @@
++using System.ComponentModel.DataAnnotations;
++using Telemedicina.Api.Features.Identity;
++using static Telemedicina.Api.Infrastructure.Persistence.Database;
++using static Telemedicina.Api.Infrastructure.Authentication.Security;
++using static Telemedicina.Api.Infrastructure.Auditing.AuditLog;
++
++namespace Telemedicina.Api.Infrastructure.Persistence.Seeding;
++
++/// <summary>Explicit Development bootstrap; never changes an existing account's password/role.</summary>
++public static class StaffSyntheticSeeder
++{
++    public static void Seed(Database database, IConfiguration config, IHostEnvironment environment)
++    {
++        StaffInvitations.RequireDevelopment(environment, config);
++        using var c = database.Open(); using var t = c.BeginTransaction();
++        Execute(c, t, "SELECT pg_advisory_xact_lock(19041303)");
++        foreach (var role in new[] { "Administrator", "Practitioner", "Support" })
++        {
++            var email = config["Milestone:" + role + "Email"];
++            var password = config["Milestone:" + role + "Password"];
++            if (role != "Administrator" && string.IsNullOrEmpty(email) && string.IsNullOrEmpty(password)) continue;
++            if (string.IsNullOrWhiteSpace(email) || !new EmailAddressAttribute().IsValid(email.Trim()) ||
++                email.Trim().Length > 254 || password is null || password.Length is < 12 or > 128)
++                throw new InvalidOperationException("Configure private synthetic staff email/password (12-128 characters).");
++            var normalized = email.Trim().ToLowerInvariant();
++            Execute(c, t, """
++                INSERT INTO users(id,email,password_hash,role,verified,active)
++                VALUES(@id,@email,@hash,@role,true,true) ON CONFLICT DO NOTHING
++                """, ("id", Guid.NewGuid().ToString()), ("email", normalized), ("hash", Password(password)), ("role", role));
++            var found = Scalar(c, t, "SELECT role FROM users WHERE lower(email)=@email", ("email", normalized)) as string;
++            if (found != role) throw new InvalidOperationException("Synthetic account collision; no role was changed.");
++        }
++        Record(c, t, "seed", "staff.synthetic_seed_applied", "staff", "seed");
++        t.Commit();
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Features/Catalog/CatalogReadController.cs b/api/src/Telemedicina.Api/Features/Catalog/CatalogReadController.cs
+--- a/api/src/Telemedicina.Api/Features/Catalog/CatalogReadController.cs
++++ b/api/src/Telemedicina.Api/Features/Catalog/CatalogReadController.cs
+@@ -12,7 +12,7 @@
+ 
+ namespace Telemedicina.Api.Features.Catalog;
+ 
+-[ApiController, Authorize, Route("api/v1")]
++[ApiController, Authorize(Roles = "Patient,Admission"), Route("api/v1")]
+ public sealed class CatalogReadController(Database database) : ApiControllerBase(database)
+ {
+     [HttpGet("specialties")]
+diff --git a/api/src/Telemedicina.Api/Features/Scheduling/AvailabilityController.cs b/api/src/Telemedicina.Api/Features/Scheduling/AvailabilityController.cs
+--- a/api/src/Telemedicina.Api/Features/Scheduling/AvailabilityController.cs
++++ b/api/src/Telemedicina.Api/Features/Scheduling/AvailabilityController.cs
+@@ -12,7 +12,7 @@
+ 
+ namespace Telemedicina.Api.Features.Scheduling;
+ 
+-[ApiController, Authorize, Route("api/v1")]
++[ApiController, Authorize(Roles = "Patient,Admission"), Route("api/v1")]
+ public sealed class AvailabilityController(Database database) : ApiControllerBase(database)
+ {
+     [HttpGet("availability")]
+diff --git a/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs b/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
+--- a/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
++++ b/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
+@@ -12,7 +12,7 @@
+ 
+ namespace Telemedicina.Api.Features.Appointments;
+ 
+-[ApiController, Authorize, Route("api/v1")]
++[ApiController, Authorize(Roles = "Patient,Admission"), Route("api/v1")]
+ public sealed class AppointmentsController(Database database, NotificationService notifications) : ApiControllerBase(database)
+ {
+     [Authorize(Roles = "Patient"), HttpGet("appointments/me")]
+diff --git a/api/src/Telemedicina.Api/Features/Catalog/CatalogController.cs b/api/src/Telemedicina.Api/Features/Catalog/CatalogController.cs
+--- a/api/src/Telemedicina.Api/Features/Catalog/CatalogController.cs
++++ b/api/src/Telemedicina.Api/Features/Catalog/CatalogController.cs
+@@ -32,7 +32,7 @@
+         if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Specialty) ||
+             (request.Active && !request.IsSynthetic && string.IsNullOrWhiteSpace(request.ApprovalReference)))
+             return Fail(400, "CATALOG_VALIDATION", "Complete nombre, especialidad y referencia de habilitación si el servicio no es sintético.");
+-        using var c = Database.Open(); using var t = c.BeginTransaction();
++        using var c = Database.Open(); using var t = Begin(c);
+         var created = id is null; id ??= Guid.NewGuid().ToString(); var version = 1;
+         if (!created)
+         {
+@@ -79,7 +79,7 @@
+         if (string.IsNullOrWhiteSpace(request.Name) || request.ServiceIds is null || request.ServiceIds.Any(x => !Guid.TryParse(x, out _)))
+             return Fail(400, "CATALOG_VALIDATION", "Revise nombre y servicios asignados.");
+         var ids = request.ServiceIds.Select(x => Guid.Parse(x).ToString()).Distinct().ToArray();
+-        using var c = Database.Open(); using var t = c.BeginTransaction();
++        using var c = Database.Open(); using var t = Begin(c);
+         if (Convert.ToInt64(Scalar(c, t, "SELECT count(*) FROM services WHERE id=ANY(@ids)", ("ids", ids))) != ids.Length)
+             return Fail(400, "UNKNOWN_SERVICE", "Uno de los servicios no existe.");
+         var created = id is null; id ??= Guid.NewGuid().ToString(); var version = 1;
+diff --git a/api/src/Telemedicina.Api/Features/Notifications/NotificationsController.cs b/api/src/Telemedicina.Api/Features/Notifications/NotificationsController.cs
+--- a/api/src/Telemedicina.Api/Features/Notifications/NotificationsController.cs
++++ b/api/src/Telemedicina.Api/Features/Notifications/NotificationsController.cs
+@@ -25,10 +25,12 @@
+     [Authorize(Roles = "Patient"), HttpPost("notifications/{id:guid}/read")]
+     public IActionResult Read(Guid id)
+     {
+-        using var c = Database.Open();
+-        var count = Execute(c, null, "UPDATE notifications SET read_at=coalesce(read_at,now()) WHERE id=@id AND user_id=@u",
++        using var c = Database.Open(); using var t = Begin(c);
++        var count = Execute(c, t, "UPDATE notifications SET read_at=coalesce(read_at,now()) WHERE id=@id AND user_id=@u",
+             ("id", id.ToString()), ("u", UserId(User)));
+-        return count == 0 ? NotFound() : Data(new { read = true });
++        if (count == 0) return NotFound();
++        t.Commit();
++        return Data(new { read = true });
+     }
+     [Authorize(Roles = "Patient"), HttpGet("notifications/preferences")]
+     public IActionResult Preferences()
+@@ -41,7 +43,7 @@
+     [Authorize(Roles = "Patient"), HttpPatch("notifications/preferences")]
+     public IActionResult SavePreferences(NotificationPreferencesRequest request)
+     {
+-        using var c = Database.Open(); using var t = c.BeginTransaction();
++        using var c = Database.Open(); using var t = Begin(c);
+         Execute(c, t, "SELECT pg_advisory_xact_lock(hashtextextended(@key,0))", ("key", "mailuser:" + UserId(User)));
+         var old = Scalar(c, t, "SELECT version FROM notification_preferences WHERE user_id=@u FOR UPDATE", ("u", UserId(User)));
+         if ((old is null ? 0 : (int)old) != request.Version)
+diff --git a/api/src/Telemedicina.Api/Features/Identity/AccountsController.cs b/api/src/Telemedicina.Api/Features/Identity/AccountsController.cs
+--- a/api/src/Telemedicina.Api/Features/Identity/AccountsController.cs
++++ b/api/src/Telemedicina.Api/Features/Identity/AccountsController.cs
+@@ -19,8 +19,10 @@
+     public IActionResult Active(Guid id, ActiveRequest request)
+     {
+         if (id.ToString() == UserId(User)) return Fail(400, "SELF_SUSPENSION", "No puede suspender su propia cuenta.");
+-        using var c = Database.Open(); using var t = Begin(c);
+-        var count = Execute(c, t, "UPDATE users SET active=@active WHERE id=@id AND role='Patient'",
++        using var c = Database.Open(); using var t = c.BeginTransaction();
++        Telemedicina.Api.Infrastructure.Authentication.AccountGuard.LockUsers(c, t, UserId(User), id.ToString());
++        Telemedicina.Api.Infrastructure.Authentication.AccountGuard.Require(c, t, User, "patient.state.change");
++        var count = Execute(c, t, "UPDATE users SET active=@active,version=version+1 WHERE id=@id AND role='Patient'",
+             ("active", request.Active), ("id", id.ToString()));
+         if (count == 0) return NotFound();
+         if (!request.Active) Execute(c, t, "UPDATE sessions SET revoked=true WHERE user_id=@id", ("id", id.ToString()));
+diff --git a/api/src/Telemedicina.Api/Features/Identity/AuthController.cs b/api/src/Telemedicina.Api/Features/Identity/AuthController.cs
+--- a/api/src/Telemedicina.Api/Features/Identity/AuthController.cs
++++ b/api/src/Telemedicina.Api/Features/Identity/AuthController.cs
+@@ -16,10 +16,16 @@
+ namespace Telemedicina.Api.Features.Identity;
+ 
+ [ApiController, Route("api/v1/auth"), EnableRateLimiting("auth")]
+-public sealed class AuthController(Database database, IConfiguration configuration, NotificationService notifications, MailSettings mail) : ApiControllerBase(database)
++public sealed class AuthController(Database database, IConfiguration configuration, NotificationService notifications, MailSettings mail, IHostEnvironment environment) : ApiControllerBase(database)
+ {
+-    private IActionResult Failure(int status, string code) =>
+-        Fail(status, code, "No se pudo completar la operación");
++    private IActionResult Failure(int status, string code)
++    {
++        if (status == 401 && Request.Path.Equals("/api/v1/auth/refresh", StringComparison.OrdinalIgnoreCase))
++        {
++            Response.Cookies.Delete("tm_access"); Response.Cookies.Delete("tm_refresh");
++        }
++        return Fail(status, code, "No se pudo completar la operación");
++    }
+     private static readonly string DummyHash = Password(NewToken());
+ 
+     [HttpPost("register")]
+@@ -62,7 +68,7 @@
+     public IActionResult Resend(ForgotRequest request)
+     {
+         using var c = Database.Open(); using var t = c.BeginTransaction();
+-        var user = Scalar(c, t, "SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND NOT verified FOR UPDATE",
++        var user = Scalar(c, t, "SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND NOT verified AND role='Patient' FOR UPDATE",
+             ("e", request.Email.Trim())) as string;
+         if (user is not null)
+         {
+@@ -79,7 +85,7 @@
+         using var c = Database.Open(); using var t = c.BeginTransaction();
+         // Serialize verification and resend per account; attempts survive process restarts.
+         var user = Scalar(c, t, """
+-            SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND NOT verified FOR UPDATE
++            SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND NOT verified AND role='Patient' FOR UPDATE
+             """, ("e", request.Email.Trim())) as string;
+         if (user is null) return Failure(400, "INVALID_CHALLENGE");
+         var challenge = Rows(c, t, """
+@@ -110,7 +116,7 @@
+     public IActionResult Forgot(ForgotRequest request)
+     {
+         using var c = Database.Open(); using var t = c.BeginTransaction();
+-        var user = Scalar(c, t, "SELECT id FROM users WHERE lower(email)=lower(@e) AND active",
++        var user = Scalar(c, t, "SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND (verified OR role='Patient') FOR UPDATE",
+             ("e", request.Email.Trim())) as string;
+         if (user is not null)
+         {
+@@ -126,12 +132,17 @@
+     public IActionResult Reset(ResetRequest request)
+     {
+         using var c = Database.Open(); using var t = c.BeginTransaction();
+-        var user = Scalar(c, t, """
++        var user = Scalar(c, t, "SELECT user_id FROM challenges WHERE token_hash=@h AND purpose='reset'",
++            ("h", Hash(request.Token))) as string;
++        if (user is null) return Failure(400, "INVALID_CHALLENGE");
++        Telemedicina.Api.Infrastructure.Authentication.AccountGuard.LockUsers(c, t, user);
++        var consumed = Scalar(c, t, """
+             UPDATE challenges SET used=true WHERE token_hash=@h AND purpose='reset'
+-            AND NOT used AND expires>@now RETURNING user_id
+-            """, ("h", Hash(request.Token)), ("now", Now)) as string;
+-        if (user is null) return Failure(400, "INVALID_CHALLENGE");
+-        Execute(c, t, "UPDATE users SET password_hash=@h,failed_logins=0,locked_until=0 WHERE id=@u",
++            AND NOT used AND expires>@now AND EXISTS(SELECT 1 FROM users WHERE id=@u AND active)
++            RETURNING user_id
++            """, ("h", Hash(request.Token)), ("u", user), ("now", Now)) as string;
++        if (consumed is null) return Failure(400, "INVALID_CHALLENGE");
++        Execute(c, t, "UPDATE users SET password_hash=@h,failed_logins=0,locked_until=0,version=version+1 WHERE id=@u",
+             ("h", Password(request.Password)), ("u", user));
+         Execute(c, t, "UPDATE sessions SET revoked=true WHERE user_id=@u", ("u", user));
+         Execute(c, t, "DELETE FROM dev_mailbox WHERE user_id=@u AND purpose='reset'", ("u", user));
+@@ -141,7 +152,9 @@
+     [HttpGet("dev-mailbox")]
+     public IActionResult Mailbox([FromQuery] string email, [FromQuery] string purpose)
+     {
+-        if (mail.Mode != "development") return NotFound();
++        if (!environment.IsDevelopment() || !configuration.GetValue<bool>("Milestone:Enabled") ||
++            (purpose != "staff-activation" && mail.Mode != "development") ||
++            purpose is not ("verify" or "reset" or "staff-activation")) return NotFound();
+         var expected = configuration["Milestone:MailboxKey"];
+         var supplied = Request.Headers["X-Dev-Mailbox-Key"].ToString();
+         if (string.IsNullOrEmpty(expected) || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+@@ -158,12 +171,14 @@
+     public IActionResult Login(LoginRequest request)
+     {
+         using var c = Database.Open(); using var t = c.BeginTransaction();
++        var observedVersion = Scalar(c, t, "SELECT version FROM users WHERE lower(email)=lower(@e)",
++            ("e", request.Email.Trim()));
+         var rows = Rows(c, t, "SELECT * FROM users WHERE lower(email)=lower(@e) FOR UPDATE",
+             ("e", request.Email.Trim()));
+         var row = rows.FirstOrDefault();
+         var passwordValid = CheckPassword(row?["password_hash"] as string ?? DummyHash, request.Password);
+         var valid = row is not null && passwordValid && (bool)row["active"]! && (bool)row["verified"]!
+-            && (long)row["locked_until"]! <= Now;
++            && (long)row["locked_until"]! <= Now && observedVersion is int observed && observed == (int)row["version"]!;
+         if (!valid)
+         {
+             if (row is not null)
+@@ -172,7 +187,7 @@
+                     UPDATE users SET failed_logins=failed_logins+1,
+                     locked_until=CASE WHEN failed_logins>=4 THEN @until ELSE locked_until END WHERE id=@u
+                     """, ("until", Now + 300), ("u", row["id"]));
+-                Record(c, t, (string)row["id"]!, "account.login_denied", (string)row["id"]!, HttpContext.TraceIdentifier);
++                Record(c, t, (string)row["id"]!, "account.login_denied", (string)row["id"]!, HttpContext.TraceIdentifier, "Denied");
+             }
+             t.Commit(); return Failure(401, "INVALID_CREDENTIALS");
+         }
+@@ -215,6 +230,10 @@
+         var token = request.RefreshToken ?? Request.Cookies["tm_refresh"];
+         if (string.IsNullOrEmpty(token)) return Failure(401, "SESSION_REQUIRED");
+         using var c = Database.Open(); using var t = c.BeginTransaction();
++        var user = Scalar(c, t, "SELECT user_id FROM sessions WHERE refresh_hash=@h", ("h", Hash(token))) as string;
++        if (user is null) return Failure(401, "SESSION_REQUIRED");
++        Telemedicina.Api.Infrastructure.Authentication.AccountGuard.LockUsers(c, t, user);
++        // This second read observes revocation after any user-row lock wait.
+         var rows = Rows(c, t, """
+             SELECT s.id,s.user_id,s.expires,s.family_id,u.role FROM sessions s JOIN users u ON u.id=s.user_id
+             WHERE s.refresh_hash=@h AND NOT s.revoked AND s.expires>@now AND u.active AND u.verified
+@@ -226,17 +245,17 @@
+         var result = CreateSession(c, t, (string)row["user_id"]!, (string)row["role"]!, (long)row["expires"]!, (string)row["family_id"]!);
+         t.Commit(); return Data(result);
+     }
+-    [Authorize, HttpGet("me")]
+-    public IActionResult Me() => Data(new
+-    {
+-        userId = UserId(User),
+-        email = User.Identity!.Name,
+-        role = User.FindFirst(System.Security.Claims.ClaimTypes.Role)!.Value
+-    });
++    [Authorize, HttpGet("me"), ProducesResponseType(typeof(ApiResponse<IdentityResponse>), 200)]
++    public IActionResult Me() => Data(new IdentityResponse(
++        UserId(User), User.Identity!.Name!,
++        User.FindFirst(System.Security.Claims.ClaimTypes.Role)!.Value,
++        Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Permissions(
++            User.FindFirst(System.Security.Claims.ClaimTypes.Role)!.Value),
++        int.Parse(User.FindFirst("account_version")!.Value, System.Globalization.CultureInfo.InvariantCulture)));
+     [Authorize, HttpPost("logout")]
+     public IActionResult Logout()
+     {
+-        using var c = Database.Open(); using var t = c.BeginTransaction();
++        using var c = Database.Open(); using var t = Begin(c);
+         Execute(c, t, "UPDATE sessions SET revoked=true WHERE user_id=@u AND family_id=(SELECT family_id FROM sessions WHERE id=@id)",
+             ("u", UserId(User)), ("id", User.FindFirst("session_id")!.Value));
+         Record(c, t, UserId(User), "session.revoked", UserId(User), HttpContext.TraceIdentifier); t.Commit();
+diff --git a/api/src/Telemedicina.Api/Features/Identity/StaffDenialAuditAttribute.cs b/api/src/Telemedicina.Api/Features/Identity/StaffDenialAuditAttribute.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Features/Identity/StaffDenialAuditAttribute.cs
+@@ -0,0 +1,29 @@
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.AspNetCore.Mvc.Filters;
++using Telemedicina.Api.Infrastructure.Persistence;
++using static Telemedicina.Api.Infrastructure.Authentication.Security;
++using static Telemedicina.Api.Infrastructure.Auditing.AuditLog;
++
++namespace Telemedicina.Api.Features.Identity;
++
++[AttributeUsage(AttributeTargets.Class)]
++public sealed class StaffDenialAuditAttribute : Attribute, IAlwaysRunResultFilter
++{
++    public void OnResultExecuting(ResultExecutingContext context)
++    {
++        var status = context.Result switch
++        {
++            ObjectResult value => value.StatusCode ?? 200,
++            StatusCodeResult value => value.StatusCode,
++            _ => context.HttpContext.Response.StatusCode
++        };
++        if (status < 400 || context.HttpContext.User.Identity?.IsAuthenticated != true ||
++            context.HttpContext.Items.ContainsKey("staff.denial.recorded")) return;
++        using var c = context.HttpContext.RequestServices.GetRequiredService<Database>().Open();
++        using var t = c.BeginTransaction();
++        Record(c, t, UserId(context.HttpContext.User), "staff.request_denied", "staff",
++            context.HttpContext.TraceIdentifier, "Denied");
++        t.Commit();
++    }
++    public void OnResultExecuted(ResultExecutedContext context) { }
++}
+diff --git a/portalweb/src/src/shared/api/client.ts b/portalweb/src/src/shared/api/client.ts
+--- a/portalweb/src/src/shared/api/client.ts
++++ b/portalweb/src/src/shared/api/client.ts
+@@ -1,6 +1,6 @@
+ export type Item = Record<string, unknown>;
+ export class ApiError extends Error {
+-  constructor(public status: number, message: string) { super(message); }
++  constructor(public status: number, message: string, public code?: string) { super(message); }
+ }
+ let refreshing: Promise<unknown> | null = null;
+ export async function api<T>(path: string, method = "GET", body?: unknown, retry = true): Promise<T> {
+@@ -12,14 +12,23 @@
+       body: body === undefined ? undefined : JSON.stringify(body),
+     });
+   } catch { throw new ApiError(503,"No se pudo conectar con la API."); }
+-  if (response.status === 401 && retry && !path.startsWith("/auth/")) {
++  if (response.status === 401 && retry && (path==="/auth/me" || !path.startsWith("/auth/"))) {
+     refreshing ??= api("/auth/refresh","POST",{},false).finally(() => {refreshing=null;});
+     await refreshing;
+     return api<T>(path,method,body,false);
+   }
+-  let parsed: {data?: T; title?: string; detail?: string};
++  let parsed: {data?: T; title?: string; detail?: string; code?: string};
+   try { parsed=await response.json(); }
+   catch { throw new ApiError(response.status,"Respuesta del servidor no válida."); }
+-  if (!response.ok) throw new ApiError(response.status,parsed.title ?? parsed.detail ?? "Solicitud rechazada.");
++  if (!response.ok) {
++    if (response.status===401 && typeof window!=="undefined")
++      window.dispatchEvent(new Event("tm-session-invalidated"));
++    const message=response.status===401 && path!=="/auth/login" ? "La sesión ya no está disponible." :
++      response.status===403 ? "No tiene permiso para realizar esta acción." :
++      response.status===409 ? "La cuenta cambió o la operación no está permitida. Recargue antes de continuar." :
++      response.status===429 ? "Demasiados intentos. Espere un minuto antes de reintentar." :
++      parsed.title ?? parsed.detail ?? "Solicitud rechazada.";
++    throw new ApiError(response.status,message,parsed.code);
++  }
+   return parsed.data as T;
+ }
+diff --git a/portalweb/src/src/shared/api/identity.ts b/portalweb/src/src/shared/api/identity.ts
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/shared/api/identity.ts
+@@ -0,0 +1,10 @@
++export type Identity = {
++  userId: string;
++  email: string;
++  role: string;
++  permissions: string[];
++  accountVersion: number;
++};
++export function homeFor(role: string): string {
++  return role === "Admission" ? "/admision" : role === "Administrator" ? "/personal" : "/cuenta";
++}
+diff --git a/portalweb/src/src/shared/components/app-frame.tsx b/portalweb/src/src/shared/components/app-frame.tsx
+--- a/portalweb/src/src/shared/components/app-frame.tsx
++++ b/portalweb/src/src/shared/components/app-frame.tsx
+@@ -1,25 +1,39 @@
+ "use client";
+ import Link from "next/link";
++import {useEffect,useState} from "react";
++import {api} from "@/shared/api/client";
++import type {Identity} from "@/shared/api/identity";
+ import {usePathname} from "next/navigation";
+ import {CalendarDays,ClipboardList,Layers3,Mail,ShieldCheck,ArrowUpRight} from "lucide-react";
+ import Brand from "./brand";
+ const navigation=[
+-  {href:"/admision",label:"Admisión",icon:ClipboardList},
+-  {href:"/agenda",label:"Horarios",icon:CalendarDays},
+-  {href:"/catalogo",label:"Catálogo",icon:Layers3},
+-  {href:"/entregas",label:"Entregas de correo",icon:Mail},
+-  {href:"/admin",label:"Auditoría",icon:ShieldCheck},
++  {permission:"admission.manage",href:"/admision",label:"Admisión",icon:ClipboardList},
++  {permission:"schedule.manage",href:"/agenda",label:"Horarios",icon:CalendarDays},
++  {permission:"catalog.manage",href:"/catalogo",label:"Catálogo",icon:Layers3},
++  {permission:"delivery.read",href:"/entregas",label:"Entregas de correo",icon:Mail},
++  {permission:"audit.read",href:"/admin",label:"Auditoría",icon:ShieldCheck},
++  {permission:"staff.read",href:"/personal",label:"Cuentas de personal",icon:ShieldCheck},
++  {permission:"identity.self",href:"/cuenta",label:"Mi cuenta",icon:ShieldCheck},
+ ];
+ export default function AppFrame({children}:{children:React.ReactNode}) {
+   const path=usePathname();
+-  const login=path==="/login";
++  const login=path==="/login" || path==="/activar-personal";
++  const [identity,setIdentity]=useState<Identity|null>(null);
++  useEffect(()=>{
++    let current=true;
++    const clear=()=>setIdentity(null);
++    window.addEventListener("tm-session-invalidated",clear);
++    setIdentity(null);
++    if(!login) api<Identity>("/auth/me").then(me=>{if(current)setIdentity(me);}).catch(()=>{});
++    return ()=>{current=false;window.removeEventListener("tm-session-invalidated",clear);};
++  },[path,login]);
+   return <div className={login?"auth-frame":"portal-frame"}>
+     <a className="skip-link" href="#contenido">Ir al contenido</a>
+     {login?<header className="auth-header"><Link href="/login" aria-label="Telemedicina · Acceso"><Brand/></Link><span className="environment-tag">Entorno de demostración</span></header>:
+       <aside className="sidebar">
+         <Link href="/" className="brand-link" aria-label="Telemedicina · Inicio"><Brand/></Link>
+         <p className="nav-caption">ESPACIO DE TRABAJO</p>
+-        <nav aria-label="Navegación principal">{navigation.map(({href,label,icon:Icon})=>{
++        <nav aria-label="Navegación principal">{navigation.filter(item=>identity?.permissions?.includes(item.permission)).map(({href,label,icon:Icon})=>{
+           const active=path===href||(href==="/admision"&&path==="/");
+           return <Link key={href} href={href} className={active?"nav-link active":"nav-link"} aria-current={active?"page":undefined}>
+             <Icon size={19} aria-hidden="true"/><span>{label}</span></Link>;
+@@ -28,7 +42,7 @@
+           <p>Un espacio para organizar cada solicitud.</p><Link href="/login" className="access-link">Acceso al portal <ArrowUpRight size={16} aria-hidden="true"/></Link></div>
+       </aside>}
+     <div className="workspace">
+-      {!login&&<header className="workspace-bar"><span>Portal de admisión</span><span className="timezone">Hora de Santo Domingo · UTC−4</span></header>}
++      {!login&&<header className="workspace-bar"><span>Portal de telemedicina</span><span className="timezone">Hora de Santo Domingo · UTC−4</span></header>}
+       <main id="contenido" tabIndex={-1}>{children}</main>
+       <footer className="workspace-footer">Entorno de demostración · Sin atención clínica, video ni documentos habilitados.</footer>
+     </div>
+diff --git a/portalweb/src/src/shared/components/portal-console.tsx b/portalweb/src/src/shared/components/portal-console.tsx
+--- a/portalweb/src/src/shared/components/portal-console.tsx
++++ b/portalweb/src/src/shared/components/portal-console.tsx
+@@ -3,6 +3,7 @@
+ import {RefreshCw,LogOut} from "lucide-react";
+ import {useRouter} from "next/navigation";
+ import {api,ApiError,Item} from "@/shared/api/client";
++import type {Identity} from "@/shared/api/identity";
+ import CatalogPanel from "@/features/catalog/components/catalog-panel";
+ import AdmissionQueue from "@/features/admission/components/admission-queue";
+ import AuditEvents from "@/features/audit/components/audit-events";
+@@ -11,13 +12,14 @@
+ 
+ export default function PortalConsole({view="queue"}:{view?:"queue"|"audit"|"schedule"|"catalog"|"delivery"}) {
+   const router=useRouter();
+-  const [user,setUser]=useState<{email:string;role:string}|null>(null);
++  const [user,setUser]=useState<Identity|null>(null);
+   const [items,setItems]=useState<Item[]>([]),[busy,setBusy]=useState(true),[error,setError]=useState("");
+   const [services,setServices]=useState<Item[]>([]),[practitioners,setPractitioners]=useState<Item[]>([]);
+ 
+   const load=useCallback(async()=>{
+-    const me=await api<{email:string;role:string}>("/auth/me");
+-    if(me.role!=="Admission") throw new ApiError(403,"Se requiere el rol de admisión.");
++    const me=await api<Identity>("/auth/me");
++    const permission={queue:"admission.manage",audit:"audit.read",schedule:"schedule.manage",catalog:"catalog.manage",delivery:"delivery.read"}[view];
++    if(!me.permissions?.includes(permission)) throw new ApiError(403,"No tiene permiso para acceder a esta sección.");
+     setUser(me);
+     if(view==="audit") setItems(await api<Item[]>("/admin/audit-events"));
+     else if(view==="queue") setItems(await api<Item[]>("/admin/work-queue"));
+@@ -32,9 +34,16 @@
+     }
+   },[view]);
+   const failure=useCallback((e:unknown)=>{
+-    if(e instanceof ApiError && (e.status===401 || e.status===403)) {
+-      setUser(null); setItems([]); router.replace("/login");
++    if(e instanceof ApiError && e.status===401) {
++      setUser(null); setItems([]); setServices([]); setPractitioners([]); router.replace("/login");
++    } else if(e instanceof ApiError && e.status===403) {
++      setUser(null); setItems([]); setServices([]); setPractitioners([]); setError(e.message);
+     } else setError(e instanceof Error?e.message:"Error de conexión");
++  },[router]);
++  useEffect(()=>{
++    const clear=()=>{setUser(null);setItems([]);setServices([]);setPractitioners([]);router.replace("/login");};
++    window.addEventListener("tm-session-invalidated",clear);
++    return ()=>window.removeEventListener("tm-session-invalidated",clear);
+   },[router]);
+   useEffect(()=>{
+     let mounted=true;
+diff --git a/portalweb/src/src/features/auth/components/login-form.tsx b/portalweb/src/src/features/auth/components/login-form.tsx
+--- a/portalweb/src/src/features/auth/components/login-form.tsx
++++ b/portalweb/src/src/features/auth/components/login-form.tsx
+@@ -2,6 +2,7 @@
+ import {useState} from "react";
+ import {useRouter} from "next/navigation";
+ import {api} from "@/shared/api/client";
++import {homeFor} from "@/shared/api/identity";
+ 
+ export default function LoginForm() {
+   const router=useRouter();
+@@ -13,19 +14,19 @@
+     <p>Solicitudes, horarios y cobertura en un espacio pensado para tu equipo.</p>
+     <div className="login-note">La confirmación de citas y la cobertura requieren revisión de admisión.</div>
+   </aside><section className="login-card"><span className="eyebrow">BIENVENIDO AL PORTAL</span>
+-    <h1 >Acceso de admisión</h1>
+-    <p>Ingresa con tu cuenta de admisión.</p>
++    <h1 >Acceso al portal</h1>
++    <p>Ingresa con tu cuenta de personal.</p>
+     <form className="space-y-4" onSubmit={async event=>{
+       event.preventDefault(); setBusy(true); setError("");
+       try {
+         const user=await api<{role:string}>("/auth/login","POST",{email,password});
+-        if(user.role!=="Admission") {
++        if(!["Admission","Administrator","Practitioner","Support"].includes(user.role)) {
+           await api("/auth/logout","POST",{});
+-          throw new Error("Esta cuenta no tiene acceso al portal de admisión.");
++          throw new Error("Esta cuenta no tiene acceso al portal de personal.");
+         }
+-        setPassword(""); router.replace("/admision");
++        setPassword(""); router.replace(homeFor(user.role));
+       } catch(e) {setError(e instanceof Error ? e.message : "Error de acceso");}
+-      finally {setBusy(false);}
++      finally {setPassword("");setBusy(false);}
+     }}>
+       <label className="block">Correo<input className="block w-full rounded border p-2"
+         type="email" autoComplete="username" required disabled={busy} value={email} onChange={e=>setEmail(e.target.value)}/></label>
+diff --git a/portalweb/src/src/app/page.tsx b/portalweb/src/src/app/page.tsx
+--- a/portalweb/src/src/app/page.tsx
++++ b/portalweb/src/src/app/page.tsx
+@@ -1,2 +1,2 @@
+-import PortalConsole from "@/shared/components/portal-console";
+-export default function Page(){return <PortalConsole view="queue"/>;}
++import {redirect} from "next/navigation";
++export default function Page(){redirect("/cuenta");}
+diff --git a/portalweb/src/src/features/auth/components/account-panel.tsx b/portalweb/src/src/features/auth/components/account-panel.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/features/auth/components/account-panel.tsx
+@@ -0,0 +1,35 @@
++"use client";
++import {useEffect,useState} from "react";
++import Link from "next/link";
++import {useRouter} from "next/navigation";
++import {api,ApiError} from "@/shared/api/client";
++import {homeFor,type Identity} from "@/shared/api/identity";
++
++export default function AccountPanel() {
++  const router=useRouter();
++  const [me,setMe]=useState<Identity|null>(null),[error,setError]=useState(""),[busy,setBusy]=useState(true);
++  useEffect(()=>{
++    let current=true;
++    const clear=()=>{setMe(null);router.replace("/login");};
++    window.addEventListener("tm-session-invalidated",clear);
++    api<Identity>("/auth/me").then(value=>{if(current)setMe(value);}).catch(error=>{
++      if(!current)return;
++      if(error instanceof ApiError&&error.status===401)clear();
++      else setError("No se pudo consultar la identidad.");
++    }).finally(()=>{if(current)setBusy(false);});
++    return ()=>{current=false;window.removeEventListener("tm-session-invalidated",clear);};
++  },[router]);
++  if(!me)return <p role="status">{busy?"Verificando sesión…":error||"Se requiere iniciar sesión."}</p>;
++  return <section className="space-y-4">
++    <h1>Mi cuenta</h1><p>{me.email}</p>
++    <p>{["Practitioner","Support"].includes(me.role)?"Sin funciones operativas habilitadas.":"Cuenta de personal autenticada."}</p>
++    {homeFor(me.role)!=="/cuenta"&&<Link className="button-primary" href={homeFor(me.role)}>Ir a mi espacio</Link>}
++    <button className="button-secondary" disabled={busy} onClick={async()=>{
++      setBusy(true);setError("");
++      try{await api("/auth/logout","POST",{});setMe(null);router.replace("/login");}
++      catch(error){setError(error instanceof Error?error.message:"No se pudo cerrar sesión.");}
++      finally{setBusy(false);}
++    }}>Salir</button>
++    {error&&<p role="alert">{error}</p>}
++  </section>;
++}
+diff --git a/portalweb/src/src/app/cuenta/page.tsx b/portalweb/src/src/app/cuenta/page.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/app/cuenta/page.tsx
+@@ -0,0 +1,2 @@
++import AccountPanel from "@/features/auth/components/account-panel";
++export default function Page(){return <AccountPanel/>;}
+diff --git a/portalweb/src/src/features/auth/components/staff-activation-form.tsx b/portalweb/src/src/features/auth/components/staff-activation-form.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/features/auth/components/staff-activation-form.tsx
+@@ -0,0 +1,30 @@
++"use client";
++import {useState} from "react";
++import Link from "next/link";
++import {api} from "@/shared/api/client";
++
++export default function StaffActivationForm(){
++  const [token,setToken]=useState(""),[password,setPassword]=useState("");
++  const [busy,setBusy]=useState(false),[message,setMessage]=useState(""),[done,setDone]=useState(false);
++  return <section className="login-card" aria-busy={busy}>
++    <h1>Activar cuenta de personal</h1>
++    <p>Utiliza tu invitación privada de desarrollo. Caduca en 15 minutos y se utiliza una sola vez.</p>
++    {!done&&<form className="space-y-4" autoComplete="off" onSubmit={async event=>{
++      event.preventDefault();setBusy(true);setMessage("");
++      try{
++        await api("/auth/staff/activate","POST",{token:token.trim(),password});
++        setDone(true);setMessage("Cuenta activada. Ya puedes iniciar sesión.");
++      }catch(error){setMessage(error instanceof Error?error.message:"No se pudo activar la cuenta.");}
++      finally{setToken("");setPassword("");setBusy(false);}
++    }}>
++      <label className="block">Invitación<input className="block w-full rounded border p-2" type="password"
++        autoComplete="off" required pattern="[A-Fa-f0-9]{64}" maxLength={64} value={token}
++        disabled={busy} onChange={event=>setToken(event.target.value)}/></label>
++      <label className="block">Nueva contraseña<input className="block w-full rounded border p-2" type="password"
++        autoComplete="new-password" required minLength={12} maxLength={128} value={password}
++        disabled={busy} onChange={event=>setPassword(event.target.value)}/></label>
++      <button className="button-primary" disabled={busy}>{busy?"Activando…":"Activar cuenta"}</button>
++    </form>}
++    <p role="status" aria-live="polite">{message}</p><Link href="/login">Ir al acceso</Link>
++  </section>;
++}
+diff --git a/portalweb/src/src/app/activar-personal/page.tsx b/portalweb/src/src/app/activar-personal/page.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/app/activar-personal/page.tsx
+@@ -0,0 +1,2 @@
++import StaffActivationForm from "@/features/auth/components/staff-activation-form";
++export default function Page(){return <StaffActivationForm/>;}
+diff --git a/portalweb/src/src/features/staff/components/staff-panel.tsx b/portalweb/src/src/features/staff/components/staff-panel.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/features/staff/components/staff-panel.tsx
+@@ -0,0 +1,143 @@
++"use client";
++import {useCallback,useEffect,useRef,useState} from "react";
++import {useRouter} from "next/navigation";
++import {api,ApiError,type Item} from "@/shared/api/client";
++import type {Identity} from "@/shared/api/identity";
++
++type Staff={id:string;email:string;role:string;status:string;version:number};
++type Page={items:Staff[];next:string|null};
++type AuditPage={items:Item[];next:number|null};
++const roles=["Admission","Practitioner","Support"];
++const labels:Record<string,string>={Admission:"Admisión",Practitioner:"Profesional",Support:"Soporte",
++  PendingActivation:"Pendiente de activación",Active:"Activa",Suspended:"Suspendida"};
++
++function StaffRow({account,busy,run}:{account:Staff;busy:boolean;
++  run:(account:Staff,suffix:string,method:string,body:Item)=>Promise<void>}) {
++  const [role,setRole]=useState(account.role);
++  return <tr>
++    <td>{account.email}</td><td>{labels[account.role]}</td><td>{labels[account.status]}</td>
++    <td><label>Nuevo rol para {account.email}<select disabled={busy} value={role} onChange={e=>setRole(e.target.value)}>
++      {roles.map(value=><option key={value} value={value}>{labels[value]}</option>)}</select></label>
++      <button className="button-secondary" disabled={busy||role===account.role}
++        onClick={()=>run(account,"role","PATCH",{role})}>Cambiar rol</button>
++      {account.status==="PendingActivation"?
++        <button className="button-secondary" disabled={busy}
++          onClick={()=>run(account,"invitation","POST",{})}>Reenviar invitación</button>:
++        <button className="button-secondary" disabled={busy} onClick={()=>run(account,"active","PATCH",
++          {active:account.status!=="Active"})}>{account.status==="Active"?"Suspender":"Reactivar"}</button>}
++      <button className="button-secondary" disabled={busy}
++        onClick={()=>run(account,"revoke-sessions","POST",{})}>Revocar sesiones</button>
++    </td>
++  </tr>;
++}
++
++export default function StaffPanel(){
++  const router=useRouter(),generation=useRef(0);
++  const [me,setMe]=useState<Identity|null>(null),[rows,setRows]=useState<Staff[]>([]);
++  const [busy,setBusy]=useState(true),[error,setError]=useState(""),[message,setMessage]=useState("");
++  const [email,setEmail]=useState(""),[role,setRole]=useState("Admission");
++  const [roleFilter,setRoleFilter]=useState(""),[statusFilter,setStatusFilter]=useState("");
++  const [cursor,setCursor]=useState(""),[previous,setPrevious]=useState<string[]>([]),[next,setNext]=useState<string|null>(null);
++  const [events,setEvents]=useState<Item[]>([]),[auditNext,setAuditNext]=useState<number|null>(null);
++  const clear=useCallback(()=>{
++    generation.current++;setMe(null);setRows([]);setEvents([]);setEmail("");
++    setPrevious([]);setNext(null);setAuditNext(null);router.replace("/login");
++  },[router]);
++  const failure=useCallback((error:unknown)=>{
++    if(error instanceof ApiError&&error.status===401){clear();return;}
++    if(error instanceof ApiError&&error.status===403){setRows([]);setEvents([]);}
++    setError(error instanceof Error?error.message:"No se pudo completar la operación.");
++  },[clear]);
++  const load=useCallback(async(after="",pageHistory:string[]=[])=>{
++    const current=generation.current;
++    const query=new URLSearchParams({limit:"20"});
++    if(after)query.set("after",after);
++    if(roleFilter)query.set("role",roleFilter);
++    if(statusFilter)query.set("status",statusFilter);
++    const result=await api<Page>("/admin/staff?"+query);
++    if(current!==generation.current)return;
++    setRows(result.items);setNext(result.next);setCursor(after);setPrevious(pageHistory);
++  },[roleFilter,statusFilter]);
++  useEffect(()=>{
++    const current=++generation.current;
++    let live=true;
++    window.addEventListener("tm-session-invalidated",clear);
++    setBusy(true);setError("");setRows([]);setEvents([]);
++    (async()=>{
++      const user=await api<Identity>("/auth/me");
++      if(!live||current!==generation.current)return;
++      if(!user.permissions?.includes("staff.read"))throw new ApiError(403,"No tiene permiso para acceder a cuentas de personal.");
++      setMe(user);await load();
++    })().catch(error=>{if(live)failure(error);}).finally(()=>{if(live)setBusy(false);});
++    return ()=>{live=false;generation.current++;window.removeEventListener("tm-session-invalidated",clear);};
++  },[load,failure,clear]);
++  async function action(operation:()=>Promise<void>){
++    if(busy)return;
++    setBusy(true);setError("");setMessage("");
++    try{await operation();}catch(error){failure(error);}finally{setBusy(false);}
++  }
++  async function mutate(account:Staff,suffix:string,method:string,body:Item){
++    if(!window.confirm("¿Confirmar la operación sobre esta cuenta? Las sesiones o invitaciones anteriores pueden quedar invalidadas."))return;
++    await action(async()=>{
++      await api("/admin/staff/"+account.id+"/"+suffix,method,{...body,expectedVersion:account.version});
++      await load(cursor,previous);
++      setEvents([]);setAuditNext(null);setMessage("Operación confirmada por el servidor. Una cuenta pendiente puede requerir una nueva invitación.");
++    });
++  }
++  async function audit(after=0){
++    const current=generation.current;
++    const result=await api<AuditPage>("/admin/staff/audit-events?after="+after);
++    if(current!==generation.current)return;
++    setEvents(after===0?result.items:old=>[...old,...result.items]);setAuditNext(result.next);
++  }
++  if(!me)return <p role="status">{busy?"Verificando sesión…":error||"Se requiere iniciar sesión."}</p>;
++  return <section className="space-y-6" aria-busy={busy}>
++    <div className="page-header"><div><h1>Cuentas de personal</h1><p>Administración de cuentas sintéticas del equipo.</p></div>
++      <div><span>{me.email}</span><button className="button-secondary" disabled={busy} onClick={()=>action(async()=>{
++        await api("/auth/logout","POST",{});clear();
++      })}>Salir</button></div></div>
++    {error&&<div className="notice error-notice"><p role="alert">{error}</p>
++      <button className="button-secondary" disabled={busy} onClick={()=>action(()=>load(cursor,previous))}>Recargar cuentas</button></div>}
++    <p role="status" aria-live="polite">{message}</p>
++    <form className="space-y-4" onSubmit={event=>{
++      event.preventDefault();if(!window.confirm("¿Confirmar la invitación de esta cuenta de personal?"))return;
++      void action(async()=>{
++        await api("/admin/staff/invitations","POST",{email,role});
++        setEmail("");await load();setEvents([]);setAuditNext(null);
++        setMessage("Invitación creada en el buzón privado de desarrollo. Caduca en 15 minutos.");
++      });
++    }}>
++      <h2>Invitar personal</h2>
++      <label className="block">Correo de personal<input className="block w-full rounded border p-2" type="email"
++        required maxLength={254} disabled={busy} value={email} onChange={event=>setEmail(event.target.value)}/></label>
++      <label className="block">Rol de personal<select disabled={busy} value={role} onChange={event=>setRole(event.target.value)}>
++        {roles.map(value=><option key={value} value={value}>{labels[value]}</option>)}</select></label>
++      <button className="button-primary" disabled={busy}>Invitar cuenta</button>
++    </form>
++    <div className="flex gap-4 flex-wrap">
++      <label>Filtrar por rol<select disabled={busy} value={roleFilter} onChange={e=>setRoleFilter(e.target.value)}>
++        <option value="">Todos</option>{roles.map(value=><option key={value} value={value}>{labels[value]}</option>)}</select></label>
++      <label>Filtrar por estado<select disabled={busy} value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}>
++        <option value="">Todos</option>{["PendingActivation","Active","Suspended"].map(value=><option key={value} value={value}>{labels[value]}</option>)}</select></label>
++    </div>
++    {!rows.length&&!busy?<p>No hay cuentas para estos filtros.</p>:<div className="overflow-x-auto">
++      <table><caption className="sr-only">Personal no administrador</caption><thead><tr>
++        <th scope="col">Correo</th><th scope="col">Rol</th><th scope="col">Estado</th><th scope="col">Acciones</th>
++      </tr></thead><tbody>{rows.map(account=><StaffRow key={account.id+":"+account.version} account={account} busy={busy} run={mutate}/>)}</tbody></table>
++    </div>}
++    <div className="flex gap-4">
++      <button disabled={busy||!previous.length} className="button-secondary" onClick={()=>action(()=>
++        load(previous[previous.length-1],previous.slice(0,-1)))}>Página anterior</button>
++      <button disabled={busy||!next} className="button-secondary" onClick={()=>action(()=>load(next!,[...previous,cursor]))}>Página siguiente</button>
++      <button disabled={busy} className="button-secondary" onClick={()=>action(()=>load(cursor,previous))}>Actualizar</button>
++    </div>
++    {me.permissions.includes("staff.audit.read")&&<section className="space-y-4">
++      <h2>Auditoría de personal</h2>
++      <button disabled={busy} className="button-secondary" onClick={()=>action(()=>audit())}>Consultar auditoría</button>
++      {events.length?<ul>{events.map(event=><li key={String(event.id)}>
++        {String(event.occurredAt)} · {String(event.action)} · {String(event.result)} · {String(event.resourceId)}
++      </li>)}</ul>:<p>Sin eventos cargados.</p>}
++      {auditNext!==null&&<button disabled={busy} className="button-secondary" onClick={()=>action(()=>audit(auditNext))}>Más eventos</button>}
++    </section>}
++  </section>;
++}
+diff --git a/portalweb/src/src/app/personal/page.tsx b/portalweb/src/src/app/personal/page.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/app/personal/page.tsx
+@@ -0,0 +1,2 @@
++import StaffPanel from "@/features/staff/components/staff-panel";
++export default function Page(){return <StaffPanel/>;}
+diff --git a/app/src/lib/core/network/api_client.dart b/app/src/lib/core/network/api_client.dart
+--- a/app/src/lib/core/network/api_client.dart
++++ b/app/src/lib/core/network/api_client.dart
+@@ -16,6 +16,7 @@
+   String? _access;
+   String? _refresh;
+   Future<void>? _refreshing;
++  int _sessionGeneration = 0;
+   ApiClient({
+     http.Client? client,
+     this.baseUrl = const String.fromEnvironment(
+@@ -26,6 +27,7 @@
+ 
+   bool get authenticated => _access != null;
+   void clearSession() {
++    _sessionGeneration++;
+     _access = null;
+     _refresh = null;
+   }
+@@ -66,7 +68,7 @@
+       if (response.statusCode == 401 &&
+           retry &&
+           _refresh != null &&
+-          !path.startsWith('/auth/')) {
++          (path == '/auth/me' || !path.startsWith('/auth/'))) {
+         _refreshing ??= _rotate().whenComplete(() => _refreshing = null);
+         await _refreshing;
+         return await this.request(
+@@ -77,14 +79,18 @@
+           retry: false,
+         );
+       }
++      if (response.statusCode == 401) clearSession();
+       final parsed = response.body.isEmpty
+           ? <String, dynamic>{}
+           : jsonDecode(response.body);
+       if (response.statusCode < 200 || response.statusCode >= 300) {
+-        if (response.statusCode == 401) clearSession();
+         throw ApiFailure(
+           response.statusCode,
+-          parsed is Map
++          response.statusCode == 401 && path != '/auth/login'
++              ? 'La sesión ya no está disponible. Inicia sesión nuevamente.'
++              : response.statusCode == 403
++              ? 'No tienes permiso para realizar esta acción.'
++              : parsed is Map
+               ? (parsed['title'] ?? parsed['detail'] ?? 'Solicitud rechazada')
+                     .toString()
+               : 'Solicitud rechazada (${response.statusCode})',
+@@ -103,6 +109,7 @@
+   }
+ 
+   Future<void> login(String email, String password) async {
++    clearSession();
+     final data = await request(
+       'POST',
+       '/auth/login',
+@@ -119,6 +126,7 @@
+   }
+ 
+   Future<void> _rotate() async {
++    final generation = _sessionGeneration;
+     try {
+       final data = await request(
+         'POST',
+@@ -126,10 +134,13 @@
+         body: {'refreshToken': _refresh},
+         retry: false,
+       );
++      if (generation != _sessionGeneration) {
++        throw ApiFailure(401, 'La sesión ya no está disponible. Inicia sesión nuevamente.');
++      }
+       _access = data['accessToken'];
+       _refresh = data['refreshToken'];
+     } catch (_) {
+-      clearSession();
++      if (generation == _sessionGeneration) clearSession();
+       rethrow;
+     }
+   }
+diff --git a/app/src/lib/app/application/patient_controller.dart b/app/src/lib/app/application/patient_controller.dart
+--- a/app/src/lib/app/application/patient_controller.dart
++++ b/app/src/lib/app/application/patient_controller.dart
+@@ -12,6 +12,7 @@
+   bool busy = false;
+   bool _disposed = false;
+   String message = '';
++  JsonMap? identity;
+   JsonMap? profile;
+   int profileVersion = 0;
+   int preferencesVersion = 0;
+@@ -40,6 +41,7 @@
+   }
+ 
+   void _clearPrivateState() {
++    identity = null;
+     profile = null;
+     profileVersion = 0;
+     preferencesVersion = 0;
+@@ -71,6 +73,15 @@
+   }
+ 
+   Future<void> load() async {
++    final me = Map<String, dynamic>.from(await api.request('GET', '/auth/me') as Map);
++    if (me['role'] != 'Patient') {
++      try {
++        await auth.logout();
++      } finally {
++        _clearPrivateState();
++      }
++      throw ApiFailure(403, 'Utiliza una cuenta de paciente en esta app.');
++    }
+     final results = await Future.wait([
+       api.request('GET', '/patients/me'),
+       api.request('GET', '/services'),
+@@ -78,7 +89,8 @@
+       api.request('GET', '/notifications/me'),
+       api.request('GET', '/notifications/preferences'),
+     ]);
+-    if (_disposed) return;
++    if (_disposed || !authenticated) return;
++    identity = me;
+     final data = results[0] as Map?;
+     profile = data == null
+         ? null
+diff --git a/api/src/Telemedicina.Tests/Contracts/Program.cs b/api/src/Telemedicina.Tests/Contracts/Program.cs
+--- a/api/src/Telemedicina.Tests/Contracts/Program.cs
++++ b/api/src/Telemedicina.Tests/Contracts/Program.cs
+@@ -158,6 +158,48 @@
+             });
+         }
+ 
++        Test("StaffPermissions_DenyByDefaultAndNoAdminInheritance", () =>
++        {
++            foreach (var role in new[] { "Practitioner", "Support", "Unknown", "" })
++            {
++                Assert(!Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Allows(role, "staff.read"),
++                    "Only administrator reads staff.");
++                Assert(!Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Allows(role, "catalog.read"),
++                    "New staff roles receive no operational access.");
++            }
++            Assert(Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Allows("Administrator", "staff.invite"),
++                "Administrator may invite managed staff.");
++            Assert(!Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Allows("Administrator", "admission.manage"),
++                "Administrator does not inherit admission.");
++            Assert(!Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.IsManagedStaff("Administrator"),
++                "Administrator is not an HTTP-managed staff target.");
++            Assert(Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Allows("Admission", "patient.state.change"),
++                "Preserve admission's existing patient lifecycle permission.");
++        });
++        foreach (var environment in new[] { "Production", "Staging" })
++        {
++            Test("StaffSeed_Rejects_" + environment, () =>
++            {
++                var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = environment });
++                var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
++                {
++                    ["ConnectionStrings:Telemedicina"] = "Host=127.0.0.1;Database=synthetic;Username=synthetic",
++                    ["Milestone:Enabled"] = "true"
++                }).Build();
++                var rejected = false;
++                try
++                {
++                    Telemedicina.Api.Infrastructure.Persistence.Seeding.StaffSyntheticSeeder.Seed(
++                        new Telemedicina.Api.Infrastructure.Persistence.Database(config), config, builder.Environment);
++                }
++                catch (InvalidOperationException error)
++                {
++                    rejected = error.Message == "Synthetic accounts require explicit Development configuration.";
++                }
++                Assert(rejected, "Seed must reject before opening a database connection.");
++            });
++        }
++
+         Console.WriteLine("-------------------------------------------------");
+         Console.WriteLine($" Summary: {_passedCount} passed, {_failedCount} failed.");
+         Console.WriteLine("=================================================");
+diff --git a/api/src/Telemedicina.Tests/Integration/second_milestone_e2e.py b/api/src/Telemedicina.Tests/Integration/second_milestone_e2e.py
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/Integration/second_milestone_e2e.py
+@@ -0,0 +1,261 @@
++"""H02-SPEC-v1: synthetic localhost HTTP tests. Does not migrate, deploy or delete.
++Private env: MILESTONE_TEST_SYNTHETIC=1, Mail__Mode=development,
++Milestone__AdministratorEmail/Password, Milestone__AdmissionEmail/Password,
++Milestone__MailboxKey. Seed/migrate explicitly before running.
++Never enable HTTP tracing or print requests/responses from this suite.
++"""
++import concurrent.futures
++import json
++import os
++import secrets
++import threading
++import time
++import unittest
++import urllib.error
++import urllib.parse
++import urllib.request
++import uuid
++
++BASE = os.environ.get("MILESTONE_TEST_URL", "http://127.0.0.1:5000/api/v1")
++_calls = []
++_gate = threading.Lock()
++
++
++def request(path, method="GET", body=None, token=None, extra=None):
++    # Preserve the real shared IP auth limiter (30/min), including staff invitations.
++    limited = path.startswith("/auth/") or path.endswith("/invitation") or path.endswith("/invitations")
++    if limited:
++        while True:
++            with _gate:
++                now = time.monotonic()
++                _calls[:] = [at for at in _calls if now - at < 61]
++                if len(_calls) < 24:
++                    _calls.append(now)
++                    break
++            time.sleep(0.2)
++    headers = {"Content-Type": "application/json", "X-Telemedicina-Client": "milestone"}
++    if token:
++        headers["Authorization"] = "Bearer " + token
++    headers.update(extra or {})
++    req = urllib.request.Request(BASE + path, data=None if body is None else json.dumps(body).encode(),
++                                 headers=headers, method=method)
++    try:
++        with urllib.request.urlopen(req, timeout=25) as response:
++            return response.status, json.load(response)
++    except urllib.error.HTTPError as error:
++        try:
++            return error.code, json.load(error)
++        except (ValueError, UnicodeDecodeError):
++            return error.code, {}
++
++
++@unittest.skipUnless(os.environ.get("MILESTONE_TEST_SYNTHETIC") == "1", "Synthetic opt-in required")
++class SecondMilestone(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        if urllib.parse.urlparse(BASE).hostname not in {"localhost", "127.0.0.1", "::1"}:
++            raise RuntimeError("Only loopback APIs are allowed.")
++        if os.environ.get("Mail__Mode") != "development":
++            raise RuntimeError("Requires private development mail mode; real SMTP tests are excluded.")
++        for key in ("Milestone__AdministratorEmail", "Milestone__AdministratorPassword",
++                    "Milestone__AdmissionEmail", "Milestone__AdmissionPassword", "Milestone__MailboxKey"):
++            if not os.environ.get(key):
++                raise RuntimeError("Missing private environment configuration: " + key)
++        cls.sessions = []
++        cls.admin = cls.login(os.environ["Milestone__AdministratorEmail"],
++                              os.environ["Milestone__AdministratorPassword"])
++        cls.admission = cls.login(os.environ["Milestone__AdmissionEmail"],
++                                  os.environ["Milestone__AdmissionPassword"])
++
++    @classmethod
++    def login(cls, email, password, expected=200):
++        status, body = request("/auth/login", "POST", {"email": email, "password": password})
++        if status != expected:
++            raise AssertionError("Unexpected synthetic login status.")
++        if status != 200:
++            return None
++        session = body["data"]
++        cls.sessions.append(session)
++        return session
++
++    @classmethod
++    def tearDownClass(cls):
++        for session in cls.sessions:
++            request("/auth/logout", "POST", {}, session["accessToken"])
++
++    def status(self, response, expected):
++        self.assertEqual(response[0], expected, "HTTP status mismatch; payload intentionally omitted")
++        return response[1].get("data")
++
++    def mailbox(self, email, purpose="staff-activation"):
++        query = urllib.parse.urlencode({"email": email, "purpose": purpose})
++        body = self.status(request("/auth/dev-mailbox?" + query,
++            extra={"X-Dev-Mailbox-Key": os.environ["Milestone__MailboxKey"]}), 200)
++        return body["token"]
++
++    def invite(self, role="Support"):
++        email = "synthetic-h02-" + uuid.uuid4().hex + "@example.invalid"
++        account = self.status(request("/admin/staff/invitations", "POST", {"email": email, "role": role},
++                                      self.admin["accessToken"]), 201)
++        self.assertTrue(set(account) == {"id", "email", "role", "status", "version"},
++                        "Account response must contain only approved fields")
++        return account, self.mailbox(email)
++
++    def active_staff(self, role="Support"):
++        account, token = self.invite(role)
++        password = secrets.token_hex(24)
++        self.status(request("/auth/staff/activate", "POST", {"token": token, "password": password}), 200)
++        session = self.login(account["email"], password)
++        account["version"] += 1
++        account["status"] = "Active"
++        return account, password, session
++
++    def mutate(self, account, suffix, payload=None, method="POST", expected=200):
++        body = {"expectedVersion": account["version"], **(payload or {})}
++        result = request("/admin/staff/" + account["id"] + "/" + suffix, method, body, self.admin["accessToken"])
++        data = self.status(result, expected)
++        if expected == 200:
++            account.update(data)
++        return result
++
++    def test_01_matrix_and_no_clinical_access(self):
++        for role in ("Support", "Practitioner"):
++            account, _, session = self.active_staff(role)
++            me = self.status(request("/auth/me", token=session["accessToken"]), 200)
++            self.assertEqual(me["role"], role)
++            self.assertEqual(me["permissions"], ["identity.self"])
++            for path in ("/patients/me", "/services", "/specialties", "/practitioners", "/availability",
++                         "/appointments/me", "/appointments/" + str(uuid.uuid4()),
++                         "/admin/work-queue", "/admin/audit-events", "/admin/staff",
++                         "/admin/staff/audit-events"):
++                self.status(request(path, token=session["accessToken"]), 403)
++            self.status(request("/admin/staff/" + account["id"] + "/role", "PATCH",
++                {"role": "Administrator", "expectedVersion": account["version"]}, session["accessToken"]), 403)
++            # Unimplemented clinical paths must not become readable.
++            for path in ("/encounters/" + str(uuid.uuid4()), "/documents/" + str(uuid.uuid4()) + "/download"):
++                status, _ = request(path, token=session["accessToken"])
++                self.assertTrue(status in (403, 404), "Clinical access must remain unavailable")
++        self.status(request("/admin/work-queue", token=self.admin["accessToken"]), 403)
++        self.status(request("/services", token=self.admin["accessToken"]), 403)
++        self.status(request("/admin/staff", token=self.admission["accessToken"]), 403)
++        self.status(request("/admin/work-queue", token=self.admission["accessToken"]), 200)
++
++    def test_02_invitation_single_use_and_pending_transition(self):
++        account, token = self.invite()
++        self.mutate(account, "active", {"active": True}, "PATCH", expected=409)
++        self.status(request("/auth/dev-mailbox?" + urllib.parse.urlencode(
++            {"email": account["email"], "purpose": "staff-activation"})), 404)
++        invalid = "F" * 64 if token != "F" * 64 else "A" * 64
++        password = secrets.token_hex(24)
++        self.status(request("/auth/staff/activate", "POST", {"token": invalid, "password": password}), 400)
++        self.status(request("/auth/staff/activate", "POST", {"token": token, "password": password}), 200)
++        self.status(request("/auth/staff/activate", "POST", {"token": token, "password": password}), 400)
++
++    def test_03_suspend_reactivate_and_old_tokens(self):
++        account, password, session = self.active_staff()
++        original_version = account["version"]
++        self.status(request("/admin/staff/" + account["id"] + "/active", "PATCH",
++            {"expectedVersion": original_version}, self.admin["accessToken"]), 400)
++        unchanged = self.status(request("/auth/me", token=session["accessToken"]), 200)
++        self.assertEqual(unchanged["accountVersion"], original_version)
++        self.mutate(account, "active", {"active": False}, "PATCH")
++        self.status(request("/auth/me", token=session["accessToken"]), 401)
++        self.status(request("/auth/refresh", "POST", {"refreshToken": session["refreshToken"]}), 401)
++        self.login(account["email"], password, expected=401)
++        self.mutate(account, "active", {"active": True}, "PATCH")
++        self.status(request("/auth/me", token=session["accessToken"]), 401)
++        fresh = self.login(account["email"], password)
++        self.status(request("/auth/me", token=fresh["accessToken"]), 200)
++
++    def test_04_role_change_revokes_sessions_and_pending_invitation(self):
++        account, password, session = self.active_staff("Admission")
++        self.mutate(account, "role", {"role": "Support"}, "PATCH")
++        self.status(request("/auth/me", token=session["accessToken"]), 401)
++        fresh = self.login(account["email"], password)
++        self.status(request("/admin/work-queue", token=fresh["accessToken"]), 403)
++        pending, token = self.invite()
++        self.mutate(pending, "role", {"role": "Practitioner"}, "PATCH")
++        self.status(request("/auth/staff/activate", "POST", {"token": token, "password": secrets.token_hex(24)}), 400)
++
++    def test_05_concurrent_version_and_refresh_revocation(self):
++        account, _, session = self.active_staff()
++        path = "/admin/staff/" + account["id"] + "/role"
++        body = {"role": "Practitioner", "expectedVersion": account["version"]}
++        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
++            results = list(pool.map(lambda _: request(path, "PATCH", body, self.admin["accessToken"]), range(2)))
++        self.assertEqual(sorted(result[0] for result in results), [200, 409])
++        account.update(next(result[1]["data"] for result in results if result[0] == 200))
++        # Race refresh with revocation on a fresh session. Both valid serializations must revoke old/rotated tokens.
++        race_account, _, race = self.active_staff()
++        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
++            refresh = pool.submit(request, "/auth/refresh", "POST", {"refreshToken": race["refreshToken"]})
++            revoke = pool.submit(request, "/admin/staff/" + race_account["id"] + "/revoke-sessions", "POST",
++                                 {"expectedVersion": race_account["version"]}, self.admin["accessToken"])
++            refreshed, revoked = refresh.result(), revoke.result()
++        self.status(revoked, 200)
++        self.assertTrue(refreshed[0] in (200, 401), "Refresh must serialize with revocation")
++        self.status(request("/auth/me", token=race["accessToken"]), 401)
++        if refreshed[0] == 200:
++            rotated = refreshed[1]["data"]
++            self.status(request("/auth/me", token=rotated["accessToken"]), 401)
++            self.status(request("/auth/refresh", "POST", {"refreshToken": rotated["refreshToken"]}), 401)
++
++    def test_06_admin_target_filters_and_audit_safety(self):
++        me = self.status(request("/auth/me", token=self.admin["accessToken"]), 200)
++        self.status(request("/admin/staff/" + me["userId"] + "/revoke-sessions", "POST",
++            {"expectedVersion": me["accountVersion"]}, self.admin["accessToken"]), 403)
++        self.status(request("/admin/staff/invitations", "POST",
++            {"email": "synthetic-h02-admin@example.invalid", "role": "Administrator"}, self.admin["accessToken"]), 400)
++        self.status(request("/admin/staff?limit=101", token=self.admin["accessToken"]), 400)
++        accounts = self.status(request("/admin/staff?limit=100", token=self.admin["accessToken"]), 200)
++        self.assertTrue(all(item["role"] in ("Admission", "Practitioner", "Support") for item in accounts["items"]))
++        page = self.status(request("/admin/staff/audit-events?limit=100", token=self.admin["accessToken"]), 200)
++        self.assertTrue(all(str(event["action"]).startswith("staff.") for event in page["items"]))
++        self.assertTrue(all(set(event) == {"sequence", "id", "actorId", "action", "resourceId", "occurredAt", "result", "traceId"}
++                            for event in page["items"]), "Audit exposes only approved metadata")
++
++    def test_07_patient_regression_and_server_rejection(self):
++        email, password = "synthetic-h02-patient-" + uuid.uuid4().hex + "@example.invalid", secrets.token_hex(24)
++        self.status(request("/auth/register", "POST", {"email": email, "password": password, "role": "Administrator"}), 202)
++        self.status(request("/auth/verify", "POST", {"email": email, "token": self.mailbox(email, "verify")}), 200)
++        patient = self.login(email, password)
++        me = self.status(request("/auth/me", token=patient["accessToken"]), 200)
++        self.assertEqual(me["role"], "Patient")
++        self.status(request("/patients/me", token=patient["accessToken"]), 200)
++        self.status(request("/appointments/me", token=patient["accessToken"]), 200)
++        self.status(request("/admin/staff", token=patient["accessToken"]), 403)
++        self.status(request("/admin/staff/" + me["userId"] + "/active", "PATCH",
++                            {"active": False, "expectedVersion": me["accountVersion"]}, self.admin["accessToken"]), 404)
++
++    def test_08_concurrent_activation_and_suspend_login_refresh(self):
++        account, token = self.invite()
++        password = secrets.token_hex(24)
++        payload = {"token": token, "password": password}
++        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
++            results = list(pool.map(lambda _: request("/auth/staff/activate", "POST", payload), range(2)))
++        self.assertEqual(sorted(result[0] for result in results), [200, 400])
++        account.update({"version": account["version"] + 1, "status": "Active"})
++        original = self.login(account["email"], password)
++        barrier = threading.Barrier(3)
++
++        def run(path, method, body, token=None):
++            barrier.wait(timeout=10)
++            return request(path, method, body, token)
++
++        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
++            login = pool.submit(run, "/auth/login", "POST", {"email": account["email"], "password": password})
++            refresh = pool.submit(run, "/auth/refresh", "POST", {"refreshToken": original["refreshToken"]})
++            suspend = pool.submit(run, "/admin/staff/" + account["id"] + "/active", "PATCH",
++                                  {"active": False, "expectedVersion": account["version"]}, self.admin["accessToken"])
++            logged, refreshed, suspended = login.result(), refresh.result(), suspend.result()
++        self.status(suspended, 200)
++        for result in (logged, refreshed):
++            self.assertTrue(result[0] in (200, 401), "Identity operations must serialize with suspension")
++            if result[0] == 200:
++                self.status(request("/auth/me", token=result[1]["data"]["accessToken"]), 401)
++                self.status(request("/auth/refresh", "POST",
++                                    {"refreshToken": result[1]["data"]["refreshToken"]}), 401)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/app/src/test/core/network/second_milestone_session_test.dart b/app/src/test/core/network/second_milestone_session_test.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/test/core/network/second_milestone_session_test.dart
+@@ -0,0 +1,84 @@
++import 'dart:convert';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:http/testing.dart';
++import 'package:telemedicina_app/core/network/api_client.dart';
++import 'package:telemedicina_app/app/application/patient_controller.dart';
++
++http.Response ok(Map<String, dynamic> data) => http.Response(jsonEncode({'data': data}), 200);
++
++void main() {
++  test('Sesión revocada limpia tokens, identidad y datos del paciente', () async {
++    final api = ApiClient(client: MockClient((request) async {
++      if (request.url.path.endsWith('/auth/login')) {
++        return ok({'role': 'Patient', 'accessToken': 'synthetic-access', 'refreshToken': 'synthetic-refresh'});
++      }
++      return http.Response(jsonEncode({'code': 'SESSION_REQUIRED'}), 401);
++    }));
++    await api.login('synthetic@example.invalid', 'synthetic-password');
++    final controller = PatientController(api);
++    addTearDown(controller.dispose);
++    controller.identity = {'role': 'Patient', 'permissions': ['identity.self'], 'accountVersion': 1};
++    controller.profile = {'firstName': 'Paciente sintético'};
++    controller.appointments = [{'id': 'synthetic-appointment'}];
++    controller.notifications = [{'id': 'synthetic-notification'}];
++    expect(await controller.execute(controller.load), isFalse);
++    expect(api.authenticated, isFalse);
++    expect(controller.identity, isNull);
++    expect(controller.profile, isNull);
++    expect(controller.appointments, isEmpty);
++    expect(controller.notifications, isEmpty);
++    expect(controller.message, contains('sesión'));
++  });
++
++  test('403 comunica permiso insuficiente sin borrar una sesión válida', () async {
++    final api = ApiClient(client: MockClient((request) async {
++      if (request.url.path.endsWith('/auth/login')) {
++        return ok({'role': 'Patient', 'accessToken': 'synthetic-access', 'refreshToken': 'synthetic-refresh'});
++      }
++      return http.Response(jsonEncode({'code': 'ACCESS_DENIED'}), 403);
++    }));
++    addTearDown(api.close);
++    await api.login('synthetic@example.invalid', 'synthetic-password');
++    await expectLater(api.request('GET', '/admin/staff'),
++      throwsA(isA<ApiFailure>().having((error) => error.status, 'status', 403)
++        .having((error) => error.message, 'message', contains('permiso'))));
++    expect(api.authenticated, isTrue);
++  });
++
++  test('La identidad propia renueva acceso y conserva el contrato aditivo', () async {
++    var reads = 0;
++    final api = ApiClient(client: MockClient((request) async {
++      if (request.url.path.endsWith('/auth/login') || request.url.path.endsWith('/auth/refresh')) {
++        return ok({'role': 'Patient', 'accessToken': 'synthetic-access', 'refreshToken': 'synthetic-refresh'});
++      }
++      if (++reads == 1) return http.Response('{}', 401);
++      return ok({'userId': 'synthetic-user', 'email': 'synthetic@example.invalid', 'role': 'Patient',
++        'permissions': ['identity.self', 'profile.self'], 'accountVersion': 2});
++    }));
++    addTearDown(api.close);
++    await api.login('synthetic@example.invalid', 'synthetic-password');
++    final me = await api.request('GET', '/auth/me') as Map;
++    expect(me['accountVersion'], 2);
++    expect(me['permissions'], contains('profile.self'));
++    expect(api.authenticated, isTrue);
++  });
++
++  for (final role in ['Administrator', 'Admission', 'Practitioner', 'Support']) {
++    test('La app rechaza una cuenta $role y cierra su sesión', () async {
++      var loggedOut = false;
++      final api = ApiClient(client: MockClient((request) async {
++        if (request.url.path.endsWith('/auth/login')) {
++          return ok({'role': role, 'accessToken': 'synthetic-access', 'refreshToken': 'synthetic-refresh'});
++        }
++        loggedOut = request.url.path.endsWith('/auth/logout');
++        return ok({'loggedOut': true});
++      }));
++      addTearDown(api.close);
++      await expectLater(api.login('synthetic@example.invalid', 'synthetic-password'), throwsA(isA<ApiFailure>()));
++      expect(api.authenticated, isFalse);
++      expect(loggedOut, isTrue);
++    });
++  }
++}
+diff --git a/portalweb/src/tests/browser/second-milestone/accounts.spec.ts b/portalweb/src/tests/browser/second-milestone/accounts.spec.ts
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/tests/browser/second-milestone/accounts.spec.ts
+@@ -0,0 +1,128 @@
++import {test,expect,type Page} from "@playwright/test";
++import {randomBytes} from "node:crypto";
++
++test.describe.configure({mode:"serial"});
++test.skip(process.env.MILESTONE_TEST_SYNTHETIC!=="1"||process.env.MILESTONE_TEST_PHASE!=="second",
++  "Requires explicit synthetic second-milestone execution");
++const headers={"X-Telemedicina-Client":"milestone","X-Session-Mode":"cookie"};
++async function login(page:Page,email:string,password:string){
++  await page.goto("/login");
++  await page.getByLabel("Correo",{exact:true}).fill(email);
++  await page.getByLabel("Contraseña",{exact:true}).fill(password);
++  await page.getByRole("button",{name:"Entrar",exact:true}).click();
++}
++async function findRow(page:Page,email:string){
++  for(let index=0;index<30;index++){
++    const row=page.getByRole("row").filter({hasText:email});
++    if(await row.count())return row;
++    const next=page.getByRole("button",{name:"Página siguiente",exact:true});
++    if(await next.isDisabled())break;
++    const loaded=page.waitForResponse(response=>response.url().includes("/admin/staff?"));
++    await next.click();await loaded;
++  }
++  throw new Error("Synthetic account not found in paginated list.");
++}
++test.beforeEach(async({page,baseURL})=>{
++  expect(baseURL&&["localhost","127.0.0.1","[::1]"].includes(new URL(baseURL).hostname)).toBe(true);
++  for(const key of ["Milestone__AdministratorEmail","Milestone__AdministratorPassword","Milestone__MailboxKey"])
++    if(!process.env[key])throw new Error("Missing private environment variable: "+key);
++  page.on("dialog",dialog=>dialog.accept());
++});
++
++test("administrator invites; staff activates and receives no operative access",async({page,browser,baseURL})=>{
++  await login(page,process.env.Milestone__AdministratorEmail!,process.env.Milestone__AdministratorPassword!);
++  await expect(page.getByRole("heading",{name:"Cuentas de personal",exact:true})).toBeVisible();
++  await expect(page.getByRole("link",{name:"Admisión",exact:true})).toHaveCount(0);
++  const email="synthetic-browser-h02-"+randomBytes(8).toString("hex")+"@example.invalid";
++  await page.getByLabel("Correo de personal",{exact:true}).fill(email);
++  await page.getByLabel("Rol de personal",{exact:true}).selectOption("Support");
++  const invited=page.waitForResponse(response=>response.url().endsWith("/staff/invitations")&&response.request().method()==="POST");
++  await page.getByRole("button",{name:"Invitar cuenta",exact:true}).click();
++  expect((await invited).status()).toBe(201);
++  await expect(await findRow(page,email)).toContainText("Pendiente de activación");
++  const mailbox=await page.request.get("/api/backend/auth/dev-mailbox",{params:{email,purpose:"staff-activation"},
++    headers:{"X-Dev-Mailbox-Key":process.env.Milestone__MailboxKey!}});
++  expect(mailbox.status()).toBe(200);
++  const token=(await mailbox.json()).data.token as string;
++  const password=randomBytes(24).toString("hex");
++  const context=await browser.newContext({baseURL});
++  try{
++    const staff=await context.newPage();
++    await staff.goto("/activar-personal");
++    await staff.getByLabel("Invitación",{exact:true}).fill(token);
++    await staff.getByLabel("Nueva contraseña",{exact:true}).fill(password);
++    await staff.getByRole("button",{name:"Activar cuenta",exact:true}).click();
++    await expect(staff.getByRole("status")).toContainText("Cuenta activada");
++    expect(new URL(staff.url()).search).toBe("");
++    await expect(staff.getByLabel("Invitación",{exact:true})).toHaveCount(0);
++    await login(staff,email,password);
++    await expect(staff.getByText("Sin funciones operativas habilitadas.",{exact:true})).toBeVisible();
++    expect((await context.request.get("/api/backend/patients/me",{headers})).status()).toBe(403);
++    expect((await context.request.get("/api/backend/admin/staff",{headers})).status()).toBe(403);
++    await staff.goto("/personal");
++    await expect(staff.getByRole("status")).toContainText("No tiene permiso");
++    expect(new URL(staff.url()).pathname).toBe("/personal"); // 403 must not become a login loop
++  }finally{await context.close();}
++});
++
++test("administrator lifecycle, stale version conflict, and revoked-session redirect",async({page})=>{
++  await login(page,process.env.Milestone__AdministratorEmail!,process.env.Milestone__AdministratorPassword!);
++  await expect(page.getByRole("heading",{name:"Cuentas de personal",exact:true})).toBeVisible();
++  const email="synthetic-browser-h02-"+randomBytes(8).toString("hex")+"@example.invalid";
++  const created=await page.request.post("/api/backend/admin/staff/invitations",{headers,data:{email,role:"Support"}});
++  expect(created.status()).toBe(201);
++  const account=(await created.json()).data;
++  const mailbox=await page.request.get("/api/backend/auth/dev-mailbox",{params:{email,purpose:"staff-activation"},
++    headers:{"X-Dev-Mailbox-Key":process.env.Milestone__MailboxKey!}});
++  expect(mailbox.status()).toBe(200);
++  const activated=await page.request.post("/api/backend/auth/staff/activate",{headers,
++    data:{token:(await mailbox.json()).data.token,password:randomBytes(24).toString("hex")}});
++  expect(activated.status()).toBe(200);
++  await page.reload();
++  let row=await findRow(page,email);
++  await row.getByRole("button",{name:"Suspender",exact:true}).click();
++  await expect(row).toContainText("Suspendida");
++  await row.getByRole("button",{name:"Reactivar",exact:true}).click();
++  await expect(row).toContainText("Activa");
++  // Change via API while the rendered row still holds the previous version.
++  expect((await page.request.patch("/api/backend/admin/staff/"+account.id+"/role",{headers,
++    data:{role:"Practitioner",expectedVersion:account.version+3}})).status()).toBe(200);
++  await row.getByRole("button",{name:"Revocar sesiones",exact:true}).click();
++  await expect(page.getByRole("alert")).toContainText("Recargue");
++  await page.getByRole("button",{name:"Recargar cuentas",exact:true}).click();
++  row=await findRow(page,email);
++  await expect(row).toContainText("Profesional");
++  await row.getByRole("button",{name:"Revocar sesiones",exact:true}).click();
++  await expect(page.getByRole("status")).toContainText("Operación confirmada");
++  expect((await page.request.post("/api/backend/auth/logout",{headers,data:{}})).status()).toBe(200);
++  await page.getByRole("button",{name:"Actualizar",exact:true}).click();
++  await expect(page).toHaveURL(/\/login$/);
++});
++
++test("expired access preserves valid refresh; revoked cookie replay clears the session",async({page,context})=>{
++  await login(page,process.env.Milestone__AdministratorEmail!,process.env.Milestone__AdministratorPassword!);
++  await expect(page.getByRole("heading",{name:"Cuentas de personal",exact:true})).toBeVisible();
++  const update=page.getByRole("button",{name:"Actualizar",exact:true});
++  await expect(update).toBeEnabled();
++  const access=(await context.cookies()).find(cookie=>cookie.name==="tm_access");
++  expect(Boolean(access)).toBe(true);
++  // Real browser cookie expiry: only access expires; refresh remains HttpOnly and valid.
++  await context.addCookies([{...access!,expires:Math.floor(Date.now()/1000)-60}]);
++  expect((await context.cookies()).some(cookie=>cookie.name==="tm_refresh")).toBe(true);
++  const refreshed=page.waitForResponse(response=>response.url().endsWith("/auth/refresh")&&response.request().method()==="POST");
++  await update.click();
++  expect((await refreshed).status()).toBe(200);
++  await expect(update).toBeEnabled();
++  await expect(page.getByRole("heading",{name:"Cuentas de personal",exact:true})).toBeVisible();
++  expect(new URL(page.url()).pathname).toBe("/personal");
++  // Replay the in-memory cookie pair after the server has actually revoked its family.
++  // Never save these cookies as storageState, logs, screenshots or traces.
++  const revokedCookies=(await context.cookies()).filter(cookie=>["tm_access","tm_refresh"].includes(cookie.name));
++  expect((await page.request.post("/api/backend/auth/logout",{headers,data:{}})).status()).toBe(200);
++  await context.addCookies(revokedCookies);
++  const rejectedRefresh=page.waitForResponse(response=>response.url().endsWith("/auth/refresh")&&response.request().method()==="POST");
++  await update.click();
++  expect((await rejectedRefresh).status()).toBe(401);
++  await expect(page).toHaveURL(/\/login$/);
++  expect((await context.cookies()).some(cookie=>["tm_access","tm_refresh"].includes(cookie.name))).toBe(false);
++});
+diff --git a/portalweb/src/playwright.second.config.ts b/portalweb/src/playwright.second.config.ts
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/playwright.second.config.ts
+@@ -0,0 +1,12 @@
++import {defineConfig} from "@playwright/test";
++import path from "node:path";
++import base from "./playwright.config";
++
++const artifacts=path.resolve(__dirname,"../../hitos/portalweb/segundo-hito-portalweb/evidencias/playwright");
++export default defineConfig({
++  ...base,
++  testMatch:"**/second-milestone/*.spec.ts",
++  outputDir:path.join(artifacts,"resultados"),
++  reporter:[["list"],["json",{outputFile:path.join(artifacts,"playwright-results.json")}]],
++  use:{...base.use,trace:"off",video:"off",screenshot:"off"},
++});
+diff --git a/api/src/SEGUNDO_HITO.md b/api/src/SEGUNDO_HITO.md
+new file mode 100644
+--- /dev/null
++++ b/api/src/SEGUNDO_HITO.md
+@@ -0,0 +1,106 @@
++# H02 — Roles y operación de cuentas
++
++Spec aprobada: H02-SPEC-v1; ejecución H02-2026-11-05-v1.
++Alcance local sintético. Este documento acompaña un parche propuesto y no afirma integración ni producción.
++
++## Autoridad y límites
++
++Una organización implícita y un rol por usuario. El registro público siempre crea Patient.
++Patient y Admission conservan sus funciones. Administrator no hereda Admission.
++Practitioner y Support solo disponen de identidad, refresh y logout.
++Tutor, auditor, coordinador, expedientes, documentos y funciones clínicas permanecen fuera de alcance.
++
++Solo Administrator gestiona Admission, Practitioner y Support. Ningún endpoint administra
++Administrator, el propio actor ni pacientes por las nuevas rutas de personal.
++Admission conserva su ruta existente para suspender/reactivar pacientes.
++
++Permisos efectivos cerrados en AccessCatalog; no se admiten permisos del cliente.
++El portal representa capacidades y la API comprueba cada operación.
++Las lecturas de catálogo/disponibilidad/citas ahora limitan explícitamente Patient/Admission.
++
++## Contrato
++
++Prefijo /api/v1. Respuestas ApiResponse<T>; errores ErrorApiResponse con code/traceId.
++Las anotaciones de controllers y DTOs alimentan el OpenAPI existente /openapi/v1.json.
++
++| Ruta | Entrada | Salida data |
++|---|---|---|
++| GET /auth/me | sesión | userId,email,role,permissions[],accountVersion |
++| GET /admin/staff | after UUID,limit 1–100 (20),role,status | items[{id,email,role,status,version}],next UUID/null |
++| POST /admin/staff/invitations | email,role | cuenta pendiente; 201; sin token |
++| POST /admin/staff/{id}/invitation | expectedVersion | cuenta actualizada; sin token |
++| POST /auth/staff/activate | token,password | activated; sin sesión |
++| PATCH /admin/staff/{id}/role | role,expectedVersion | cuenta actualizada |
++| PATCH /admin/staff/{id}/active | active,expectedVersion | cuenta actualizada |
++| POST /admin/staff/{id}/revoke-sessions | expectedVersion | cuenta actualizada |
++| GET /admin/staff/audit-events | after secuencia,limit 1–100 (20) | items metadatos saneados,next secuencia/null |
++
++Roles modificables: Admission,Practitioner,Support. Estados: PendingActivation,Active,Suspended.
++UUID textual canónico. Correo normalizado de hasta 254 caracteres. Contraseña 12–128 caracteres.
++Versiones positivas; toda mutación/reenvío incrementa versión. Los filtros desconocidos se rechazan.
++Errores: 400 VALIDATION_FAILED/INVALID_CHALLENGE; 401 SESSION_REQUIRED/INVALID_CREDENTIALS;
++403 ACCESS_DENIED; 404 NOT_FOUND; 409 ACCOUNT_VERSION_CONFLICT/ACCOUNT_ALREADY_EXISTS/
++ACCOUNT_TRANSITION_INVALID; 429 RATE_LIMITED.
++Solo el administrador autorizado observa duplicados; endpoints públicos mantienen neutralidad.
++
++## Activación y sesión
++
++Invitación de 256 bits, hash persistido, uso único, 15 minutos. Reenvío invalida la anterior y
++requiere 60 segundos desde la última emisión. Activación y reenvío comparten la política auth
++existente de 30 solicitudes/minuto por IP, sin cola. Se conserva bloqueo tras cinco fallos de
++contraseña durante cinco minutos. No se añaden envíos SMTP para invitaciones.
++
++El token solo está disponible en el buzón privado Development, autenticado con
++X-Dev-Mailbox-Key y configuración privada Milestone:MailboxKey. Nunca lo devuelve una ruta
++administrativa ni se incluye en logs, auditoría, outbox, URL o evidencias. La pantalla
++/activar-personal recibe el token en un campo enmascarado, exclusivamente en memoria.
++No pasar tokens por query strings.
++
++Activación requiere invitación pendiente; no inicia sesión automáticamente. active=true
++no activa una cuenta pendiente. Suspensión/cambio de rol revocan sesiones e invitaciones.
++Reactivación no recupera tokens. Revocar sesiones deja permitido un nuevo login.
++Cambio de rol pendiente requiere nueva invitación. No se borran cuentas.
++
++Todas las escrituras protegidas revalidan la sesión después de bloquear al actor.
++Administración bloquea actor/destinatario en orden estable. Login/refresh/logout y activación
++siguen orden usuario antes de sesión/invitación. Una revocación observa también rotaciones
++terminadas antes de adquirir el bloqueo. La vigencia absoluta de sesión no se amplía.
++Auditoría y mutación comparten transacción; fallo de auditoría revierte la operación.
++Los rechazos no confirman existencia de destinatarios. Auditoría de personal solo expone
++sequence,id,actorId,action,resourceId,occurredAt,result,traceId. Eventos históricos: Legacy.
++
++Portal mantiene cookies HttpOnly. Flutter conserva tokens solo en memoria, consume /auth/me,
++rechaza personal y limpia datos privados al invalidarse sesión. 401 solicita autenticación;
++403 comunica ausencia de permiso sin bucle de login.
++
++## Bootstrap explícito
++
++Migración 005 se ejecuta únicamente mediante la operación --migrate ya existente.
++--seed-synthetic conserva el seed de Admission y ahora también valida Development internamente.
++--seed-staff-synthetic valida Development y Milestone:Enabled dentro del seeder.
++Requiere Milestone:AdministratorEmail/AdministratorPassword privados; opcionalmente pares
++PractitionerEmail/PractitionerPassword y SupportEmail/SupportPassword.
++No copiar valores a archivos versionados, CLI, capturas ni informes. El seed no cambia roles,
++contraseñas ni estados de cuentas existentes. Una colisión de rol aborta.
++El comando original de seed aporta catálogo y Admission; Patient puede registrarse/verificarse
++sintéticamente. Los seeds no representan acreditación profesional.
++
++## Verificación propuesta, no ejecutada
++
++Después de revisar/aplicar el parche en un checkout autorizado y una BD sintética:
++- Compilar API .NET 10 y ejecutar Telemedicina.Tests.
++- Ejecutar Integration/second_milestone_e2e.py con MILESTONE_TEST_SYNTHETIC=1,
++  Mail__Mode=development, credenciales privadas y API loopback.
++- Ejecutar pruebas Flutter y análisis en app/src.
++- Compilar portal y ejecutar Playwright con playwright.second.config.ts,
++  MILESTONE_TEST_PHASE=second y MILESTONE_TEST_SYNTHETIC=1.
++- Ejecutar regresión del primer hito con los mismos límites sintéticos.
++
++No activar SMTP real en estas pruebas. No guardar storageState, HAR, trazas ni videos.
++El runner HTTP conserva el límite real de autenticación; puede tardar varios minutos.
++Las cuentas sintéticas creadas persisten y deben revisarse mediante el ciclo administrativo.
++
++Pendientes de ejecución dirigida: vencimiento real de invitación/reenvío, fallo de auditoría
++con rollback, segundo administrador como destinatario, pruebas de bloqueos bajo carga,
++arranque migrado, inspección OpenAPI generado, accesibilidad, revisión PR y UAT.
++PASS de formato del diff no equivale a compilación, aceptación funcional ni seguridad.
+diff --git a/portalweb/src/tests/browser/first-milestone/flow.spec.ts b/portalweb/src/tests/browser/first-milestone/flow.spec.ts
+--- a/portalweb/src/tests/browser/first-milestone/flow.spec.ts
++++ b/portalweb/src/tests/browser/first-milestone/flow.spec.ts
+@@ -26,7 +26,7 @@
+ test("unauthenticated navigation redirects to login",async({page})=>{
+   await page.goto("/admision");
+   await expect(page).toHaveURL(/\/login$/);
+-  await expect(page.getByRole("heading",{name:"Acceso de admisión"})).toBeVisible();
++  await expect(page.getByRole("heading",{name:"Acceso al portal"})).toBeVisible();
+ });
+ 
+ test("password login creates HttpOnly cookies without exposing tokens",async({page,context})=>{
+diff --git a/api/src/Telemedicina.Tests/Integration/milestone_e2e.py b/api/src/Telemedicina.Tests/Integration/milestone_e2e.py
+--- a/api/src/Telemedicina.Tests/Integration/milestone_e2e.py
++++ b/api/src/Telemedicina.Tests/Integration/milestone_e2e.py
+@@ -2,13 +2,9 @@
+ Run with MILESTONE_TEST_SYNTHETIC=1 against a local, development-only API.
+ The test requires a separately provisioned synthetic database and admission account.
+ """
+-import base64
+ import concurrent.futures
+-import hashlib
+-import hmac
+ import json
+ import os
+-import struct
+ import time
+ import unittest
+ import urllib.error
+@@ -44,12 +40,6 @@
+     except urllib.error.HTTPError as error:
+         # Do not print bodies: credentials and patient data never belong in test output.
+         return error.code, json.load(error) if raw else None
+-
+-def otp(secret):
+-    key = base64.b32decode(secret.upper() + "=" * ((8 - len(secret) % 8) % 8))
+-    digest = hmac.new(key, struct.pack(">Q", int(time.time()) // 30), hashlib.sha1).digest()
+-    offset = digest[-1] & 15
+-    return str((struct.unpack(">I", digest[offset:offset+4])[0] & 0x7fffffff) % 1000000).zfill(6)
+ 
+ @unittest.skipUnless(os.environ.get("MILESTONE_TEST_SYNTHETIC") == "1",
+     "Requires explicit synthetic test environment")
+@@ -229,11 +219,15 @@
+         self.assertEqual(status, 200)
+         user.update(session); user["password"] = password
+ 
+-    def test_08_staff_mfa_required(self):
++    def test_08_staff_password_policy_development_only(self):
++        # Approved development policy: staff signs in with its password.
+         credentials = {"email": os.environ["Milestone__AdmissionEmail"],
+             "password": os.environ["Milestone__AdmissionPassword"]}
+-        self.assertEqual(request("/auth/login", "POST", credentials)[0], 401)
+-        credentials["otp"] = "ABCDEF"
++        status, session = request("/auth/login", "POST", credentials)
++        self.assertEqual(status, 200)
++        self.assertEqual(request("/auth/me", token=session["accessToken"])[1]["role"], "Admission")
++        self.assertEqual(request("/auth/logout", "POST", {}, session["accessToken"])[0], 200)
++        credentials["password"] = uuid.uuid4().hex + uuid.uuid4().hex
+         self.assertEqual(request("/auth/login", "POST", credentials)[0], 401)
+ 
+     def test_09_persistence_across_actual_process_restart(self):
+diff --git a/app/src/test/features/notifications/notifications_view_test.dart b/app/src/test/features/notifications/notifications_view_test.dart
+--- a/app/src/test/features/notifications/notifications_view_test.dart
++++ b/app/src/test/features/notifications/notifications_view_test.dart
+@@ -22,6 +22,14 @@
+           'role': 'Patient',
+           'accessToken': 'synthetic',
+           'refreshToken': 'synthetic-refresh',
++        };
++      } else if (path.endsWith('/auth/me')) {
++        data = {
++          'userId': 'synthetic-patient',
++          'email': 'synthetic@example.invalid',
++          'role': 'Patient',
++          'permissions': ['identity.self', 'profile.self', 'notifications.self'],
++          'accountVersion': 1,
+         };
+       } else if (path.endsWith('/notifications/preferences')) {
+         if (request.method == 'PATCH') {
+diff --git a/portalweb/src/tests/browser/support/totp.ts b/portalweb/src/tests/browser/support/totp.ts
+--- a/portalweb/src/tests/browser/support/totp.ts
++++ b/portalweb/src/tests/browser/support/totp.ts
+@@ -1,18 +1 @@
+-import {createHmac} from "node:crypto";
+-
+-export function totp(secret:string) {
+-  const alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+-  let buffer=0,bits=0;
+-  const key:number[]=[];
+-  for(const character of secret.replace(/=+$/,"").toUpperCase()){
+-    const index=alphabet.indexOf(character);
+-    if(index<0) throw new Error("Invalid synthetic TOTP configuration");
+-    buffer=(buffer<<5)|index;bits+=5;
+-    if(bits>=8){bits-=8;key.push((buffer>>bits)&255);}
+-  }
+-  const counter=Buffer.alloc(8);
+-  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now()/30000)));
+-  const digest=createHmac("sha1",Buffer.from(key)).update(counter).digest();
+-  const offset=digest[digest.length-1]&15;
+-  return ((digest.readUInt32BE(offset)&0x7fffffff)%1000000).toString().padStart(6,"0");
+-}
++// Retired authentication helper. No test code remains.

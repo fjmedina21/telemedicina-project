@@ -1,0 +1,832 @@
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoResetOptions.cs b/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoResetOptions.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoResetOptions.cs
+@@ -0,0 +1,32 @@
++using System.Globalization;
++
++namespace Telemedicina.Api.Infrastructure.Persistence.Seeding;
++
++public sealed class DemoResetException(string code) : Exception(code)
++{
++    public string Code { get; } = code;
++}
++
++public sealed record DemoResetOptions(bool Execute, DateOnly? BaseDate)
++{
++    public static DemoResetOptions Parse(string[] args)
++    {
++        var command = false; var execute = false; DateOnly? date = null;
++        for (var i = 0; i < args.Length; i++)
++        {
++            switch (args[i])
++            {
++                case "--reset-demo-data" when !command: command = true; break;
++                case "--execute" when !execute: execute = true; break;
++                case "--base-date" when date is null && i + 1 < args.Length:
++                    if (!DateOnly.TryParseExact(args[++i], "yyyy-MM-dd", CultureInfo.InvariantCulture,
++                        DateTimeStyles.None, out var parsed))
++                        throw new DemoResetException("DEMO_INVALID_BASE_DATE");
++                    date = parsed; break;
++                default: throw new DemoResetException("DEMO_INVALID_ARGUMENTS");
++            }
++        }
++        if (!command) throw new DemoResetException("DEMO_INVALID_ARGUMENTS");
++        return new DemoResetOptions(execute, date);
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoDataPlan.cs b/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoDataPlan.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoDataPlan.cs
+@@ -0,0 +1,169 @@
++using System.ComponentModel.DataAnnotations;
++using System.Security.Cryptography;
++using System.Text;
++using System.Text.Json;
++using Telemedicina.Api.Features.Patients;
++using static Telemedicina.Api.Infrastructure.Authentication.Security;
++
++namespace Telemedicina.Api.Infrastructure.Persistence.Seeding;
++
++// No generated ToString() containing credentials; hashes stay internal to the writer.
++public sealed class DemoUser(string id, string email, string role, string passwordHash)
++{
++    public string Id { get; } = id;
++    public string Email { get; } = email;
++    public string Role { get; } = role;
++    internal string PasswordHash { get; } = passwordHash;
++}
++public sealed record DemoPatient(string UserId, ProfileRequest Profile);
++public sealed record DemoService(string Id, string PractitionerId, string Name, string Specialty,
++    string PractitionerName, int Duration);
++public sealed record DemoSlot(string Id, string ServiceId, string PractitionerId, DateTime StartUtc,
++    DateTime EndUtc, bool Blocked);
++public sealed record DemoAppointment(string Id, string UserId, DemoSlot Slot, string Status,
++    string Coverage, string Insurer, string MemberLast4, string? ReviewerId)
++{
++    public bool HasTransition => Status != "PendingValidation" || Coverage != "Pending";
++}
++
++public sealed class DemoDataPlan
++{
++    public const string Version = "SEED-REALISTA-v1";
++    public DateOnly BaseDate { get; }
++    public IReadOnlyList<DemoUser> Users { get; }
++    public IReadOnlyList<DemoPatient> Patients { get; }
++    public IReadOnlyList<DemoService> Services { get; }
++    public IReadOnlyList<DemoSlot> Slots { get; }
++    public IReadOnlyList<DemoAppointment> Appointments { get; }
++
++    private DemoDataPlan(DateOnly date, List<DemoUser> users, List<DemoPatient> patients,
++        List<DemoService> services, List<DemoSlot> slots, List<DemoAppointment> appointments)
++    {
++        BaseDate = date; Users = users; Patients = patients; Services = services; Slots = slots;
++        Appointments = appointments;
++    }
++
++    public static string Id(string key)
++    {
++        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(Version + ":" + key))[..16];
++        // Deterministic UUID-shaped business identifiers; not used for tokens or secrets.
++        bytes[7] = (byte)((bytes[7] & 15) | 80); bytes[8] = (byte)((bytes[8] & 63) | 128);
++        return new Guid(bytes).ToString();
++    }
++    public static DateOnly Today() =>
++        DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow,
++            TimeZoneInfo.FindSystemTimeZoneById("America/Santo_Domingo")).DateTime);
++    public static DateTime Utc(DateOnly date, int hour, int minute = 0) =>
++        new DateTimeOffset(date.Year, date.Month, date.Day, hour, minute, 0, TimeSpan.FromHours(-4)).UtcDateTime;
++
++    public static DemoDataPlan Create(DateOnly date, IConfiguration configuration)
++    {
++        if (date.Year is < 2020 or > 9998) throw new DemoResetException("DEMO_INVALID_BASE_DATE");
++        var primaryAdmin = Email(configuration["Milestone:AdministratorEmail"]);
++        var primaryAdmission = Email(configuration["Milestone:AdmissionEmail"]);
++        var adminPassword = Secret(configuration["Milestone:AdministratorPassword"]);
++        var admissionPassword = Secret(configuration["Milestone:AdmissionPassword"]);
++        var demoPassword = Secret(configuration["Milestone:DemoPassword"]);
++
++        var firstNames = new[] { "Ana María", "José Luis", "María Isabel", "Juan Carlos", "Laura Patricia",
++            "Carlos Alberto", "Rosa Elena", "Miguel Ángel", "Carmen Lucía", "Pedro Antonio", "Diana Carolina",
++            "Luis Eduardo", "Teresa Milagros", "Andrés Manuel", "Paola Cristina", "Rafael Enrique",
++            "Sofía Mercedes", "Daniel Alejandro", "Julia Beatriz", "Francisco Javier", "Elena Victoria",
++            "Gabriel Esteban", "Clara Josefina", "Manuel Arturo" };
++        var surnames = new[] { "Mejía Santos", "Pérez Núñez", "García Díaz", "Rodríguez Peña", "Reyes Gómez",
++            "Castillo Ortiz", "Vargas Jiménez", "Fernández Cruz", "Ramírez Abreu", "Martínez Rosario",
++            "Sánchez Guzmán", "Duarte Medina", "Méndez Acosta", "Torres Valdez", "Morales Paredes",
++            "Espinal Cabrera", "Báez Tavárez", "Herrera Soriano", "Vásquez Paulino", "De la Rosa Gil",
++            "Núñez Cordero", "Peña Santana", "Cruz Valera", "Ortiz Báez" };
++        var cities = new[] { "Santo Domingo", "Santiago", "La Vega", "San Cristóbal" };
++        var streets = new[] { "Calle del Parque", "Calle Las Palmas", "Calle Los Almendros", "Calle Primavera" };
++
++        // Validate every email and credential before computing hashes or opening a connection.
++        var emails = new List<string> { primaryAdmin, primaryAdmission, "admision.auxiliar.demo@example.invalid",
++            "profesional.uno.demo@example.invalid", "profesional.dos.demo@example.invalid", "soporte.demo@example.invalid" };
++        emails.AddRange(Enumerable.Range(1, 24).Select(i => $"paciente.{i:00}.demo@example.invalid"));
++        if (emails.Distinct(StringComparer.OrdinalIgnoreCase).Count() != 30)
++            throw new DemoResetException("DEMO_EMAIL_COLLISION");
++
++        var users = new List<DemoUser>
++        {
++            new(Id("staff:administrator"), primaryAdmin, "Administrator", Password(adminPassword)),
++            new(Id("staff:admission:1"), primaryAdmission, "Admission", Password(admissionPassword)),
++            new(Id("staff:admission:2"), emails[2], "Admission", Password(demoPassword)),
++            new(Id("staff:practitioner:1"), emails[3], "Practitioner", Password(demoPassword)),
++            new(Id("staff:practitioner:2"), emails[4], "Practitioner", Password(demoPassword)),
++            new(Id("staff:support"), emails[5], "Support", Password(demoPassword))
++        };
++        var patients = new List<DemoPatient>();
++        for (var i = 0; i < 24; i++)
++        {
++            var user = new DemoUser(Id($"patient:{i + 1:00}"), emails[i + 6], "Patient", Password(demoPassword));
++            users.Add(user);
++            patients.Add(new DemoPatient(user.Id, new ProfileRequest(
++                firstNames[i], surnames[i] + " (DEMO)", new DateOnly(1965 + i, 1 + i % 12, 1 + i % 26),
++                $"+180955501{i + 1:00}", $"DEMO · {streets[i % 4]} No. {10 + i}, Sector de demostración, {cities[i % 4]}",
++                $"Contacto ficticio {i + 1:00} (DEMO)", $"+180955501{51 + i:00}",
++                [], [], [], 1)));
++        }
++        var names = new[] { "Medicina general", "Medicina familiar", "Seguimiento de medicina interna",
++            "Orientación psicológica", "Orientación nutricional", "Orientación dermatológica" };
++        var practitionerNames = new[] { "Natalia del Carmen Reyes", "Samuel Antonio Méndez", "Verónica Isabel Cruz",
++            "Diego Rafael Cabrera", "Lucía Mercedes Ortiz", "Emilio José Vargas" };
++        var durations = new[] { 30, 30, 30, 40, 20, 20 };
++        var services = Enumerable.Range(0, 6).Select(i => new DemoService(
++            Id($"service:{i}"), Id($"catalog-practitioner:{i}"), names[i] + " · DEMO", names[i],
++            practitionerNames[i] + " (DEMO)", durations[i])).ToList();
++
++        var days = new List<DateOnly>(); var cursor = date;
++        while (days.Count < 10)
++        {
++            cursor = cursor.AddDays(1);
++            if (cursor.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday)) days.Add(cursor);
++        }
++        var slots = new List<DemoSlot>();
++        foreach (var day in days)
++            foreach (var service in services)
++                foreach (var startHour in new[] { 9, 14 })
++                    for (var minute = 0; minute + service.Duration <= 180; minute += service.Duration)
++                    {
++                        var start = Utc(day, startHour).AddMinutes(minute);
++                        slots.Add(new DemoSlot(Id($"slot:{day:yyyy-MM-dd}:{service.Id}:{startHour}:{minute}"),
++                            service.Id, service.PractitionerId, start, start.AddMinutes(service.Duration),
++                            startHour == 9 && minute == 0));
++                    }
++        // Spread the 30 examples across six services and five days; avoid blocked slots.
++        var chosen = new List<DemoSlot>();
++        for (var dayIndex = 0; dayIndex < 5; dayIndex++)
++            foreach (var service in services)
++                chosen.Add(slots.First(s => s.ServiceId == service.Id &&
++                    DateOnly.FromDateTime(s.StartUtc.AddHours(-4)) == days[dayIndex] && !s.Blocked));
++        var appointments = chosen.Select((slot, i) =>
++        {
++            var status = i < 12 ? "PendingValidation" : i < 20 ? "Confirmed" :
++                i < 26 ? "Cancelled" : "PendingValidation";
++            var coverage = i is >= 12 and < 20 ? "Approved" : i >= 26 ? "Denied" : "Pending";
++            return new DemoAppointment(Id($"appointment:{i + 1:00}"), patients[i % 24].UserId, slot, status,
++                coverage, new[] { "Aseguradora Demo Norte", "Aseguradora Demo Sur", "Aseguradora Demo Centro" }[i % 3],
++                (1000 + i).ToString(System.Globalization.CultureInfo.InvariantCulture),
++                coverage is "Approved" or "Denied" ? users[1 + i % 2].Id : null);
++        }).ToList();
++        if (slots.Count != 800 || slots.Count(s => s.Blocked) != 60 ||
++            appointments.Any(a => a.Slot.Blocked) || appointments.Select(a => a.Slot.Id).Distinct().Count() != 30)
++            throw new DemoResetException("DEMO_PLAN_INVALID");
++        return new DemoDataPlan(date, users, patients, services, slots, appointments);
++    }
++
++    private static string Email(string? value)
++    {
++        if (string.IsNullOrWhiteSpace(value) || value.Trim().Length > 254 ||
++            !new EmailAddressAttribute().IsValid(value.Trim()))
++            throw new DemoResetException("DEMO_INVALID_CREDENTIALS");
++        return value.Trim().ToLowerInvariant();
++    }
++    private static string Secret(string? value)
++    {
++        if (value is null || value.Length is < 12 or > 128 || string.IsNullOrWhiteSpace(value))
++            throw new DemoResetException("DEMO_INVALID_CREDENTIALS");
++        return value;
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoDataReset.cs b/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoDataReset.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoDataReset.cs
+@@ -0,0 +1,253 @@
++using System.Data;
++using System.Text.Json;
++using Npgsql;
++using static Telemedicina.Api.Infrastructure.Persistence.Database;
++
++namespace Telemedicina.Api.Infrastructure.Persistence.Seeding;
++
++public sealed record DemoResetReport(string Dataset, string BaseDate, bool Committed,
++    IReadOnlyDictionary<string, long> Before, IReadOnlyDictionary<string, long> Planned,
++    IReadOnlyDictionary<string, long>? After, int BlockedSlots);
++
++public static class DemoDataReset
++{
++    // Closed manifest. Dynamic SQL below uses only these constants, never user input.
++    public static IReadOnlyList<string> Tables { get; } = Array.AsReadOnly(new[]
++    {
++        "users", "profiles", "sessions", "challenges", "dev_mailbox", "services", "practitioners",
++        "slots", "appointments", "appointment_history", "idempotency", "audit", "practitioner_services",
++        "notification_preferences", "notifications", "email_outbox", "staff_invitations"
++    });
++    private const string Schema = "telemedicina_m1";
++    private static string Qualified(string table) => "\"" + Schema + "\".\"" + table + "\"";
++    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
++
++    public static void RequireEnvironment(IConfiguration configuration, IHostEnvironment environment)
++    {
++        if (!environment.IsDevelopment() || !configuration.GetValue<bool>("Milestone:Enabled") ||
++            configuration["Mail:Mode"] != "development")
++            throw new DemoResetException("DEMO_DEVELOPMENT_ONLY");
++    }
++
++    public static DemoResetReport Run(Database database, IConfiguration configuration, IHostEnvironment environment,
++        DemoResetOptions options) => RunCore(database, configuration, environment, options, null);
++
++    // Deliberately internal: only the test assembly can inject a rollback probe, never CLI/HTTP/config.
++    internal static DemoResetReport RunCore(Database database, IConfiguration configuration,
++        IHostEnvironment environment, DemoResetOptions options, Action? afterTruncate)
++    {
++        RequireEnvironment(configuration, environment);
++        var plan = DemoDataPlan.Create(options.BaseDate ?? DemoDataPlan.Today(), configuration);
++        if (plan.Slots.Min(s => s.StartUtc) <= DateTime.UtcNow)
++            throw new DemoResetException("DEMO_BASE_DATE_PAST");
++        using var c = database.Open();
++        using var t = c.BeginTransaction(options.Execute ? IsolationLevel.ReadCommitted : IsolationLevel.RepeatableRead);
++        if (options.Execute)
++        {
++            foreach (var key in new[] { 19041301, 19041302, 19041303, 19041304 })
++                if (Scalar(c, t, "SELECT pg_try_advisory_xact_lock(@key)", ("key", key)) is not true)
++                    throw new DemoResetException("DEMO_BUSY");
++        }
++        if (!options.Execute) Execute(c, t, "SET TRANSACTION READ ONLY");
++        Preflight(c, t);
++        if (options.Execute)
++        {
++            var locked = Tables.Append("schema_versions").Order(StringComparer.Ordinal).Select(Qualified);
++            Execute(c, t, "LOCK TABLE " + string.Join(",", locked) + " IN ACCESS EXCLUSIVE MODE NOWAIT");
++            // Recheck manifest/versions/triggers after all target locks, before the first write.
++            Preflight(c, t);
++        }
++        var before = Counts(c, t);
++        var expected = Expected();
++        if (!options.Execute)
++            return new DemoResetReport(DemoDataPlan.Version, plan.BaseDate.ToString("yyyy-MM-dd"), false,
++                before, expected, null, 60);
++
++        Execute(c, t, "ALTER TABLE telemedicina_m1.audit DISABLE TRIGGER audit_no_mutation");
++        Execute(c, t, "ALTER TABLE telemedicina_m1.appointment_history DISABLE TRIGGER history_no_mutation");
++        Execute(c, t, "TRUNCATE TABLE " + string.Join(",", Tables.Select(Qualified)) + " RESTART IDENTITY");
++        Execute(c, t, "ALTER TABLE telemedicina_m1.audit ENABLE TRIGGER audit_no_mutation");
++        Execute(c, t, "ALTER TABLE telemedicina_m1.appointment_history ENABLE TRIGGER history_no_mutation");
++        afterTruncate?.Invoke();
++        // Existing trigger SQL is unqualified. Do not let it resolve to public.
++        Execute(c, t, "SET LOCAL search_path TO telemedicina_m1, pg_catalog");
++        Insert(c, t, plan);
++        AssertIntegrity(c, t, expected);
++        var after = Counts(c, t);
++        t.Commit();
++        return new DemoResetReport(DemoDataPlan.Version, plan.BaseDate.ToString("yyyy-MM-dd"), true,
++            before, expected, after, 60);
++    }
++
++    private static void Preflight(NpgsqlConnection c, NpgsqlTransaction t)
++    {
++        var tables = Rows(c, t, """
++            SELECT r.relname,r.relkind::text AS kind,
++                (pg_has_role(current_user,r.relowner,'USAGE') OR
++                 (SELECT rolsuper FROM pg_roles WHERE rolname=current_user)) AS can_own
++            FROM pg_class r JOIN pg_namespace n ON n.oid=r.relnamespace
++            WHERE n.nspname='telemedicina_m1' AND r.relkind IN ('r','p','f') ORDER BY r.relname
++            """);
++        if (!tables.Select(row => (string)row["relname"]!).SequenceEqual(
++            Tables.Append("schema_versions").Order(StringComparer.Ordinal), StringComparer.Ordinal) ||
++            tables.Any(row => (string)row["kind"]! != "r"))
++            throw new DemoResetException("DEMO_SCHEMA_MANIFEST_MISMATCH");
++        if (tables.Any(row => row["can_own"] is not true))
++            throw new DemoResetException("DEMO_OWNER_REQUIRED");
++        var versions = Rows(c, t, "SELECT version FROM telemedicina_m1.schema_versions ORDER BY version");
++        if (!versions.Select(row => (int)row["version"]!).SequenceEqual(new[] { 1, 2, 3, 4, 5 }))
++            throw new DemoResetException("DEMO_SCHEMA_VERSION_MISMATCH");
++        // Reject references that would require CASCADE or truncate another schema/table.
++        if (Convert.ToInt64(Scalar(c, t, """
++            SELECT count(*) FROM pg_constraint k
++            JOIN pg_class parent ON parent.oid=k.confrelid JOIN pg_namespace pn ON pn.oid=parent.relnamespace
++            JOIN pg_class child ON child.oid=k.conrelid JOIN pg_namespace cn ON cn.oid=child.relnamespace
++            WHERE k.contype='f' AND pn.nspname='telemedicina_m1' AND parent.relname=ANY(@tables)
++            AND (cn.nspname<>'telemedicina_m1' OR NOT(child.relname=ANY(@tables)))
++            """, ("tables", Tables.ToArray()))) != 0)
++            throw new DemoResetException("DEMO_EXTERNAL_REFERENCE");
++        var triggers = Rows(c, t, """
++            SELECT r.relname,g.tgname,g.tgtype::integer AS type,g.tgenabled::text AS enabled,
++                p.proname,nf.nspname AS function_schema,g.tgnargs::integer AS arguments,
++                g.tgqual IS NULL AS unconditional
++            FROM pg_trigger g JOIN pg_class r ON r.oid=g.tgrelid
++            JOIN pg_namespace n ON n.oid=r.relnamespace JOIN pg_proc p ON p.oid=g.tgfoid
++            JOIN pg_namespace nf ON nf.oid=p.pronamespace
++            WHERE n.nspname='telemedicina_m1' AND NOT g.tgisinternal ORDER BY g.tgname
++            """);
++        var expected = new Dictionary<string, (string Table, string Function, int Type)>
++        {
++            ["audit_no_mutation"] = ("audit", "protect_audit", 58),
++            ["history_no_mutation"] = ("appointment_history", "protect_audit", 58),
++            ["appointment_history_written"] = ("appointments", "track_appointment", 21)
++        };
++        if (triggers.Count != expected.Count || triggers.Any(row =>
++            !expected.TryGetValue((string)row["tgname"]!, out var spec) ||
++            (string)row["relname"]! != spec.Table || (string)row["proname"]! != spec.Function ||
++            (string)row["function_schema"]! != Schema || (int)row["type"]! != spec.Type ||
++            (string)row["enabled"]! != "O" || (int)row["arguments"]! != 0 || row["unconditional"] is not true))
++            throw new DemoResetException("DEMO_TRIGGER_MISMATCH");
++    }
++
++    public static IReadOnlyDictionary<string, long> Expected() =>
++        Tables.ToDictionary(table => table, table => table switch
++        {
++            "users" => 30L, "profiles" => 24, "services" or "practitioners" or "practitioner_services" => 6,
++            "slots" => 800, "appointments" => 30, "appointment_history" or "notifications" => 48,
++            "notification_preferences" => 24, "audit" => 1, _ => 0
++        }, StringComparer.Ordinal);
++
++    private static Dictionary<string, long> Counts(NpgsqlConnection c, NpgsqlTransaction t) =>
++        Tables.ToDictionary(table => table,
++            table => Convert.ToInt64(Scalar(c, t, "SELECT count(*) FROM " + Qualified(table))), StringComparer.Ordinal);
++
++    private static void Insert(NpgsqlConnection c, NpgsqlTransaction t, DemoDataPlan plan)
++    {
++        var admin = plan.Users.Single(user => user.Role == "Administrator");
++        foreach (var user in plan.Users)
++            Execute(c, t, """
++                INSERT INTO telemedicina_m1.users(id,email,password_hash,role,verified,active,created_by,failed_logins,locked_until)
++                VALUES(@id,@email,@hash,@role,true,true,@creator,0,0)
++                """, ("id", user.Id), ("email", user.Email), ("hash", user.PasswordHash), ("role", user.Role), ("creator", user.Id == admin.Id ? null : admin.Id));
++        foreach (var patient in plan.Patients)
++        {
++            Execute(c, t, "INSERT INTO telemedicina_m1.profiles(user_id,body) VALUES(@id,@body)",
++                ("id", patient.UserId), ("body", JsonSerializer.Serialize(patient.Profile, Json)));
++            Execute(c, t, "INSERT INTO telemedicina_m1.notification_preferences(user_id,email_enabled) VALUES(@id,false)",
++                ("id", patient.UserId));
++        }
++        foreach (var service in plan.Services)
++        {
++            Execute(c, t, """
++                INSERT INTO telemedicina_m1.services(id,specialty,name,duration,active,is_synthetic,approval_reference)
++                VALUES(@id,@specialty,@name,@duration,true,true,NULL)
++                """, ("id", service.Id), ("specialty", service.Specialty), ("name", service.Name), ("duration", service.Duration));
++            Execute(c, t, "INSERT INTO telemedicina_m1.practitioners(id,name,license_ref,active) VALUES(@id,@name,NULL,true)",
++                ("id", service.PractitionerId), ("name", service.PractitionerName));
++            Execute(c, t, "INSERT INTO telemedicina_m1.practitioner_services(practitioner_id,service_id) VALUES(@p,@s)",
++                ("p", service.PractitionerId), ("s", service.Id));
++        }
++        foreach (var slot in plan.Slots)
++            Execute(c, t, """
++                INSERT INTO telemedicina_m1.slots(id,service_id,practitioner_id,start_utc,end_utc,blocked)
++                VALUES(@id,@s,@p,@start,@end,@blocked)
++                """, ("id", slot.Id), ("s", slot.ServiceId), ("p", slot.PractitionerId),
++                ("start", slot.StartUtc), ("end", slot.EndUtc), ("blocked", slot.Blocked));
++        foreach (var appointment in plan.Appointments)
++        {
++            Execute(c, t, "SELECT set_config('telemedicina.actor',@actor,true)", ("actor", appointment.UserId));
++            Execute(c, t, """
++                INSERT INTO telemedicina_m1.appointments(id,user_id,slot_id,practitioner_id,start_utc,end_utc,
++                    status,coverage,insurer,member_last4)
++                VALUES(@id,@u,@slot,@p,@start,@end,'PendingValidation','Pending',@insurer,@member)
++                """, ("id", appointment.Id), ("u", appointment.UserId), ("slot", appointment.Slot.Id),
++                ("p", appointment.Slot.PractitionerId), ("start", appointment.Slot.StartUtc),
++                ("end", appointment.Slot.EndUtc), ("insurer", appointment.Insurer), ("member", appointment.MemberLast4));
++            Notify(c, t, appointment, 1, "requested",
++                "Tu solicitud fue registrada. Inicia sesión para consultar su estado.");
++            if (appointment.HasTransition)
++            {
++                Execute(c, t, "SELECT set_config('telemedicina.actor',@actor,true)",
++                    ("actor", appointment.ReviewerId ?? appointment.UserId));
++                Execute(c, t, """
++                    UPDATE telemedicina_m1.appointments SET status=@status,coverage=@coverage,version=2,
++                        evidence=@evidence,coverage_valid_until=@valid,reviewed_by=@reviewer,
++                        reviewed_at=CASE WHEN @reviewer IS NULL THEN NULL ELSE now() END WHERE id=@id
++                    """, ("status", appointment.Status), ("coverage", appointment.Coverage),
++                    ("evidence", appointment.ReviewerId is null ? null : "DEMO: resultado simulado; sin validación ARS"),
++                    ("valid", appointment.Coverage == "Approved" ? appointment.Slot.EndUtc.AddDays(1) : (DateTime?)null),
++                    ("reviewer", appointment.ReviewerId), ("id", appointment.Id));
++                Notify(c, t, appointment, 2, appointment.Status == "Cancelled" ? "cancelled" : "updated",
++                    appointment.Status == "Cancelled" ?
++                        "Tu cita fue cancelada. Inicia sesión para consultar los detalles." :
++                        "El estado de tu cita cambió. Inicia sesión para consultar los detalles.");
++            }
++        }
++        Execute(c, t, """
++            INSERT INTO telemedicina_m1.audit(id,actor_id,action,resource_id,trace_id,result)
++            VALUES(@id,@actor,'demo.reset_seed_applied',@resource,'demo-reset','Success')
++            """, ("id", DemoDataPlan.Id("audit:reset")), ("actor", admin.Id),
++            ("resource", DemoDataPlan.Version + ";users=30;profiles=24;services=6;practitioners=6;slots=800;blocked=60;appointments=30;history=48"));
++    }
++
++    private static void Notify(NpgsqlConnection c, NpgsqlTransaction t, DemoAppointment appointment,
++        int version, string kind, string text)
++    {
++        var key = "demo:" + appointment.Id + ":" + version + ":" + kind;
++        Execute(c, t, """
++            INSERT INTO telemedicina_m1.notifications(id,user_id,event_key,kind,body,resource_id,resource_version)
++            VALUES(@id,@u,@key,@kind,@body,@resource,@version)
++            """, ("id", DemoDataPlan.Id("notification:" + key)), ("u", appointment.UserId), ("key", key),
++            ("kind", kind), ("body", text), ("resource", appointment.Id), ("version", version));
++    }
++
++    private static void AssertIntegrity(NpgsqlConnection c, NpgsqlTransaction t, IReadOnlyDictionary<string, long> expected)
++    {
++        var actual = Counts(c, t);
++        if (expected.Any(pair => actual[pair.Key] != pair.Value))
++            throw new DemoResetException("DEMO_COUNT_MISMATCH");
++        if (Convert.ToInt64(Scalar(c, t, """
++            SELECT count(*) FROM telemedicina_m1.slots WHERE blocked
++            """)) != 60 || Convert.ToInt64(Scalar(c, t, """
++            SELECT count(*) FROM telemedicina_m1.appointments a JOIN telemedicina_m1.slots s ON s.id=a.slot_id
++            WHERE s.blocked OR s.start_utc<>a.start_utc OR s.end_utc<>a.end_utc
++            """)) != 0 || Convert.ToInt64(Scalar(c, t, """
++            SELECT count(*) FROM telemedicina_m1.slots a JOIN telemedicina_m1.slots b
++            ON a.practitioner_id=b.practitioner_id AND a.id<b.id
++            AND tstzrange(a.start_utc,a.end_utc,'[)') && tstzrange(b.start_utc,b.end_utc,'[)')
++            """)) != 0)
++            throw new DemoResetException("DEMO_INTEGRITY_FAILED");
++        var distribution = Rows(c, t, """
++            SELECT status,coverage,count(*) AS total FROM telemedicina_m1.appointments
++            GROUP BY status,coverage
++            """).ToDictionary(row => (string)row["status"]! + "/" + row["coverage"],
++                row => (long)row["total"]!);
++        if (distribution.Count != 4 || distribution.GetValueOrDefault("PendingValidation/Pending") != 12 ||
++            distribution.GetValueOrDefault("Confirmed/Approved") != 8 ||
++            distribution.GetValueOrDefault("Cancelled/Pending") != 6 ||
++            distribution.GetValueOrDefault("PendingValidation/Denied") != 4)
++            throw new DemoResetException("DEMO_DISTRIBUTION_FAILED");
++        // Check restored trigger identities as well as data before committing.
++        Preflight(c, t);
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Properties/AssemblyInfo.cs b/api/src/Telemedicina.Api/Properties/AssemblyInfo.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Properties/AssemblyInfo.cs
+@@ -0,0 +1,2 @@
++using System.Runtime.CompilerServices;
++[assembly: InternalsVisibleTo("Telemedicina.Tests")]
+diff --git a/api/src/Telemedicina.Api/Program.cs b/api/src/Telemedicina.Api/Program.cs
+--- a/api/src/Telemedicina.Api/Program.cs
++++ b/api/src/Telemedicina.Api/Program.cs
+@@ -43,6 +43,23 @@
+ });
+ 
+ var app = builder.Build();
++
++if (args.Contains("--reset-demo-data", StringComparer.Ordinal))
++{
++    try
++    {
++        var options = DemoResetOptions.Parse(args);
++        DemoDataReset.RequireEnvironment(app.Configuration, app.Environment);
++        var report = DemoDataReset.Run(app.Services.GetRequiredService<Database>(),
++            app.Configuration, app.Environment, options);
++        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(report,
++            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
++    }
++    catch (DemoResetException error) { Console.Error.WriteLine(error.Code); Environment.ExitCode = 1; }
++    catch { Console.Error.WriteLine("DEMO_RESET_FAILED"); Environment.ExitCode = 1; }
++    return;
++}
++
+ 
+ if (args.Contains("--inspect") || args.Contains("--migrate") || args.Contains("--seed-synthetic") || args.Contains("--seed-staff-synthetic"))
+ {
+diff --git a/api/src/Telemedicina.Tests/Contracts/Program.cs b/api/src/Telemedicina.Tests/Contracts/Program.cs
+--- a/api/src/Telemedicina.Tests/Contracts/Program.cs
++++ b/api/src/Telemedicina.Tests/Contracts/Program.cs
+@@ -16,6 +16,7 @@
+ 
+     public static int Main(string[] args)
+     {
++        if (args.Contains("--demo-reset-db-tests", StringComparer.Ordinal)) return DemoResetDbChecks.Run();
+         Console.WriteLine("=================================================");
+         Console.WriteLine(" Running Telemedicina Automated Unit Tests");
+         Console.WriteLine("=================================================");
+@@ -200,6 +201,8 @@
+             });
+         }
+ 
++        DemoResetUnitChecks.Register(Test, Assert);
++
+         Console.WriteLine("-------------------------------------------------");
+         Console.WriteLine($" Summary: {_passedCount} passed, {_failedCount} failed.");
+         Console.WriteLine("=================================================");
+diff --git a/api/src/Telemedicina.Tests/Contracts/DemoResetUnitChecks.cs b/api/src/Telemedicina.Tests/Contracts/DemoResetUnitChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/Contracts/DemoResetUnitChecks.cs
+@@ -0,0 +1,107 @@
++using Microsoft.AspNetCore.Builder;
++using Microsoft.Extensions.Configuration;
++using Telemedicina.Api.Infrastructure.Persistence.Seeding;
++
++namespace Telemedicina.Tests;
++
++public static class DemoResetUnitChecks
++{
++    internal static IConfiguration Configuration(Dictionary<string, string?>? overrides = null)
++    {
++        var secret = Guid.NewGuid().ToString("N");
++        var values = new Dictionary<string, string?>
++        {
++            ["Milestone:Enabled"] = "true", ["Mail:Mode"] = "development",
++            ["Milestone:AdministratorEmail"] = "primary.admin.demo@example.invalid",
++            ["Milestone:AdministratorPassword"] = secret,
++            ["Milestone:AdmissionEmail"] = "primary.admission.demo@example.invalid",
++            ["Milestone:AdmissionPassword"] = secret,
++            ["Milestone:DemoPassword"] = secret
++        };
++        if (overrides is not null) foreach (var item in overrides) values[item.Key] = item.Value;
++        return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
++    }
++
++    public static void Register(Action<string, Action> test, Action<bool, string> assert)
++    {
++        test("DemoReset_DefaultIsDryRun_ExecuteIsExplicit", () =>
++        {
++            var options = DemoResetOptions.Parse(["--reset-demo-data"]);
++            assert(!options.Execute && options.BaseDate is null, "Default must not replace data.");
++            var execute = DemoResetOptions.Parse(["--reset-demo-data", "--execute", "--base-date", "2040-01-02"]);
++            assert(execute.Execute && execute.BaseDate == new DateOnly(2040, 1, 2), "Explicit date/execute must parse.");
++            foreach (var invalid in new[]
++            {
++                new[] { "--execute" }, new[] { "--reset-demo-data", "--migrate" },
++                new[] { "--reset-demo-data", "--seed-synthetic" },
++                new[] { "--reset-demo-data", "--reset-demo-data" },
++                new[] { "--reset-demo-data", "--execute", "--execute" },
++                new[] { "--reset-demo-data", "--base-date", "invalid" }
++            }) Reject(() => DemoResetOptions.Parse(invalid), assert);
++        });
++        test("DemoReset_EnvironmentAndMailGuard", () =>
++        {
++            foreach (var environment in new[] { "Production", "Staging" })
++            {
++                var host = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = environment });
++                Reject(() => DemoDataReset.RequireEnvironment(Configuration(), host.Environment), assert);
++            }
++            var development = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = "Development" });
++            Reject(() => DemoDataReset.RequireEnvironment(Configuration(new() { ["Mail:Mode"] = "smtp" }), development.Environment), assert);
++            Reject(() => DemoDataReset.RequireEnvironment(Configuration(new() { ["Milestone:Enabled"] = "false" }), development.Environment), assert);
++        });
++        test("DemoReset_CredentialsAndCollisionsRejectBeforeConnection", () =>
++        {
++            var date = new DateOnly(2040, 1, 2);
++            Reject(() => DemoDataPlan.Create(date, Configuration(new() { ["Milestone:DemoPassword"] = null })), assert);
++            Reject(() => DemoDataPlan.Create(date, Configuration(new() { ["Milestone:AdministratorEmail"] = "invalid" })), assert);
++            Reject(() => DemoDataPlan.Create(date, Configuration(new()
++                { ["Milestone:AdmissionEmail"] = "PRIMARY.ADMIN.DEMO@example.invalid" })), assert);
++            Reject(() => DemoDataPlan.Create(date, Configuration(new()
++                { ["Milestone:AdministratorEmail"] = "paciente.01.demo@example.invalid" })), assert);
++        });
++        test("DemoReset_DeterministicDatasetAndAgenda", () =>
++        {
++            var date = new DateOnly(2040, 1, 2); var config = Configuration();
++            var plan = DemoDataPlan.Create(date, config);
++            var repeat = DemoDataPlan.Create(date, config);
++            assert(plan.Users.Count == 30 && plan.Patients.Count == 24 && plan.Services.Count == 6, "Approved entity totals.");
++            assert(plan.Users.Select(user => user.Email).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 30, "Unique accounts.");
++            assert(plan.Users.Count(user => user.Role == "Administrator") == 1 &&
++                plan.Users.Count(user => user.Role == "Admission") == 2 &&
++                plan.Users.Count(user => user.Role == "Practitioner") == 2 &&
++                plan.Users.Count(user => user.Role == "Support") == 1, "Approved staff distribution.");
++            assert(plan.Slots.SequenceEqual(repeat.Slots) && plan.Appointments.SequenceEqual(repeat.Appointments), "Business data must repeat.");
++            assert(plan.Slots.Count == 800 && plan.Slots.Count(slot => slot.Blocked) == 60, "Approved agenda totals.");
++            assert(plan.Slots.Select(slot => DateOnly.FromDateTime(slot.StartUtc.AddHours(-4))).Distinct().Count() == 10, "Ten weekdays.");
++            foreach (var slot in plan.Slots)
++            {
++                var local = slot.StartUtc.AddHours(-4); var end = slot.EndUtc.AddHours(-4);
++                assert(local.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday) &&
++                    DateOnly.FromDateTime(local) > date, "Future weekdays relative to base date.");
++                assert((local.TimeOfDay >= TimeSpan.FromHours(9) && end.TimeOfDay <= TimeSpan.FromHours(12)) ||
++                    (local.TimeOfDay >= TimeSpan.FromHours(14) && end.TimeOfDay <= TimeSpan.FromHours(17)), "Working windows.");
++                assert(slot.EndUtc - slot.StartUtc == TimeSpan.FromMinutes(plan.Services.Single(s => s.Id == slot.ServiceId).Duration),
++                    "Slot duration must match its service.");
++            }
++            foreach (var group in plan.Slots.GroupBy(slot => slot.PractitionerId))
++            {
++                var ordered = group.OrderBy(slot => slot.StartUtc).ToArray();
++                assert(ordered.Zip(ordered.Skip(1)).All(pair => pair.First.EndUtc <= pair.Second.StartUtc), "No practitioner overlaps.");
++            }
++            assert(plan.Appointments.Count == 30 && plan.Appointments.Count(a => a.HasTransition) == 18 &&
++                plan.Appointments.All(a => !a.Slot.Blocked), "Thirty appointments, eighteen transitions, no blocked reservation.");
++            assert(plan.Patients.All(patient => patient.Profile.LastName.Contains("(DEMO)") &&
++                patient.Profile.BirthDate.AddYears(18) < date), "Synthetic adults with visible mark.");
++            assert(DemoDataReset.Tables.Count == 17 && DemoDataReset.Expected()["appointment_history"] == 48 &&
++                DemoDataReset.Expected()["email_outbox"] == 0, "Closed replacement manifest and expected counts.");
++        });
++    }
++
++    private static void Reject(Action operation, Action<bool, string> assert)
++    {
++        var rejected = false;
++        try { operation(); } catch (DemoResetException) { rejected = true; }
++        assert(rejected, "Invalid operation must be rejected before data writes.");
++    }
++}
+diff --git a/api/src/Telemedicina.Tests/Contracts/DemoResetDbChecks.cs b/api/src/Telemedicina.Tests/Contracts/DemoResetDbChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/Contracts/DemoResetDbChecks.cs
+@@ -0,0 +1,84 @@
++using Microsoft.AspNetCore.Builder;
++using Npgsql;
++using Telemedicina.Api.Infrastructure.Persistence;
++using Telemedicina.Api.Infrastructure.Persistence.Seeding;
++using static Telemedicina.Api.Infrastructure.Persistence.Database;
++
++namespace Telemedicina.Tests;
++
++// Opt-in integration checks. Refuse ordinary development databases; never run in the default suite.
++public static class DemoResetDbChecks
++{
++    public static int Run()
++    {
++        try
++        {
++            var connection = Environment.GetEnvironmentVariable("DEMO_RESET_TEST_CONNECTION_STRING");
++            if (Environment.GetEnvironmentVariable("DEMO_RESET_DB_TESTS") != "1" || string.IsNullOrWhiteSpace(connection) ||
++                !new NpgsqlConnectionStringBuilder(connection).Database.StartsWith("telemedicina_demo_reset_test", StringComparison.Ordinal))
++                throw new InvalidOperationException("DEMO_TEST_DATABASE_REQUIRED");
++            var config = DemoResetUnitChecks.Configuration(new() { ["ConnectionStrings:Telemedicina"] = connection });
++            var environment = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = "Development" }).Environment;
++            var database = new Database(config);
++            var date = DemoDataPlan.Today();
++            var before = Snapshot(database, false);
++            var preview = DemoDataReset.Run(database, config, environment, new(false, date));
++            Require(!preview.Committed && preview.After is null && before == Snapshot(database, false), "DRYRUN_CHANGED_DATA");
++            try
++            {
++                DemoDataReset.RunCore(database, config, environment, new(true, date),
++                    () => throw new ProbeException());
++                throw new InvalidOperationException("ROLLBACK_PROBE_NOT_REACHED");
++            }
++            catch (ProbeException) { }
++            Require(before == Snapshot(database, false), "ROLLBACK_CHANGED_DATA_OR_TRIGGERS");
++            var result = DemoDataReset.Run(database, config, environment, new(true, date));
++            Require(result.Committed && result.After is not null &&
++                result.Planned.All(pair => result.After[pair.Key] == pair.Value), "SEED_COUNT_MISMATCH");
++            var first = Snapshot(database, true);
++            DemoDataReset.Run(database, config, environment, new(true, date));
++            Require(first == Snapshot(database, true), "BUSINESS_DATA_NOT_REPRODUCIBLE");
++            AssertProtected(database, "audit");
++            AssertProtected(database, "appointment_history");
++            Console.WriteLine("DEMO_RESET_DB_CHECKS_PASS: dryrun,rollback,triggers,integrity,repetition");
++            return 0;
++        }
++        catch { Console.Error.WriteLine("DEMO_RESET_DB_CHECKS_FAILED"); return 1; }
++    }
++
++    private static string Snapshot(Database database, bool functional)
++    {
++        using var c = database.Open(); using var t = c.BeginTransaction();
++        var chunks = new List<string>();
++        foreach (var table in DemoDataReset.Tables.Append("schema_versions").Order(StringComparer.Ordinal))
++        {
++            var projection = functional ?
++                "to_jsonb(r)-ARRAY['password_hash','created_at','updated_at','occurred_at','reviewed_at']" : "to_jsonb(r)";
++            chunks.Add((string)Scalar(c, t, "SELECT md5(coalesce(string_agg((" + projection +
++                ")::text,E'\\n' ORDER BY (" + projection + ")::text),'')) FROM telemedicina_m1.\"" + table + "\" r")!);
++        }
++        chunks.Add((string)Scalar(c, t, """
++            SELECT md5(string_agg(g.tgname||':'||g.tgenabled::text,',' ORDER BY g.tgname))
++            FROM pg_trigger g JOIN pg_class r ON r.oid=g.tgrelid JOIN pg_namespace n ON n.oid=r.relnamespace
++            WHERE n.nspname='telemedicina_m1' AND NOT g.tgisinternal
++            """)!);
++        // Hash object metadata outside the replacement scope without creating/changing public objects.
++        chunks.Add((string)Scalar(c, t, """
++            SELECT md5(coalesce(string_agg(r.oid::text||':'||r.relname||':'||r.relkind::text,',' ORDER BY r.oid),''))
++            FROM pg_class r JOIN pg_namespace n ON n.oid=r.relnamespace WHERE n.nspname='public'
++            """)!);
++        return string.Join(":", chunks);
++    }
++
++    private static void AssertProtected(Database database, string table)
++    {
++        using var c = database.Open(); using var t = c.BeginTransaction();
++        var rejected = false;
++        try { Execute(c, t, "DELETE FROM telemedicina_m1.\"" + table + "\" WHERE false"); }
++        catch (PostgresException error) when (error.SqlState == "P0001") { rejected = true; }
++        t.Rollback();
++        Require(rejected, "APPEND_ONLY_PROTECTION_MISSING");
++    }
++    private static void Require(bool condition, string code) { if (!condition) throw new InvalidOperationException(code); }
++    private sealed class ProbeException : Exception { }
++}
+diff --git a/api/src/DEMO_DATA_RESET.md b/api/src/DEMO_DATA_RESET.md
+new file mode 100644
+--- /dev/null
++++ b/api/src/DEMO_DATA_RESET.md
+@@ -0,0 +1,103 @@
++# Dataset de demostración SEED-REALISTA-v1
++
++Operación exclusivamente CLI de desarrollo, sin endpoint HTTP ni ejecución al iniciar la API.
++El reemplazo borra los datos anteriores de las17 tablas del manifiesto de telemedicina_m1,
++incluidos cuentas, auditoría, historial y sesiones. Conserva schema_versions, DDL y otros
++esquemas, incluido public. No se exige respaldo; un éxito no se puede deshacer mediante
++este procedimiento. El rollback protege fallos anteriores al commit.
++
++## Preparación
++
++Detener API y clientes. Compilar el parche revisado antes de usar los comandos.
++Configurar privadamente:
++- ASPNETCORE_ENVIRONMENT=Development y Milestone__Enabled=true.
++- Mail__Mode=development; este reset no envía correo.
++- Milestone__AdministratorEmail y Milestone__AdministratorPassword actuales.
++- Milestone__AdmissionEmail y Milestone__AdmissionPassword actuales.
++- Milestone__DemoPassword nuevo, de12–128 caracteres, solo en entorno privado.
++- ConnectionStrings__Telemedicina del ambiente autorizado.
++
++No pasar contraseñas por argumentos, guardarlas en el repositorio ni imprimirlas.
++No es necesario modificar .env: las claves pueden proporcionarse temporalmente por el
++mecanismo privado de ejecución. Los correos primarios no aparecen en informes.
++Todos los30 correos se normalizan/validan sin colisiones antes de escribir.
++
++Desde api/src, usando el mecanismo privado que cargue la configuración:
++
++    dotnet run --project Telemedicina.Api -- --reset-demo-data
++    dotnet run --project Telemedicina.Api -- --reset-demo-data --base-date YYYY-MM-DD
++    dotnet run --project Telemedicina.Api -- --reset-demo-data --execute --base-date YYYY-MM-DD
++
++El primer modo es previsualización sin cambios. Solo --execute confirma el reemplazo.
++No mezclar con --migrate, otros seeds, --check-smtp ni otras opciones.
++La fecha base predeterminada se captura una vez en America/Santo_Domingo.
++Los diez días laborables son posteriores a esa base; se rechaza un plan con slots ya
++pasados respecto al momento de ejecución. No se inventa calendario de feriados.
++
++## Contenido
++
++30 usuarios activos/verificados:24 Patient,1 Administrator,2 Admission,2 Practitioner,1 Support.
++Admin y admisión primaria conservan únicamente sus credenciales configuradas; los IDs
++se recrean de manera determinista. Los otros accesos usan DemoPassword privado.
++
++Correos adicionales, exclusivamente ficticios:
++- admision.auxiliar.demo@example.invalid
++- profesional.uno.demo@example.invalid
++- profesional.dos.demo@example.invalid
++- soporte.demo@example.invalid
++- paciente.01.demo@example.invalid hasta paciente.24.demo@example.invalid
++
++24 perfiles adultos completos, apellidos con (DEMO), direcciones genéricas dominicanas y
++teléfonos ficticios del rango555-01xx. Sin cédulas, diagnósticos, licencias ni pólizas reales.
++Declaraciones de alergias/medicación/condiciones vacías; no se simula validación clínica.
++
++6 servicios con marca DEMO y is_synthetic=true:
++medicina general30min, familiar30min, seguimiento medicina interna30min,
++orientación psicológica40min, nutricional20min y dermatológica20min.
++6 profesionales de catálogo sin licencia, uno por servicio; no existe vínculo inventado
++con las cuentas Practitioner. No se afirma habilitación clínica.
++
++10 días laborables09–12 y14–17 UTC-4, slots completos sin solapamientos:
++800slots/60bloqueados (uno por profesional/día).
++30 citas en slots diferentes no bloqueados:
++12 PendingValidation/Pending,8 Confirmed/Approved,6 Cancelled/Pending,
++4 PendingValidation/Denied. Toda evidencia/aseguradora indica simulación.
++30 solicitudes iniciales y18 transiciones producen48 historias mediante el trigger real.
++48 notificaciones neutras.24 preferencias de email=false.
++Vacíos: sesiones,challenges,dev_mailbox,staff_invitations,idempotency,email_outbox.
++1 evento nuevo demo.reset_seed_applied con versión/conteos, sin información personal.
++
++## Protección
++
++Preflight exige versiones1–5 exactas, las17 tablas más schema_versions, propietario
++con facultad de ALTER y los tres triggers esperados activos. Rechaza tablas desconocidas,
++triggers alterados y referencias externas que requirieran CASCADE.
++La previsualización usa una transacción read-only. La ejecución obtiene advisory locks
++19041301/02/03/04 en ese orden, locks exclusivos fijos y repite preflight antes de escribir.
++Solo se deshabilitan audit_no_mutation y history_no_mutation durante TRUNCATE de las17
++tablas, con RESTART IDENTITY y sin CASCADE. Se reactivan inmediatamente antes de insertar.
++El trigger de historial permanece habilitado. Todo, incluidos cambios de triggers, va en
++una transacción: errores revierten estado y datos. No hay fallback destructivo.
++El resumen contiene conteos antes/previstos/después, dataset, fecha y estado committed.
++No contiene contraseñas, correos privados, cadenas de conexión ni tokens.
++
++## Verificación pertinente
++
++- Compilar API .NET10 y ejecutar Telemedicina.Tests normal: incluye guardas, argumentos,
++  credenciales/colisiones y plan determinista con agenda, bloques y distribución.
++- Integración opt-in en una BD de prueba separada YA migrada001–005. Su nombre debe
++  empezar por telemedicina_demo_reset_test. Configurar privadamente
++  DEMO_RESET_DB_TESTS=1 y DEMO_RESET_TEST_CONNECTION_STRING, luego ejecutar
++  Telemedicina.Tests con --demo-reset-db-tests.
++  Comprueba dryrun sin cambios, fallo después de truncate/rollback, triggers activos,
++  integridad y repetición funcional. Esta prueba también reemplaza datos de esa BD aislada.
++  No migrar ni instalar herramientas automáticamente.
++- Smoke HTTP en ambiente autorizado antes del reset final: login privado Admin/Admission/
++  paciente, perfil/citas propias, cola Admission, rechazo de Admin a pacientes y slots futuros.
++  No ejecutar la suite histórica completa después del reset final: vuelve a crear datos.
++- Terminar con el reset final y servicios detenidos; así no quedan sesiones ni nuevas colas.
++- Conservar evidencia saneada de build/tests/conteos. Ninguna prueba está afirmada por
++  este documento antes de su ejecución real.
++
++IDs y datos funcionales se repiten con la misma fecha base. Hashes de contraseña y
++timestamps técnicos pueden variar. No existe copia de seguridad automática.

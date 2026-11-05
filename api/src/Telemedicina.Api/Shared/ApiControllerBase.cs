@@ -21,8 +21,14 @@ public abstract class ApiControllerBase(Database database) : ControllerBase
     protected Npgsql.NpgsqlTransaction Begin(Npgsql.NpgsqlConnection c)
     {
         var t = c.BeginTransaction();
-        Execute(c, t, "SELECT set_config('telemedicina.actor',@actor,true)", ("actor", UserId(User)));
-        return t;
+        try
+        {
+            Telemedicina.Api.Infrastructure.Authentication.AccountGuard.LockUsers(c, t, UserId(User));
+            Telemedicina.Api.Infrastructure.Authentication.AccountGuard.Require(c, t, User);
+            Execute(c, t, "SELECT set_config('telemedicina.actor',@actor,true)", ("actor", UserId(User)));
+            return t;
+        }
+        catch { t.Dispose(); throw; }
     }
     protected void Log(Npgsql.NpgsqlConnection c, Npgsql.NpgsqlTransaction t, string action, string id) =>
         Record(c, t, UserId(User), action, id, HttpContext.TraceIdentifier);

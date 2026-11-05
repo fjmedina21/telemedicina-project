@@ -1,0 +1,55 @@
+{
+  "status": "completed-functional-scope",
+  "sourceChangesApplied": true,
+  "builds": {
+    "apiRelease": "PASS",
+    "portal": "PASS",
+    "flutterMacosRelease": "PASS"
+  },
+  "flutterAnalyze": "PASS",
+  "migration005": "PASS",
+  "migrationIdempotence": "PASS",
+  "tests": {
+    "dotnetPassed": 15,
+    "flutterPassed": 15,
+    "httpFirstPassed": 14,
+    "httpSecondPassed": 8,
+    "smtpLoopbackPassed": 1,
+    "chromiumFirstPassed": 7,
+    "chromiumSecondUniqueScenariosPassed": 3
+  },
+  "browserBatch": {
+    "passed": 3,
+    "failed": 0,
+    "rateLimitStrategy": "token-bucket",
+    "tokenCapacity": 30,
+    "refill": "1 token / 2 seconds",
+    "queueLimit": 0,
+    "fixedWindowPolicy": "replaced",
+    "rateProtectionWeakened": false
+  },
+  "portsAfterCleanup": {
+    "3000": "not-listening",
+    "5091": "not-listening",
+    "5092": "not-listening",
+    "5093": "not-listening",
+    "5094": "not-listening",
+    "8025": "not-listening"
+  },
+  "hitoClosed": true,
+  "realSmtpUsed": false,
+  "playwrightFinalRun": {
+    "result": "PASS",
+    "scenarios": 3,
+    "workers": 1,
+    "startedAt": "2026-11-05T13:31:20.779Z",
+    "durationMs": 38330,
+    "evidence": "../../../../hitos/portalweb/segundo-hito-portalweb/evidencias/playwright/playwright-results.json"
+  },
+  "outstanding": [
+    "PR review",
+    "UAT",
+    "pilot/production go-no-go",
+    "directed invitation expiry/resend and audit rollback tests"
+  ]
+}

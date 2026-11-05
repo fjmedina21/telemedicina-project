@@ -12,7 +12,7 @@ using Telemedicina.Api.Features.Notifications;
 
 namespace Telemedicina.Api.Features.Scheduling;
 
-[ApiController, Authorize, Route("api/v1")]
+[ApiController, Authorize(Roles = "Patient,Admission"), Route("api/v1")]
 public sealed class AvailabilityController(Database database) : ApiControllerBase(database)
 {
     [HttpGet("availability")]

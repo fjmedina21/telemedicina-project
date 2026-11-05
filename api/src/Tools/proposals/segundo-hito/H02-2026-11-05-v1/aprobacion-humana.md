@@ -1,0 +1,11 @@
+# Constancia de aprobación humana
+- Ejecución: H02-2026-11-05-v1.
+- Versión aprobada: H02-SPEC-v1 (copia H02-SPEC-v1.md en este paquete).
+- Fuente: solicitud de aprobación presentada al final del turno anterior y respuesta directa del usuario.
+- Decisión textual: «si, apruebo».
+- Responsable: usuario de esta conversación; no se infiere nombre.
+- Fecha: 2026-11-05, America/Santo_Domingo.
+- Alcance: roles/operación de cuentas según spec; preparación de parche propuesto.
+- Áreas: api/src/, app/src/, portalweb/src/; responsable backend_mobile para propuesta transversal.
+- Límites: datos sintéticos; no integración automática, despliegue ni publicación.
+- La aprobación se recibió antes de invocar Implementer.

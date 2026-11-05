@@ -6,8 +6,9 @@ namespace Telemedicina.Api.Infrastructure.Persistence.Seeding;
 
 public static class SyntheticDataSeeder
 {
-    public static void Seed(Database database, IConfiguration config)
+    public static void Seed(Database database, IConfiguration config, IHostEnvironment environment)
     {
+        Telemedicina.Api.Features.Identity.StaffInvitations.RequireDevelopment(environment, config);
         using var c = database.Open(); using var t = c.BeginTransaction();
         Execute(c, t, "SELECT pg_advisory_xact_lock(19041302)");
         const string service = "10000000-0000-4000-8000-000000000001";

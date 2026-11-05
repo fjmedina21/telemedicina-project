@@ -2,13 +2,9 @@
 Run with MILESTONE_TEST_SYNTHETIC=1 against a local, development-only API.
 The test requires a separately provisioned synthetic database and admission account.
 """
-import base64
 import concurrent.futures
-import hashlib
-import hmac
 import json
 import os
-import struct
 import time
 import unittest
 import urllib.error
@@ -44,12 +40,6 @@ def request(path, method="GET", body=None, token=None, extra=None, raw=False):
     except urllib.error.HTTPError as error:
         # Do not print bodies: credentials and patient data never belong in test output.
         return error.code, json.load(error) if raw else None
-
-def otp(secret):
-    key = base64.b32decode(secret.upper() + "=" * ((8 - len(secret) % 8) % 8))
-    digest = hmac.new(key, struct.pack(">Q", int(time.time()) // 30), hashlib.sha1).digest()
-    offset = digest[-1] & 15
-    return str((struct.unpack(">I", digest[offset:offset+4])[0] & 0x7fffffff) % 1000000).zfill(6)
 
 @unittest.skipUnless(os.environ.get("MILESTONE_TEST_SYNTHETIC") == "1",
     "Requires explicit synthetic test environment")
@@ -229,11 +219,15 @@ class MilestoneE2E(unittest.TestCase):
         self.assertEqual(status, 200)
         user.update(session); user["password"] = password
 
-    def test_08_staff_mfa_required(self):
+    def test_08_staff_password_policy_development_only(self):
+        # Approved development policy: staff signs in with its password.
         credentials = {"email": os.environ["Milestone__AdmissionEmail"],
             "password": os.environ["Milestone__AdmissionPassword"]}
-        self.assertEqual(request("/auth/login", "POST", credentials)[0], 401)
-        credentials["otp"] = "ABCDEF"
+        status, session = request("/auth/login", "POST", credentials)
+        self.assertEqual(status, 200)
+        self.assertEqual(request("/auth/me", token=session["accessToken"])[1]["role"], "Admission")
+        self.assertEqual(request("/auth/logout", "POST", {}, session["accessToken"])[0], 200)
+        credentials["password"] = uuid.uuid4().hex + uuid.uuid4().hex
         self.assertEqual(request("/auth/login", "POST", credentials)[0], 401)
 
     def test_09_persistence_across_actual_process_restart(self):

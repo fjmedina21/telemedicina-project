@@ -1,0 +1,23 @@
+{
+  "sha256": "03d7b1c3ac729b5b1bdeafbbd71e27ee6c5c8c6013bfdc844747ed2f7e737810",
+  "bytes": 50422,
+  "check": {
+    "valid": true,
+    "files": [
+      "api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoResetOptions.cs",
+      "api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoDataPlan.cs",
+      "api/src/Telemedicina.Api/Infrastructure/Persistence/Seeding/DemoDataReset.cs",
+      "api/src/Telemedicina.Api/Properties/AssemblyInfo.cs",
+      "api/src/Telemedicina.Api/Program.cs",
+      "api/src/Telemedicina.Tests/Contracts/Program.cs",
+      "api/src/Telemedicina.Tests/Contracts/DemoResetUnitChecks.cs",
+      "api/src/Telemedicina.Tests/Contracts/DemoResetDbChecks.cs",
+      "api/src/DEMO_DATA_RESET.md"
+    ],
+    "requires_human_apply": true
+  },
+  "applied": false,
+  "databaseReset": false,
+  "functionalTestsExecuted": false,
+  "review": "awaiting-validator"
+}

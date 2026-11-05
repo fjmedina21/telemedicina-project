@@ -12,7 +12,7 @@ using Telemedicina.Api.Features.Notifications;
 
 namespace Telemedicina.Api.Features.Catalog;
 
-[ApiController, Authorize, Route("api/v1")]
+[ApiController, Authorize(Roles = "Patient,Admission"), Route("api/v1")]
 public sealed class CatalogReadController(Database database) : ApiControllerBase(database)
 {
     [HttpGet("specialties")]

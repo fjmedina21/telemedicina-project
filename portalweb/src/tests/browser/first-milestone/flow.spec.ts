@@ -26,7 +26,7 @@ test.beforeEach(async({context})=>{if(cookies.length) await context.addCookies(c
 test("unauthenticated navigation redirects to login",async({page})=>{
   await page.goto("/admision");
   await expect(page).toHaveURL(/\/login$/);
-  await expect(page.getByRole("heading",{name:"Acceso de admisión"})).toBeVisible();
+  await expect(page.getByRole("heading",{name:"Acceso al portal"})).toBeVisible();
 });
 
 test("password login creates HttpOnly cookies without exposing tokens",async({page,context})=>{

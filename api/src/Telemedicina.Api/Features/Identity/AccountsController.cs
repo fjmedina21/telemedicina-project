@@ -19,8 +19,10 @@ public sealed class AccountsController(Database database) : ApiControllerBase(da
     public IActionResult Active(Guid id, ActiveRequest request)
     {
         if (id.ToString() == UserId(User)) return Fail(400, "SELF_SUSPENSION", "No puede suspender su propia cuenta.");
-        using var c = Database.Open(); using var t = Begin(c);
-        var count = Execute(c, t, "UPDATE users SET active=@active WHERE id=@id AND role='Patient'",
+        using var c = Database.Open(); using var t = c.BeginTransaction();
+        Telemedicina.Api.Infrastructure.Authentication.AccountGuard.LockUsers(c, t, UserId(User), id.ToString());
+        Telemedicina.Api.Infrastructure.Authentication.AccountGuard.Require(c, t, User, "patient.state.change");
+        var count = Execute(c, t, "UPDATE users SET active=@active,version=version+1 WHERE id=@id AND role='Patient'",
             ("active", request.Active), ("id", id.ToString()));
         if (count == 0) return NotFound();
         if (!request.Active) Execute(c, t, "UPDATE sessions SET revoked=true WHERE user_id=@id", ("id", id.ToString()));

@@ -32,7 +32,7 @@ public sealed class CatalogController(Database database) : ApiControllerBase(dat
         if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Specialty) ||
             (request.Active && !request.IsSynthetic && string.IsNullOrWhiteSpace(request.ApprovalReference)))
             return Fail(400, "CATALOG_VALIDATION", "Complete nombre, especialidad y referencia de habilitación si el servicio no es sintético.");
-        using var c = Database.Open(); using var t = c.BeginTransaction();
+        using var c = Database.Open(); using var t = Begin(c);
         var created = id is null; id ??= Guid.NewGuid().ToString(); var version = 1;
         if (!created)
         {
@@ -79,7 +79,7 @@ public sealed class CatalogController(Database database) : ApiControllerBase(dat
         if (string.IsNullOrWhiteSpace(request.Name) || request.ServiceIds is null || request.ServiceIds.Any(x => !Guid.TryParse(x, out _)))
             return Fail(400, "CATALOG_VALIDATION", "Revise nombre y servicios asignados.");
         var ids = request.ServiceIds.Select(x => Guid.Parse(x).ToString()).Distinct().ToArray();
-        using var c = Database.Open(); using var t = c.BeginTransaction();
+        using var c = Database.Open(); using var t = Begin(c);
         if (Convert.ToInt64(Scalar(c, t, "SELECT count(*) FROM services WHERE id=ANY(@ids)", ("ids", ids))) != ids.Length)
             return Fail(400, "UNKNOWN_SERVICE", "Uno de los servicios no existe.");
         var created = id is null; id ??= Guid.NewGuid().ToString(); var version = 1;

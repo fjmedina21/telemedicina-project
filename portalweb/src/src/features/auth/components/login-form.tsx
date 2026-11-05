@@ -2,6 +2,7 @@
 import {useState} from "react";
 import {useRouter} from "next/navigation";
 import {api} from "@/shared/api/client";
+import {homeFor} from "@/shared/api/identity";
 
 export default function LoginForm() {
   const router=useRouter();
@@ -13,19 +14,19 @@ export default function LoginForm() {
     <p>Solicitudes, horarios y cobertura en un espacio pensado para tu equipo.</p>
     <div className="login-note">La confirmación de citas y la cobertura requieren revisión de admisión.</div>
   </aside><section className="login-card"><span className="eyebrow">BIENVENIDO AL PORTAL</span>
-    <h1 >Acceso de admisión</h1>
-    <p>Ingresa con tu cuenta de admisión.</p>
+    <h1 >Acceso al portal</h1>
+    <p>Ingresa con tu cuenta de personal.</p>
     <form className="space-y-4" onSubmit={async event=>{
       event.preventDefault(); setBusy(true); setError("");
       try {
         const user=await api<{role:string}>("/auth/login","POST",{email,password});
-        if(user.role!=="Admission") {
+        if(!["Admission","Administrator","Practitioner","Support"].includes(user.role)) {
           await api("/auth/logout","POST",{});
-          throw new Error("Esta cuenta no tiene acceso al portal de admisión.");
+          throw new Error("Esta cuenta no tiene acceso al portal de personal.");
         }
-        setPassword(""); router.replace("/admision");
+        setPassword(""); router.replace(homeFor(user.role));
       } catch(e) {setError(e instanceof Error ? e.message : "Error de acceso");}
-      finally {setBusy(false);}
+      finally {setPassword("");setBusy(false);}
     }}>
       <label className="block">Correo<input className="block w-full rounded border p-2"
         type="email" autoComplete="username" required disabled={busy} value={email} onChange={e=>setEmail(e.target.value)}/></label>

@@ -16,6 +16,7 @@ class ApiClient {
   String? _access;
   String? _refresh;
   Future<void>? _refreshing;
+  int _sessionGeneration = 0;
   ApiClient({
     http.Client? client,
     this.baseUrl = const String.fromEnvironment(
@@ -26,6 +27,7 @@ class ApiClient {
 
   bool get authenticated => _access != null;
   void clearSession() {
+    _sessionGeneration++;
     _access = null;
     _refresh = null;
   }
@@ -66,7 +68,7 @@ class ApiClient {
       if (response.statusCode == 401 &&
           retry &&
           _refresh != null &&
-          !path.startsWith('/auth/')) {
+          (path == '/auth/me' || !path.startsWith('/auth/'))) {
         _refreshing ??= _rotate().whenComplete(() => _refreshing = null);
         await _refreshing;
         return await this.request(
@@ -77,14 +79,18 @@ class ApiClient {
           retry: false,
         );
       }
+      if (response.statusCode == 401) clearSession();
       final parsed = response.body.isEmpty
           ? <String, dynamic>{}
           : jsonDecode(response.body);
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        if (response.statusCode == 401) clearSession();
         throw ApiFailure(
           response.statusCode,
-          parsed is Map
+          response.statusCode == 401 && path != '/auth/login'
+              ? 'La sesión ya no está disponible. Inicia sesión nuevamente.'
+              : response.statusCode == 403
+              ? 'No tienes permiso para realizar esta acción.'
+              : parsed is Map
               ? (parsed['title'] ?? parsed['detail'] ?? 'Solicitud rechazada')
                     .toString()
               : 'Solicitud rechazada (${response.statusCode})',
@@ -103,6 +109,7 @@ class ApiClient {
   }
 
   Future<void> login(String email, String password) async {
+    clearSession();
     final data = await request(
       'POST',
       '/auth/login',
@@ -119,6 +126,7 @@ class ApiClient {
   }
 
   Future<void> _rotate() async {
+    final generation = _sessionGeneration;
     try {
       final data = await request(
         'POST',
@@ -126,10 +134,13 @@ class ApiClient {
         body: {'refreshToken': _refresh},
         retry: false,
       );
+      if (generation != _sessionGeneration) {
+        throw ApiFailure(401, 'La sesión ya no está disponible. Inicia sesión nuevamente.');
+      }
       _access = data['accessToken'];
       _refresh = data['refreshToken'];
     } catch (_) {
-      clearSession();
+      if (generation == _sessionGeneration) clearSession();
       rethrow;
     }
   }

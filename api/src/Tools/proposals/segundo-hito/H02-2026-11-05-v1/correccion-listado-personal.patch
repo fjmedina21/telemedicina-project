@@ -1,0 +1,61 @@
+diff --git a/api/src/Telemedicina.Api/Features/Identity/StaffController.cs b/api/src/Telemedicina.Api/Features/Identity/StaffController.cs
+--- a/api/src/Telemedicina.Api/Features/Identity/StaffController.cs
++++ b/api/src/Telemedicina.Api/Features/Identity/StaffController.cs
+@@ -53,7 +53,7 @@
+             (status is not null && status is not ("PendingActivation" or "Active" or "Suspended")))
+             return Fail(400, "VALIDATION_FAILED", "Filtros no válidos.");
+         using var c = Database.Open(); using var t = Authorized(c, "staff.read");
+-        var rows = Rows(c, t, SelectAccount + """
++        var rows = Rows(c, t, SelectAccount + " " + """
+             WHERE role IN ('Admission','Practitioner','Support') AND id>@after
+             AND (@role='' OR role=@role)
+             AND (@status='' OR CASE WHEN NOT verified THEN 'PendingActivation'
+diff --git a/api/src/Telemedicina.Tests/Integration/second_milestone_e2e.py b/api/src/Telemedicina.Tests/Integration/second_milestone_e2e.py
+--- a/api/src/Telemedicina.Tests/Integration/second_milestone_e2e.py
++++ b/api/src/Telemedicina.Tests/Integration/second_milestone_e2e.py
+@@ -207,6 +207,16 @@
+         self.status(request("/admin/staff/invitations", "POST",
+             {"email": "synthetic-h02-admin@example.invalid", "role": "Administrator"}, self.admin["accessToken"]), 400)
+         self.status(request("/admin/staff?limit=101", token=self.admin["accessToken"]), 400)
++        default_page = self.status(request("/admin/staff", token=self.admin["accessToken"]), 200)
++        self.assertLessEqual(len(default_page["items"]), 20)
++        self.assertTrue("next" in default_page)
++        filtered = self.status(request("/admin/staff?role=Admission&status=Active&limit=100",
++                                       token=self.admin["accessToken"]), 200)
++        self.assertTrue(bool(filtered["items"]), "Active admission fixture must appear in a filtered page")
++        self.assertTrue(all(item["role"] == "Admission" and item["status"] == "Active"
++                            for item in filtered["items"]))
++        self.status(request("/admin/staff?role=Administrator", token=self.admin["accessToken"]), 400)
++        self.status(request("/admin/staff?status=Unknown", token=self.admin["accessToken"]), 400)
+         accounts = self.status(request("/admin/staff?limit=100", token=self.admin["accessToken"]), 200)
+         self.assertTrue(all(item["role"] in ("Admission", "Practitioner", "Support") for item in accounts["items"]))
+         page = self.status(request("/admin/staff/audit-events?limit=100", token=self.admin["accessToken"]), 200)
+diff --git a/portalweb/src/tests/browser/second-milestone/accounts.spec.ts b/portalweb/src/tests/browser/second-milestone/accounts.spec.ts
+--- a/portalweb/src/tests/browser/second-milestone/accounts.spec.ts
++++ b/portalweb/src/tests/browser/second-milestone/accounts.spec.ts
+@@ -13,6 +13,7 @@
+ }
+ async function findRow(page:Page,email:string){
+   for(let index=0;index<30;index++){
++    await expect(page.getByRole("button",{name:"Actualizar",exact:true})).toBeEnabled();
+     const row=page.getByRole("row").filter({hasText:email});
+     if(await row.count())return row;
+     const next=page.getByRole("button",{name:"Página siguiente",exact:true});
+@@ -35,7 +36,7 @@
+   await expect(page.getByRole("link",{name:"Admisión",exact:true})).toHaveCount(0);
+   const email="synthetic-browser-h02-"+randomBytes(8).toString("hex")+"@example.invalid";
+   await page.getByLabel("Correo de personal",{exact:true}).fill(email);
+-  await page.getByLabel("Rol de personal",{exact:true}).selectOption("Support");
++  await page.getByRole("combobox",{name:"Rol de personal",exact:true}).selectOption("Support");
+   const invited=page.waitForResponse(response=>response.url().endsWith("/staff/invitations")&&response.request().method()==="POST");
+   await page.getByRole("button",{name:"Invitar cuenta",exact:true}).click();
+   expect((await invited).status()).toBe(201);
+@@ -88,7 +89,7 @@
+   expect((await page.request.patch("/api/backend/admin/staff/"+account.id+"/role",{headers,
+     data:{role:"Practitioner",expectedVersion:account.version+3}})).status()).toBe(200);
+   await row.getByRole("button",{name:"Revocar sesiones",exact:true}).click();
+-  await expect(page.getByRole("alert")).toContainText("Recargue");
++  await expect(page.getByRole("alert").filter({hasText:"Recargue"})).toContainText("Recargue");
+   await page.getByRole("button",{name:"Recargar cuentas",exact:true}).click();
+   row=await findRow(page,email);
+   await expect(row).toContainText("Profesional");

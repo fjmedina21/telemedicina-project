@@ -16,10 +16,16 @@ using Telemedicina.Api.Infrastructure.Email;
 namespace Telemedicina.Api.Features.Identity;
 
 [ApiController, Route("api/v1/auth"), EnableRateLimiting("auth")]
-public sealed class AuthController(Database database, IConfiguration configuration, NotificationService notifications, MailSettings mail) : ApiControllerBase(database)
+public sealed class AuthController(Database database, IConfiguration configuration, NotificationService notifications, MailSettings mail, IHostEnvironment environment) : ApiControllerBase(database)
 {
-    private IActionResult Failure(int status, string code) =>
-        Fail(status, code, "No se pudo completar la operación");
+    private IActionResult Failure(int status, string code)
+    {
+        if (status == 401 && Request.Path.Equals("/api/v1/auth/refresh", StringComparison.OrdinalIgnoreCase))
+        {
+            Response.Cookies.Delete("tm_access"); Response.Cookies.Delete("tm_refresh");
+        }
+        return Fail(status, code, "No se pudo completar la operación");
+    }
     private static readonly string DummyHash = Password(NewToken());
 
     [HttpPost("register")]
@@ -62,7 +68,7 @@ public sealed class AuthController(Database database, IConfiguration configurati
     public IActionResult Resend(ForgotRequest request)
     {
         using var c = Database.Open(); using var t = c.BeginTransaction();
-        var user = Scalar(c, t, "SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND NOT verified FOR UPDATE",
+        var user = Scalar(c, t, "SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND NOT verified AND role='Patient' FOR UPDATE",
             ("e", request.Email.Trim())) as string;
         if (user is not null)
         {
@@ -79,7 +85,7 @@ public sealed class AuthController(Database database, IConfiguration configurati
         using var c = Database.Open(); using var t = c.BeginTransaction();
         // Serialize verification and resend per account; attempts survive process restarts.
         var user = Scalar(c, t, """
-            SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND NOT verified FOR UPDATE
+            SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND NOT verified AND role='Patient' FOR UPDATE
             """, ("e", request.Email.Trim())) as string;
         if (user is null) return Failure(400, "INVALID_CHALLENGE");
         var challenge = Rows(c, t, """
@@ -110,7 +116,7 @@ public sealed class AuthController(Database database, IConfiguration configurati
     public IActionResult Forgot(ForgotRequest request)
     {
         using var c = Database.Open(); using var t = c.BeginTransaction();
-        var user = Scalar(c, t, "SELECT id FROM users WHERE lower(email)=lower(@e) AND active",
+        var user = Scalar(c, t, "SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND (verified OR role='Patient') FOR UPDATE",
             ("e", request.Email.Trim())) as string;
         if (user is not null)
         {
@@ -126,12 +132,17 @@ public sealed class AuthController(Database database, IConfiguration configurati
     public IActionResult Reset(ResetRequest request)
     {
         using var c = Database.Open(); using var t = c.BeginTransaction();
-        var user = Scalar(c, t, """
-            UPDATE challenges SET used=true WHERE token_hash=@h AND purpose='reset'
-            AND NOT used AND expires>@now RETURNING user_id
-            """, ("h", Hash(request.Token)), ("now", Now)) as string;
+        var user = Scalar(c, t, "SELECT user_id FROM challenges WHERE token_hash=@h AND purpose='reset'",
+            ("h", Hash(request.Token))) as string;
         if (user is null) return Failure(400, "INVALID_CHALLENGE");
-        Execute(c, t, "UPDATE users SET password_hash=@h,failed_logins=0,locked_until=0 WHERE id=@u",
+        Telemedicina.Api.Infrastructure.Authentication.AccountGuard.LockUsers(c, t, user);
+        var consumed = Scalar(c, t, """
+            UPDATE challenges SET used=true WHERE token_hash=@h AND purpose='reset'
+            AND NOT used AND expires>@now AND EXISTS(SELECT 1 FROM users WHERE id=@u AND active)
+            RETURNING user_id
+            """, ("h", Hash(request.Token)), ("u", user), ("now", Now)) as string;
+        if (consumed is null) return Failure(400, "INVALID_CHALLENGE");
+        Execute(c, t, "UPDATE users SET password_hash=@h,failed_logins=0,locked_until=0,version=version+1 WHERE id=@u",
             ("h", Password(request.Password)), ("u", user));
         Execute(c, t, "UPDATE sessions SET revoked=true WHERE user_id=@u", ("u", user));
         Execute(c, t, "DELETE FROM dev_mailbox WHERE user_id=@u AND purpose='reset'", ("u", user));
@@ -141,7 +152,9 @@ public sealed class AuthController(Database database, IConfiguration configurati
     [HttpGet("dev-mailbox")]
     public IActionResult Mailbox([FromQuery] string email, [FromQuery] string purpose)
     {
-        if (mail.Mode != "development") return NotFound();
+        if (!environment.IsDevelopment() || !configuration.GetValue<bool>("Milestone:Enabled") ||
+            (purpose != "staff-activation" && mail.Mode != "development") ||
+            purpose is not ("verify" or "reset" or "staff-activation")) return NotFound();
         var expected = configuration["Milestone:MailboxKey"];
         var supplied = Request.Headers["X-Dev-Mailbox-Key"].ToString();
         if (string.IsNullOrEmpty(expected) || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
@@ -158,12 +171,14 @@ public sealed class AuthController(Database database, IConfiguration configurati
     public IActionResult Login(LoginRequest request)
     {
         using var c = Database.Open(); using var t = c.BeginTransaction();
+        var observedVersion = Scalar(c, t, "SELECT version FROM users WHERE lower(email)=lower(@e)",
+            ("e", request.Email.Trim()));
         var rows = Rows(c, t, "SELECT * FROM users WHERE lower(email)=lower(@e) FOR UPDATE",
             ("e", request.Email.Trim()));
         var row = rows.FirstOrDefault();
         var passwordValid = CheckPassword(row?["password_hash"] as string ?? DummyHash, request.Password);
         var valid = row is not null && passwordValid && (bool)row["active"]! && (bool)row["verified"]!
-            && (long)row["locked_until"]! <= Now;
+            && (long)row["locked_until"]! <= Now && observedVersion is int observed && observed == (int)row["version"]!;
         if (!valid)
         {
             if (row is not null)
@@ -172,7 +187,7 @@ public sealed class AuthController(Database database, IConfiguration configurati
                     UPDATE users SET failed_logins=failed_logins+1,
                     locked_until=CASE WHEN failed_logins>=4 THEN @until ELSE locked_until END WHERE id=@u
                     """, ("until", Now + 300), ("u", row["id"]));
-                Record(c, t, (string)row["id"]!, "account.login_denied", (string)row["id"]!, HttpContext.TraceIdentifier);
+                Record(c, t, (string)row["id"]!, "account.login_denied", (string)row["id"]!, HttpContext.TraceIdentifier, "Denied");
             }
             t.Commit(); return Failure(401, "INVALID_CREDENTIALS");
         }
@@ -215,6 +230,10 @@ public sealed class AuthController(Database database, IConfiguration configurati
         var token = request.RefreshToken ?? Request.Cookies["tm_refresh"];
         if (string.IsNullOrEmpty(token)) return Failure(401, "SESSION_REQUIRED");
         using var c = Database.Open(); using var t = c.BeginTransaction();
+        var user = Scalar(c, t, "SELECT user_id FROM sessions WHERE refresh_hash=@h", ("h", Hash(token))) as string;
+        if (user is null) return Failure(401, "SESSION_REQUIRED");
+        Telemedicina.Api.Infrastructure.Authentication.AccountGuard.LockUsers(c, t, user);
+        // This second read observes revocation after any user-row lock wait.
         var rows = Rows(c, t, """
             SELECT s.id,s.user_id,s.expires,s.family_id,u.role FROM sessions s JOIN users u ON u.id=s.user_id
             WHERE s.refresh_hash=@h AND NOT s.revoked AND s.expires>@now AND u.active AND u.verified
@@ -226,17 +245,17 @@ public sealed class AuthController(Database database, IConfiguration configurati
         var result = CreateSession(c, t, (string)row["user_id"]!, (string)row["role"]!, (long)row["expires"]!, (string)row["family_id"]!);
         t.Commit(); return Data(result);
     }
-    [Authorize, HttpGet("me")]
-    public IActionResult Me() => Data(new
-    {
-        userId = UserId(User),
-        email = User.Identity!.Name,
-        role = User.FindFirst(System.Security.Claims.ClaimTypes.Role)!.Value
-    });
+    [Authorize, HttpGet("me"), ProducesResponseType(typeof(ApiResponse<IdentityResponse>), 200)]
+    public IActionResult Me() => Data(new IdentityResponse(
+        UserId(User), User.Identity!.Name!,
+        User.FindFirst(System.Security.Claims.ClaimTypes.Role)!.Value,
+        Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Permissions(
+            User.FindFirst(System.Security.Claims.ClaimTypes.Role)!.Value),
+        int.Parse(User.FindFirst("account_version")!.Value, System.Globalization.CultureInfo.InvariantCulture)));
     [Authorize, HttpPost("logout")]
     public IActionResult Logout()
     {
-        using var c = Database.Open(); using var t = c.BeginTransaction();
+        using var c = Database.Open(); using var t = Begin(c);
         Execute(c, t, "UPDATE sessions SET revoked=true WHERE user_id=@u AND family_id=(SELECT family_id FROM sessions WHERE id=@id)",
             ("u", UserId(User)), ("id", User.FindFirst("session_id")!.Value));
         Record(c, t, UserId(User), "session.revoked", UserId(User), HttpContext.TraceIdentifier); t.Commit();

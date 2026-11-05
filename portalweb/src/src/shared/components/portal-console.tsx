@@ -3,6 +3,7 @@ import {useCallback,useEffect,useState} from "react";
 import {RefreshCw,LogOut} from "lucide-react";
 import {useRouter} from "next/navigation";
 import {api,ApiError,Item} from "@/shared/api/client";
+import type {Identity} from "@/shared/api/identity";
 import CatalogPanel from "@/features/catalog/components/catalog-panel";
 import AdmissionQueue from "@/features/admission/components/admission-queue";
 import AuditEvents from "@/features/audit/components/audit-events";
@@ -11,13 +12,14 @@ import DeliveryPanel from "@/features/notifications/components/delivery-panel";
 
 export default function PortalConsole({view="queue"}:{view?:"queue"|"audit"|"schedule"|"catalog"|"delivery"}) {
   const router=useRouter();
-  const [user,setUser]=useState<{email:string;role:string}|null>(null);
+  const [user,setUser]=useState<Identity|null>(null);
   const [items,setItems]=useState<Item[]>([]),[busy,setBusy]=useState(true),[error,setError]=useState("");
   const [services,setServices]=useState<Item[]>([]),[practitioners,setPractitioners]=useState<Item[]>([]);
 
   const load=useCallback(async()=>{
-    const me=await api<{email:string;role:string}>("/auth/me");
-    if(me.role!=="Admission") throw new ApiError(403,"Se requiere el rol de admisión.");
+    const me=await api<Identity>("/auth/me");
+    const permission={queue:"admission.manage",audit:"audit.read",schedule:"schedule.manage",catalog:"catalog.manage",delivery:"delivery.read"}[view];
+    if(!me.permissions?.includes(permission)) throw new ApiError(403,"No tiene permiso para acceder a esta sección.");
     setUser(me);
     if(view==="audit") setItems(await api<Item[]>("/admin/audit-events"));
     else if(view==="queue") setItems(await api<Item[]>("/admin/work-queue"));
@@ -32,9 +34,16 @@ export default function PortalConsole({view="queue"}:{view?:"queue"|"audit"|"sch
     }
   },[view]);
   const failure=useCallback((e:unknown)=>{
-    if(e instanceof ApiError && (e.status===401 || e.status===403)) {
-      setUser(null); setItems([]); router.replace("/login");
+    if(e instanceof ApiError && e.status===401) {
+      setUser(null); setItems([]); setServices([]); setPractitioners([]); router.replace("/login");
+    } else if(e instanceof ApiError && e.status===403) {
+      setUser(null); setItems([]); setServices([]); setPractitioners([]); setError(e.message);
     } else setError(e instanceof Error?e.message:"Error de conexión");
+  },[router]);
+  useEffect(()=>{
+    const clear=()=>{setUser(null);setItems([]);setServices([]);setPractitioners([]);router.replace("/login");};
+    window.addEventListener("tm-session-invalidated",clear);
+    return ()=>window.removeEventListener("tm-session-invalidated",clear);
   },[router]);
   useEffect(()=>{
     let mounted=true;

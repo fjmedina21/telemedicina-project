@@ -3,7 +3,8 @@
     "argv": [
       "/Users/franciscomedinamatos/.nvm/versions/node/v24.18.0/bin/node",
       "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/node_modules/.bin/playwright",
-      "test"
+      "test",
+      "tests/browser/first-milestone"
     ],
     "configFile": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/playwright.config.ts",
     "rootDir": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser",
@@ -136,12 +137,12 @@
                   "workerIndex": 0,
                   "parallelIndex": 0,
                   "status": "passed",
-                  "duration": 998,
+                  "duration": 1236,
                   "errors": [],
                   "stdout": [],
                   "stderr": [],
                   "retry": 0,
-                  "startTime": "2026-11-05T04:49:18.012Z",
+                  "startTime": "2026-11-05T11:41:12.586Z",
                   "annotations": [
                     {
                       "type": "serial",
@@ -160,11 +161,11 @@
           ],
           "id": "77371019167a02b27363-b6ba7cdd15573fcea5d9",
           "file": "first-milestone/flow.spec.ts",
-          "line": 27,
+          "line": 26,
           "column": 5
         },
         {
-          "title": "real MFA login creates HttpOnly cookies without exposing tokens",
+          "title": "password login creates HttpOnly cookies without exposing tokens",
           "ok": true,
           "tags": [],
           "tests": [
@@ -188,12 +189,12 @@
                   "workerIndex": 0,
                   "parallelIndex": 0,
                   "status": "passed",
-                  "duration": 748,
+                  "duration": 2562,
                   "errors": [],
                   "stdout": [],
                   "stderr": [],
                   "retry": 0,
-                  "startTime": "2026-11-05T04:49:19.820Z",
+                  "startTime": "2026-11-05T11:41:14.758Z",
                   "annotations": [
                     {
                       "type": "serial",
@@ -210,9 +211,9 @@
               "status": "expected"
             }
           ],
-          "id": "77371019167a02b27363-802554e7a94dcb784f07",
+          "id": "77371019167a02b27363-8c48b03a5ce89b5876c6",
           "file": "first-milestone/flow.spec.ts",
-          "line": 33,
+          "line": 32,
           "column": 5
         },
         {
@@ -240,12 +241,12 @@
                   "workerIndex": 0,
                   "parallelIndex": 0,
                   "status": "passed",
-                  "duration": 773,
+                  "duration": 13501,
                   "errors": [],
                   "stdout": [],
                   "stderr": [],
                   "retry": 0,
-                  "startTime": "2026-11-05T04:49:20.574Z",
+                  "startTime": "2026-11-05T11:41:17.327Z",
                   "annotations": [
                     {
                       "type": "serial",
@@ -264,7 +265,7 @@
           ],
           "id": "77371019167a02b27363-2a73604db731d1343dee",
           "file": "first-milestone/flow.spec.ts",
-          "line": 51,
+          "line": 49,
           "column": 5
         },
         {
@@ -292,12 +293,12 @@
                   "workerIndex": 0,
                   "parallelIndex": 0,
                   "status": "passed",
-                  "duration": 1325,
+                  "duration": 9611,
                   "errors": [],
                   "stdout": [],
                   "stderr": [],
                   "retry": 0,
-                  "startTime": "2026-11-05T04:49:21.353Z",
+                  "startTime": "2026-11-05T11:41:30.839Z",
                   "annotations": [
                     {
                       "type": "serial",
@@ -316,7 +317,7 @@
           ],
           "id": "77371019167a02b27363-91a91c61d6bcbcb8ebbf",
           "file": "first-milestone/flow.spec.ts",
-          "line": 103,
+          "line": 101,
           "column": 5
         },
         {
@@ -344,12 +345,12 @@
                   "workerIndex": 0,
                   "parallelIndex": 0,
                   "status": "passed",
-                  "duration": 899,
+                  "duration": 8428,
                   "errors": [],
                   "stdout": [],
                   "stderr": [],
                   "retry": 0,
-                  "startTime": "2026-11-05T04:49:22.691Z",
+                  "startTime": "2026-11-05T11:41:40.459Z",
                   "annotations": [
                     {
                       "type": "serial",
@@ -368,7 +369,7 @@
           ],
           "id": "77371019167a02b27363-8421e737601fa41b44b0",
           "file": "first-milestone/flow.spec.ts",
-          "line": 132,
+          "line": 130,
           "column": 5
         },
         {
@@ -396,12 +397,12 @@
                   "workerIndex": 0,
                   "parallelIndex": 0,
                   "status": "passed",
-                  "duration": 675,
+                  "duration": 1254,
                   "errors": [],
                   "stdout": [],
                   "stderr": [],
                   "retry": 0,
-                  "startTime": "2026-11-05T04:49:23.597Z",
+                  "startTime": "2026-11-05T11:41:48.897Z",
                   "annotations": [
                     {
                       "type": "serial",
@@ -420,7 +421,7 @@
           ],
           "id": "77371019167a02b27363-6e51dbf4dc553b26eb8e",
           "file": "first-milestone/flow.spec.ts",
-          "line": 166,
+          "line": 164,
           "column": 5
         },
         {
@@ -448,12 +449,12 @@
                   "workerIndex": 0,
                   "parallelIndex": 0,
                   "status": "passed",
-                  "duration": 874,
+                  "duration": 7099,
                   "errors": [],
                   "stdout": [],
                   "stderr": [],
                   "retry": 0,
-                  "startTime": "2026-11-05T04:49:24.277Z",
+                  "startTime": "2026-11-05T11:41:50.160Z",
                   "annotations": [
                     {
                       "type": "serial",
@@ -472,7 +473,7 @@
           ],
           "id": "77371019167a02b27363-f5cfd357d963781f595c",
           "file": "first-milestone/flow.spec.ts",
-          "line": 176,
+          "line": 174,
           "column": 5
         }
       ]
@@ -480,8 +481,8 @@
   ],
   "errors": [],
   "stats": {
-    "startTime": "2026-11-05T04:49:17.735Z",
-    "duration": 7472.288,
+    "startTime": "2026-11-05T11:41:12.222Z",
+    "duration": 45103.539,
     "expected": 7,
     "skipped": 0,
     "unexpected": 0,

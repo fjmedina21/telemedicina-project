@@ -16,6 +16,7 @@ public class Program
 
     public static int Main(string[] args)
     {
+        if (args.Contains("--demo-reset-db-tests", StringComparer.Ordinal)) return DemoResetDbChecks.Run();
         Console.WriteLine("=================================================");
         Console.WriteLine(" Running Telemedicina Automated Unit Tests");
         Console.WriteLine("=================================================");
@@ -157,6 +158,50 @@ public class Program
                     "Revocation opt-out must only work in Development and remain opt-in.");
             });
         }
+
+        Test("StaffPermissions_DenyByDefaultAndNoAdminInheritance", () =>
+        {
+            foreach (var role in new[] { "Practitioner", "Support", "Unknown", "" })
+            {
+                Assert(!Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Allows(role, "staff.read"),
+                    "Only administrator reads staff.");
+                Assert(!Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Allows(role, "catalog.read"),
+                    "New staff roles receive no operational access.");
+            }
+            Assert(Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Allows("Administrator", "staff.invite"),
+                "Administrator may invite managed staff.");
+            Assert(!Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Allows("Administrator", "admission.manage"),
+                "Administrator does not inherit admission.");
+            Assert(!Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.IsManagedStaff("Administrator"),
+                "Administrator is not an HTTP-managed staff target.");
+            Assert(Telemedicina.Api.Infrastructure.Authentication.AccessCatalog.Allows("Admission", "patient.state.change"),
+                "Preserve admission's existing patient lifecycle permission.");
+        });
+        foreach (var environment in new[] { "Production", "Staging" })
+        {
+            Test("StaffSeed_Rejects_" + environment, () =>
+            {
+                var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = environment });
+                var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["ConnectionStrings:Telemedicina"] = "Host=127.0.0.1;Database=synthetic;Username=synthetic",
+                    ["Milestone:Enabled"] = "true"
+                }).Build();
+                var rejected = false;
+                try
+                {
+                    Telemedicina.Api.Infrastructure.Persistence.Seeding.StaffSyntheticSeeder.Seed(
+                        new Telemedicina.Api.Infrastructure.Persistence.Database(config), config, builder.Environment);
+                }
+                catch (InvalidOperationException error)
+                {
+                    rejected = error.Message == "Synthetic accounts require explicit Development configuration.";
+                }
+                Assert(rejected, "Seed must reject before opening a database connection.");
+            });
+        }
+
+        DemoResetUnitChecks.Register(Test, Assert);
 
         Console.WriteLine("-------------------------------------------------");
         Console.WriteLine($" Summary: {_passedCount} passed, {_failedCount} failed.");

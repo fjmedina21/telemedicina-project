@@ -25,10 +25,12 @@ public sealed class NotificationsController(Database database) : ApiControllerBa
     [Authorize(Roles = "Patient"), HttpPost("notifications/{id:guid}/read")]
     public IActionResult Read(Guid id)
     {
-        using var c = Database.Open();
-        var count = Execute(c, null, "UPDATE notifications SET read_at=coalesce(read_at,now()) WHERE id=@id AND user_id=@u",
+        using var c = Database.Open(); using var t = Begin(c);
+        var count = Execute(c, t, "UPDATE notifications SET read_at=coalesce(read_at,now()) WHERE id=@id AND user_id=@u",
             ("id", id.ToString()), ("u", UserId(User)));
-        return count == 0 ? NotFound() : Data(new { read = true });
+        if (count == 0) return NotFound();
+        t.Commit();
+        return Data(new { read = true });
     }
     [Authorize(Roles = "Patient"), HttpGet("notifications/preferences")]
     public IActionResult Preferences()
@@ -41,7 +43,7 @@ public sealed class NotificationsController(Database database) : ApiControllerBa
     [Authorize(Roles = "Patient"), HttpPatch("notifications/preferences")]
     public IActionResult SavePreferences(NotificationPreferencesRequest request)
     {
-        using var c = Database.Open(); using var t = c.BeginTransaction();
+        using var c = Database.Open(); using var t = Begin(c);
         Execute(c, t, "SELECT pg_advisory_xact_lock(hashtextextended(@key,0))", ("key", "mailuser:" + UserId(User)));
         var old = Scalar(c, t, "SELECT version FROM notification_preferences WHERE user_id=@u FOR UPDATE", ("u", UserId(User)));
         if ((old is null ? 0 : (int)old) != request.Version)

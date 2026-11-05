@@ -1,0 +1,8 @@
+{
+  "case": "expired access preserves valid refresh; revoked cookie replay clears the session",
+  "exitCode": 0,
+  "isolatedFreshApi": true,
+  "rateLimiterChanged": false,
+  "priorSuiteFailure": "429 after shared-window requests",
+  "testServicesStopped": true
+}

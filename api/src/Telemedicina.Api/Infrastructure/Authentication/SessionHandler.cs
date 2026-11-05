@@ -20,7 +20,7 @@ public sealed class SessionHandler(
         if (string.IsNullOrEmpty(token) || token.Length > 128) return Task.FromResult(AuthenticateResult.NoResult());
         using var c = services.GetRequiredService<Database>().Open();
         var rows = Rows(c, null, """
-            SELECT u.id,u.email,u.role,s.id AS session_id FROM sessions s JOIN users u ON u.id=s.user_id
+            SELECT u.id,u.email,u.role,u.version,s.id AS session_id FROM sessions s JOIN users u ON u.id=s.user_id
             WHERE s.access_hash=@hash AND NOT s.revoked AND s.access_expires>@now
             AND s.expires>@now AND u.active AND u.verified
             """, ("hash", Security.Hash(token)), ("now", Security.Now));
@@ -28,14 +28,26 @@ public sealed class SessionHandler(
         var row = rows[0];
         var claims = new[] { new Claim(ClaimTypes.NameIdentifier,(string)row["id"]!),
             new Claim(ClaimTypes.Name,(string)row["email"]!), new Claim(ClaimTypes.Role,(string)row["role"]!),
-            new Claim("session_id",(string)row["session_id"]!) };
+            new Claim("session_id",(string)row["session_id"]!),
+            new Claim("account_version",((int)row["version"]!).ToString(System.Globalization.CultureInfo.InvariantCulture)) };
         return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(
             new ClaimsPrincipal(new ClaimsIdentity(claims, Security.Scheme)), Security.Scheme)));
     }
     protected override Task HandleChallengeAsync(AuthenticationProperties properties) =>
         Reject(401, "SESSION_REQUIRED");
-    protected override Task HandleForbiddenAsync(AuthenticationProperties properties) =>
-        Reject(403, "ACCESS_DENIED");
+    protected override Task HandleForbiddenAsync(AuthenticationProperties properties)
+    {
+        if (Request.Path.StartsWithSegments("/api/v1/admin/staff") && Context.User.Identity?.IsAuthenticated == true)
+        {
+            using var c = services.GetRequiredService<Database>().Open();
+            using var t = c.BeginTransaction();
+            Telemedicina.Api.Infrastructure.Auditing.AuditLog.Record(c, t,
+                Security.UserId(Context.User), "staff.access_denied", "staff",
+                Context.TraceIdentifier, "Denied");
+            t.Commit();
+        }
+        return Reject(403, "ACCESS_DENIED");
+    }
     private Task Reject(int status, string code)
     {
         Response.StatusCode = status;

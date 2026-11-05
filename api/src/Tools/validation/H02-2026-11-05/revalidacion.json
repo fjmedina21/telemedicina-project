@@ -1,0 +1,35 @@
+{
+  "date": "2026-11-05T11:48:57.545210+00:00",
+  "synthetic": true,
+  "realSmtpUsed": false,
+  "approvedPatchSha256": "a5ab5e40ad8cffea99320d2571e10b65feec2d3a44082397e816721f859e2df0",
+  "dotnetReleaseBuild": "PASS",
+  "stages": [
+    {
+      "name": "01-dotnet-tests",
+      "exitCode": 0,
+      "seconds": 0.96
+    },
+    {
+      "name": "02-seed-admission",
+      "exitCode": 0,
+      "seconds": 15.45
+    },
+    {
+      "name": "03-seed-staff",
+      "exitCode": 0,
+      "seconds": 2.53
+    },
+    {
+      "name": "04-playwright-second",
+      "exitCode": 1,
+      "seconds": 41.12
+    },
+    {
+      "name": "05-http-second",
+      "exitCode": 0,
+      "seconds": 194.85
+    }
+  ],
+  "testServicesStopped": true
+}

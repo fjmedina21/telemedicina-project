@@ -5,6 +5,7 @@ using Telemedicina.Api.Configuration;
 using Telemedicina.Api.Infrastructure.Persistence;
 using Telemedicina.Api.Infrastructure.Persistence.Seeding;
 using Telemedicina.Api.Infrastructure.Email;
+using Telemedicina.Api.Infrastructure.Authentication;
 using Telemedicina.Common.Models.ApiResponses;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -43,7 +44,25 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-if (args.Contains("--inspect") || args.Contains("--migrate") || args.Contains("--seed-synthetic"))
+if (args.Contains("--reset-demo-data", StringComparer.Ordinal))
+{
+    try
+    {
+        var options = DemoResetOptions.Parse(args);
+        DemoDataReset.RequireEnvironment(app.Configuration, app.Environment);
+        var report = DemoDataReset.Run(app.Services.GetRequiredService<Database>(),
+            app.Configuration, app.Environment, options);
+        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(report,
+            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
+    }
+    catch (DemoResetException error) { Console.Error.WriteLine(error.Code); Environment.ExitCode = 1; }
+    catch (Npgsql.PostgresException error) { Console.Error.WriteLine("DEMO_RESET_DATABASE_ERROR " + error.SqlState + " position=" + error.Position + " message=" + (error.SqlState == "42P08" ? error.MessageText : "details-suppressed")); Environment.ExitCode = 1; }
+    catch (Exception error) { Console.Error.WriteLine("DEMO_RESET_FAILED " + error.GetType().Name); Environment.ExitCode = 1; }
+    return;
+}
+
+
+if (args.Contains("--inspect") || args.Contains("--migrate") || args.Contains("--seed-synthetic") || args.Contains("--seed-staff-synthetic"))
 {
     if (!app.Environment.IsDevelopment() || !app.Configuration.GetValue<bool>("Milestone:Enabled"))
         throw new InvalidOperationException("Milestone commands require explicit development configuration.");
@@ -63,7 +82,9 @@ if (args.Contains("--inspect") || args.Contains("--migrate") || args.Contains("-
     if (args.Contains("--migrate"))
         database.Migrate(Path.Combine(app.Environment.ContentRootPath, "Infrastructure", "Persistence", "Migrations", "001_initial.sql"));
     if (args.Contains("--seed-synthetic"))
-        SyntheticDataSeeder.Seed(database, app.Configuration);
+        SyntheticDataSeeder.Seed(database, app.Configuration, app.Environment);
+    if (args.Contains("--seed-staff-synthetic"))
+        StaffSyntheticSeeder.Seed(database, app.Configuration, app.Environment);
     return;
 }
 
@@ -97,6 +118,15 @@ app.UseExceptionHandler(exceptionHandlerApp =>
 {
     exceptionHandlerApp.Run(async context =>
     {
+        if (context.Features.Get<IExceptionHandlerFeature>()?.Error is SessionRejectedException rejected)
+        {
+            context.Response.StatusCode = rejected.Status;
+            await context.Response.WriteAsJsonAsync(
+                ApiErrors.Create(context, rejected.Status, rejected.Code, "Acceso no autorizado"),
+                options: new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web),
+                contentType: "application/problem+json");
+            return;
+        }
         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
         context.Response.ContentType = "application/problem+json";
 
