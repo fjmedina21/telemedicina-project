@@ -99,7 +99,7 @@ API o proveedor de notificaciones repite mismo evento. Resultado: reserva, cobro
 ## 7. Aspectos que requieren prototipo temprano
 
 - **Spike Video:** privacidad contractual, tokens efímeros, join y reconexión Android/iOS, calidad en red móvil, métricas.
-- **Spike de identidad:** verificación de paciente/tutor, MFA personal, cuentas de admisión.
+- **Spike de identidad:** verificación de paciente/tutor y cuentas de admisión.
 - **Spike de cobertura:** modelo de autorización real con al menos una ARS o definir operación manual.
 - **Spike de firma:** qué documentos son clínicamente y legalmente publicables y con qué evidencias.
 

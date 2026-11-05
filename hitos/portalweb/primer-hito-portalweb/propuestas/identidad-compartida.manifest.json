@@ -1,0 +1,152 @@
+[
+  {
+    "path": "app/src/lib/app/theme/brand_theme.dart",
+    "new": true,
+    "baseline_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proposed_sha256": "c56756f504b787aa83cb733333cad335e3f1b36a09c13a38701c5e118745c7d5"
+  },
+  {
+    "path": "app/src/lib/shared/widgets/brand_identity.dart",
+    "new": true,
+    "baseline_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proposed_sha256": "9dfd4c93181319070f718e40250cebc3c4098d9249d4722efb28a61cc3238f58"
+  },
+  {
+    "path": "app/src/lib/shared/widgets/status_pill.dart",
+    "new": true,
+    "baseline_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proposed_sha256": "761eed07fcfa4a19e0b1dd6d7a8b18e8d6741091a1d93489e7ae5efb3aced1a4"
+  },
+  {
+    "path": "app/src/lib/main.dart",
+    "new": false,
+    "baseline_sha256": "b1f8df4faf6b5df7952a5044a61db24f3eca1d19606705a7b2f3ab4c016fa242",
+    "proposed_sha256": "cea89353e9547f9bdb1ee7398e241d6cd75c7602ea2d7477e560d5d607ebd951"
+  },
+  {
+    "path": "app/src/lib/app/presentation/patient_shell.dart",
+    "new": false,
+    "baseline_sha256": "cc3cf53f37cdea78343661a7fcfeb0fab6821d1a1830f1238b6e05f2a8a449af",
+    "proposed_sha256": "92177bfae7d232983b6b92dead90ea8be81425f6eddba497d52781317bbc8630"
+  },
+  {
+    "path": "app/src/lib/features/auth/presentation/auth_form.dart",
+    "new": false,
+    "baseline_sha256": "b45023775d2fbbb0baa288a602a05aa256f3298dc68f5995786041486d6c7aee",
+    "proposed_sha256": "ea8b0b8edafec6a8151266c2d1de3bf16ec353533e3bfad3230279aa67e33398"
+  },
+  {
+    "path": "app/src/lib/shared/widgets/labeled_text_field.dart",
+    "new": false,
+    "baseline_sha256": "bff57546a67c276ab87c46fb9b54a7f41b79a2c1d4d52b047b0a239ce340eacb",
+    "proposed_sha256": "f6832cff983f47ace154b10e4eb45e98c6968fe103aa8497bec2e9b7d7d7746f"
+  },
+  {
+    "path": "app/src/lib/features/patient_profile/presentation/patient_profile_form.dart",
+    "new": false,
+    "baseline_sha256": "c24cc6404b585e787dc0e63f7caf1b5df9cf741ba30ec78ed3215a404e81cb3c",
+    "proposed_sha256": "122647e09518c8f95f1a088f3446a59239678d62b6e3aa7d737d88a53ac64b19"
+  },
+  {
+    "path": "app/src/lib/features/appointments/presentation/appointments_view.dart",
+    "new": false,
+    "baseline_sha256": "c19419c8caa3a3fa869614d418a4efee198212ac79073821100de6450a7c4e49",
+    "proposed_sha256": "a8fb05cbabe738e71c46c9755fab077eab337478848ab81c6d9559ccfeef0ed5"
+  },
+  {
+    "path": "app/src/lib/features/catalog/presentation/booking_form.dart",
+    "new": false,
+    "baseline_sha256": "72844ddd30f9cdbc11799eb03c0b06cd2764066d0bae19aaad313d56eb909be7",
+    "proposed_sha256": "9be47086f52f4e76182961026d182d2ab22993f25e6914710bfc42733955cb43"
+  },
+  {
+    "path": "app/src/lib/features/notifications/presentation/notifications_view.dart",
+    "new": false,
+    "baseline_sha256": "88db49779f9e2ce7bfcef52a40443a1cb7246b45bcddc36dddd1a79280fcb41f",
+    "proposed_sha256": "acc2caf529c074031c6b26ac6c4b58c425e32201e4c2e3937c03ca4ff2197476"
+  },
+  {
+    "path": "app/src/test/app/patient_shell_test.dart",
+    "new": false,
+    "baseline_sha256": "20c24000466b21a63253226a41bb54084015727df0981407c0c5df44f03909fe",
+    "proposed_sha256": "fce6c93e30c1bbad8a7c9ffe91da172f148dfca7fd7fb2350c83fe5be560d1fb"
+  },
+  {
+    "path": "app/src/test/features/notifications/notifications_view_test.dart",
+    "new": false,
+    "baseline_sha256": "a3f8d84d0b82950a3c2c1f2890b3b526c7eb6a4040663480681c94cc56e1d753",
+    "proposed_sha256": "c8ad9108a0129e6a807b179a34cb040ce6fb292175b7f51e3752700bad860384"
+  },
+  {
+    "path": "app/src/test/app/brand_layout_test.dart",
+    "new": true,
+    "baseline_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proposed_sha256": "a830675d7b98572b3f292e479f4d836bd3755f8157e2da230442922c13ed5d4c"
+  },
+  {
+    "path": "portalweb/src/src/shared/components/brand.tsx",
+    "new": true,
+    "baseline_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proposed_sha256": "d066acda00513ce57eba8b6781b6cd523a0cc699dfb6bdd25a17523589fa3dba"
+  },
+  {
+    "path": "portalweb/src/src/shared/components/app-frame.tsx",
+    "new": true,
+    "baseline_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proposed_sha256": "5d3fd012276f410aa6174f710b87875d9bbf830237306ce1a8bb194864e72b70"
+  },
+  {
+    "path": "portalweb/src/src/app/layout.tsx",
+    "new": false,
+    "baseline_sha256": "6b4db990160597974314e48b86f1403937b3649564bc071c17fcab5ec60e96cc",
+    "proposed_sha256": "ee2f41fa18dd637276bf03f03cc611f887f10a37e7a106c29b39fc1e802ad82f"
+  },
+  {
+    "path": "portalweb/src/src/app/globals.css",
+    "new": false,
+    "baseline_sha256": "7dedc37e0e6d90706fcd08785961f03aaccc81b852f37a78da417a318876c1f2",
+    "proposed_sha256": "2d3ae0c9e82a25a219e24ef67464ef92d65a369299c395718f3456490a45f7dc"
+  },
+  {
+    "path": "portalweb/src/src/shared/components/status-badge.tsx",
+    "new": true,
+    "baseline_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proposed_sha256": "f250cd776faef4bd59eeaee64b8f374b2db0806c5defa2cceaa11b6f30ef6647"
+  },
+  {
+    "path": "portalweb/src/src/features/auth/components/login-form.tsx",
+    "new": false,
+    "baseline_sha256": "9c3c664a2c8f4f209cd2ff9ea860f052d0a5a2cfef2c42f4eb08129c3358fcef",
+    "proposed_sha256": "56a40642be25380a02ab984e6d8f8b7f362bb4e31cf319fc750bc2ab85a8932e"
+  },
+  {
+    "path": "portalweb/src/src/shared/components/portal-console.tsx",
+    "new": false,
+    "baseline_sha256": "81cefd5c23a1abcef3c8623966cd60569922f810e627b95b114edb2f452738fb",
+    "proposed_sha256": "fca3ef4888a390ea93d9d62ae4d891084c482367e2d0e9523d839f23dcfcf9da"
+  },
+  {
+    "path": "portalweb/src/src/features/admission/components/admission-queue.tsx",
+    "new": false,
+    "baseline_sha256": "09a1d7af0942bf8cde785c3fc0233b3bf16a541c1665c79ab8becd1ec7c112d2",
+    "proposed_sha256": "50b5d3a32d82a5e02c8f4ff2755fd2b29be290f47f0ec6f5eca47bd3f7506c4b"
+  },
+  {
+    "path": "portalweb/src/src/features/notifications/components/delivery-panel.tsx",
+    "new": false,
+    "baseline_sha256": "d4f452e84009b3d30a372bd2c7c85b5883f2e886acb4b9222d66df37cbcddade",
+    "proposed_sha256": "c6565e8561024e2a48ca5b742597699fd39f3e2d0abfe9b92ee52577384ac2be"
+  },
+  {
+    "path": "portalweb/src/tests/browser/first-milestone/flow.spec.ts",
+    "new": false,
+    "baseline_sha256": "4307d63fcc095367a30fd03797849e296fa85bbc0583fedd9e4c9317f38e5b3f",
+    "proposed_sha256": "ce0d768a2cb3275510f32424ded0dbe3bef1b7cd78ccb643bdc5cf0ef94ce91d"
+  },
+  {
+    "path": "portalweb/src/tailwind.config.ts",
+    "new": false,
+    "baseline_sha256": "6c6cc6e1eb21ec49b52c163d80717c5e9552fbbcea5e281c221c7929541594cc",
+    "proposed_sha256": "2ffaba98c10506d5fef7883f7d177438c043bf96183a938375da5e515e94f4b0"
+  }
+]

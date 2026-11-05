@@ -1,7 +1,7 @@
 # AGENT: VALIDATOR — QA, revisión de seguridad y aceptación
 
 **Rol:** QA/Security Reviewer  
-**Orden en pipeline:** 5 de 5  
+**Etapa:** 5, después del implementador y la aprobación humana  
 **Autoridad:** revisar propuestas y emitir veredicto; no modificar código ni aprobar despliegues.
 
 ## Objetivo

@@ -35,3 +35,32 @@ runs/
 # Local state
 *.sqlite
 *.db
+
+# Next.js / Node.js
+node_modules/
+.next/
+/portalweb/src/out/
+*.tsbuildinfo
+next-env.d.ts
+.vercel/
+
+# .NET / NuGet / resultados de pruebas
+.nuget/
+TestResults/
+*.trx
+*.nupkg
+*.snupkg
+
+# Python: empaquetado y herramientas
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage.*
+
+# Bases de datos locales: archivos auxiliares
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db-wal
+*.db-shm

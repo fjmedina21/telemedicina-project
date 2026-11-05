@@ -142,7 +142,7 @@ Preparar traducciones de los modelos internos a recursos HL7 FHIR cuando se defi
 
 ## 8. Seguridad, privacidad y operación
 
-- MFA para personal clínico/administrativo, autorización en servidor por rol y relación de atención, revocación de sesiones y protección anti-enumeración/rate limit.
+- Autenticación de personal con contraseña, autorización en servidor por rol y relación de atención, revocación de sesiones y protección anti-enumeración/rate limit.
 - Tokens solo en almacenamiento seguro del sistema; evitar guardar expedientes completos en caché local y borrar datos sensibles al cerrar sesión.
 - TLS, secretos fuera del binario, cifrado en reposo, respaldos probados, retención/depuración aprobadas, audit trail.
 - Separación dev/staging/prod y datos sintéticos fuera de producción; no incluir PII/PHI en crashes/analytics.

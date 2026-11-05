@@ -1,0 +1,86 @@
+--- a/api/src/Telemedicina.Api/Infrastructure/Email/MailSettings.cs
++++ b/api/src/Telemedicina.Api/Infrastructure/Email/MailSettings.cs
+@@ -11,6 +11,10 @@
+ public sealed class MailSettings(IConfiguration configuration, IWebHostEnvironment environment)
+ {
+     public string Mode => configuration["Mail:Mode"] ?? "development";
++    // Revocation remains mandatory outside local development. Certificate trust,
++    // validity and hostname checks are never bypassed.
++    public bool CheckCertificateRevocation => !environment.IsDevelopment()
++        || configuration.GetValue("Mail:CheckCertificateRevocation", true);
+     public string Host => configuration["Mail:Host"] ?? "smtp.gmail.com";
+     public int Port => configuration.GetValue("Mail:Port", 587);
+     public string Username => configuration["Mail:Username"] ?? "";
+--- a/api/src/Telemedicina.Api/Infrastructure/Email/MailTransport.cs
++++ b/api/src/Telemedicina.Api/Infrastructure/Email/MailTransport.cs
+@@ -16,6 +16,7 @@
+     private async Task Connect(SmtpClient client, CancellationToken cancellation)
+     {
+         client.Timeout = 15000;
++        client.CheckCertificateRevocation = settings.CheckCertificateRevocation;
+         await client.ConnectAsync(settings.Host, settings.Port, settings.IsLocalTest ? SecureSocketOptions.None :
+             settings.Port == 465 ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTls, cancellation);
+         if (!settings.IsLocalTest || !string.IsNullOrEmpty(settings.Username))
+--- a/api/src/.env.example
++++ b/api/src/.env.example
+@@ -8,8 +8,11 @@
+ Milestone__AdmissionEmail=admission@example.invalid
+ Milestone__AdmissionPassword=SET_A_PRIVATE_PASSWORD_WITH_12_OR_MORE_CHARACTERS
+ Milestone__AdmissionTotpSecret=GENERATE_A_PRIVATE_BASE32_TOTP_SECRET
+-# Gmail is intentionally deferred. This mode captures messages without external delivery.
++# Use smtp to enable delivery after configuring private credentials.
+ Mail__Mode=development
++# Keep true normally. Development only: false works around unavailable revocation status
++# on macOS; chain trust, expiry and hostname validation remain enabled.
++Mail__CheckCertificateRevocation=true
+ Mail__Host=smtp.gmail.com
+ Mail__Port=587
+ Mail__Username=sender@example.invalid
+--- a/api/src/Telemedicina.Tests/Telemedicina.Tests.csproj
++++ b/api/src/Telemedicina.Tests/Telemedicina.Tests.csproj
+@@ -8,6 +8,7 @@
+   </PropertyGroup>
+ 
+   <ItemGroup>
++    <ProjectReference Include="../Telemedicina.Api/Telemedicina.Api.csproj" />
+     <ProjectReference Include="..\Telemedicina.Common\Telemedicina.Common.csproj" />
+   </ItemGroup>
+ 
+--- a/api/src/Telemedicina.Tests/Contracts/Program.cs
++++ b/api/src/Telemedicina.Tests/Contracts/Program.cs
+@@ -1,3 +1,6 @@
++using Microsoft.AspNetCore.Builder;
++using Microsoft.Extensions.Configuration;
++using Telemedicina.Api.Infrastructure.Email;
+ using System;
+ using System.Collections.Generic;
+ using Telemedicina.Common.Contracts.Health;
+@@ -95,6 +98,28 @@
+             Assert(health.TimestampUtc == now, "TimestampUtc must match");
+         });
+ 
++        foreach (var (environment, configured, expected) in new[]
++        {
++            ("Development", (string?)null, true),
++            ("Development", "false", false),
++            ("Production", "false", true),
++            ("Staging", "false", true)
++        })
++        {
++            Test($"MailRevocation_{environment}_{configured ?? "default"}", () =>
++            {
++                var builder = WebApplication.CreateBuilder(new WebApplicationOptions
++                {
++                    EnvironmentName = environment
++                });
++                var config = new ConfigurationBuilder().AddInMemoryCollection(
++                    new Dictionary<string, string?> { ["Mail:CheckCertificateRevocation"] = configured }).Build();
++                var settings = new MailSettings(config, builder.Environment);
++                Assert(settings.CheckCertificateRevocation == expected,
++                    "Revocation opt-out must only work in Development and remain opt-in.");
++            });
++        }
++
+         Console.WriteLine("-------------------------------------------------");
+         Console.WriteLine($" Summary: {_passedCount} passed, {_failedCount} failed.");
+         Console.WriteLine("=================================================");

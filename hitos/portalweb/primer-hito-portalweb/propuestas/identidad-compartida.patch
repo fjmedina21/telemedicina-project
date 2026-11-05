@@ -1,0 +1,1483 @@
+diff --git a/app/src/lib/app/theme/brand_theme.dart b/app/src/lib/app/theme/brand_theme.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/lib/app/theme/brand_theme.dart
+@@ -0,0 +1,134 @@
++import 'package:flutter/material.dart';
++
++abstract final class BrandTheme {
++  static const primary = Color(0xFF205C4D);
++  static const ink = Color(0xFF172E27);
++  static const muted = Color(0xFF5C6F65);
++  static const background = Color(0xFFF5F7F4);
++  static const soft = Color(0xFFE5F0E9);
++  static const border = Color(0xFFDBE4DD);
++  static const fieldBorder = Color(0xFF81958A);
++  static ThemeData get light {
++    final scheme =
++        ColorScheme.fromSeed(
++          seedColor: primary,
++          brightness: Brightness.light,
++        ).copyWith(
++          primary: primary,
++          onPrimary: Colors.white,
++          surface: Colors.white,
++          onSurface: ink,
++          onSurfaceVariant: muted,
++          outline: border,
++          primaryContainer: soft,
++          onPrimaryContainer: ink,
++          error: const Color(0xFF963F32),
++        );
++    final base = ThemeData(useMaterial3: true, colorScheme: scheme);
++    final shape = RoundedRectangleBorder(
++      borderRadius: BorderRadius.circular(12),
++    );
++    return base.copyWith(
++      scaffoldBackgroundColor: background,
++      textTheme: base.textTheme
++          .apply(bodyColor: ink, displayColor: ink)
++          .copyWith(
++            headlineMedium: const TextStyle(
++              fontSize: 30,
++              height: 1.16,
++              letterSpacing: -1,
++              color: ink,
++              fontWeight: FontWeight.w600,
++            ),
++            titleLarge: const TextStyle(
++              fontSize: 24,
++              height: 1.25,
++              letterSpacing: -.6,
++              color: ink,
++              fontWeight: FontWeight.w600,
++            ),
++            bodyMedium: const TextStyle(fontSize: 14, height: 1.6, color: ink),
++          ),
++      appBarTheme: const AppBarTheme(
++        backgroundColor: Colors.white,
++        foregroundColor: ink,
++        surfaceTintColor: Colors.transparent,
++        elevation: 0,
++        scrolledUnderElevation: 0,
++        toolbarHeight: 76,
++      ),
++      cardTheme: CardThemeData(
++        elevation: 0,
++        color: Colors.white,
++        margin: const EdgeInsets.only(bottom: 12),
++        shape: RoundedRectangleBorder(
++          borderRadius: BorderRadius.circular(16),
++          side: const BorderSide(color: border),
++        ),
++      ),
++      inputDecorationTheme: InputDecorationTheme(
++        filled: true,
++        fillColor: Colors.white,
++        contentPadding: const EdgeInsets.symmetric(
++          horizontal: 16,
++          vertical: 18,
++        ),
++        labelStyle: const TextStyle(color: muted, fontSize: 14),
++        border: OutlineInputBorder(
++          borderRadius: BorderRadius.circular(12),
++          borderSide: const BorderSide(color: fieldBorder),
++        ),
++        enabledBorder: OutlineInputBorder(
++          borderRadius: BorderRadius.circular(12),
++          borderSide: const BorderSide(color: fieldBorder),
++        ),
++        focusedBorder: OutlineInputBorder(
++          borderRadius: BorderRadius.circular(12),
++          borderSide: const BorderSide(color: primary, width: 2),
++        ),
++      ),
++      filledButtonTheme: FilledButtonThemeData(
++        style: FilledButton.styleFrom(
++          backgroundColor: primary,
++          foregroundColor: Colors.white,
++          minimumSize: const Size(48, 50),
++          shape: shape,
++          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
++        ),
++      ),
++      outlinedButtonTheme: OutlinedButtonThemeData(
++        style: OutlinedButton.styleFrom(
++          minimumSize: const Size(48, 48),
++          shape: shape,
++          side: const BorderSide(color: border),
++        ),
++      ),
++      textButtonTheme: TextButtonThemeData(
++        style: TextButton.styleFrom(
++          minimumSize: const Size(48, 48),
++          textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
++        ),
++      ),
++      navigationBarTheme: NavigationBarThemeData(
++        backgroundColor: Colors.white,
++        indicatorColor: soft,
++        elevation: 0,
++        height: 76,
++        labelTextStyle: WidgetStateProperty.resolveWith(
++          (states) => TextStyle(
++            fontSize: 11,
++            color: states.contains(WidgetState.selected) ? primary : muted,
++            fontWeight: states.contains(WidgetState.selected)
++                ? FontWeight.w600
++                : FontWeight.w400,
++          ),
++        ),
++      ),
++      dividerTheme: const DividerThemeData(
++        color: border,
++        space: 32,
++        thickness: 1,
++      ),
++    );
++  }
++}
+diff --git a/app/src/lib/shared/widgets/brand_identity.dart b/app/src/lib/shared/widgets/brand_identity.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/lib/shared/widgets/brand_identity.dart
+@@ -0,0 +1,83 @@
++import 'package:flutter/material.dart';
++
++import '../../app/theme/brand_theme.dart';
++
++class BrandIdentity extends StatelessWidget {
++  const BrandIdentity({super.key});
++  @override
++  Widget build(BuildContext context) => Row(
++    mainAxisSize: MainAxisSize.min,
++    children: [
++      Container(
++        width: 40,
++        height: 40,
++        decoration: BoxDecoration(
++          color: BrandTheme.primary,
++          borderRadius: BorderRadius.circular(12),
++        ),
++        child: const Icon(Icons.add_rounded, color: Colors.white, size: 30),
++      ),
++      const SizedBox(width: 10),
++      const Flexible(
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Text(
++              'telemedicina',
++              style: TextStyle(
++                fontSize: 20,
++                fontWeight: FontWeight.w600,
++                letterSpacing: -.7,
++                color: BrandTheme.ink,
++              ),
++            ),
++            Text(
++              'Tu espacio de salud',
++              style: TextStyle(fontSize: 10, color: BrandTheme.muted),
++            ),
++          ],
++        ),
++      ),
++    ],
++  );
++}
++
++class EmptyState extends StatelessWidget {
++  final IconData icon;
++  final String title, description;
++  const EmptyState({
++    super.key,
++    required this.icon,
++    required this.title,
++    required this.description,
++  });
++  @override
++  Widget build(BuildContext context) => Padding(
++    padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 12),
++    child: Column(
++      children: [
++        Container(
++          padding: const EdgeInsets.all(16),
++          decoration: BoxDecoration(
++            color: BrandTheme.soft,
++            borderRadius: BorderRadius.circular(20),
++          ),
++          child: Icon(icon, color: BrandTheme.primary, size: 28),
++        ),
++        const SizedBox(height: 18),
++        Text(
++          title,
++          textAlign: TextAlign.center,
++          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
++        ),
++        const SizedBox(height: 6),
++        Text(
++          description,
++          textAlign: TextAlign.center,
++          style: const TextStyle(color: BrandTheme.muted),
++        ),
++      ],
++    ),
++  );
++}
+diff --git a/app/src/lib/shared/widgets/status_pill.dart b/app/src/lib/shared/widgets/status_pill.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/lib/shared/widgets/status_pill.dart
+@@ -0,0 +1,72 @@
++import 'package:flutter/material.dart';
++
++class StatusPill extends StatelessWidget {
++  final String value;
++  const StatusPill(this.value, {super.key});
++  @override
++  Widget build(BuildContext context) {
++    final (label, foreground, background) = switch (value) {
++      'Confirmed' => (
++        'Confirmada',
++        const Color(0xFF205440),
++        const Color(0xFFE5F1E8),
++      ),
++      'Approved' => (
++        'Aprobada',
++        const Color(0xFF205440),
++        const Color(0xFFE5F1E8),
++      ),
++      'PendingValidation' => (
++        'Pendiente',
++        const Color(0xFF785316),
++        const Color(0xFFF9EFDA),
++      ),
++      'Pending' => (
++        'Pendiente',
++        const Color(0xFF785316),
++        const Color(0xFFF9EFDA),
++      ),
++      'ManualReview' => (
++        'En revisión',
++        const Color(0xFF785316),
++        const Color(0xFFF9EFDA),
++      ),
++      'Denied' => (
++        'Denegada',
++        const Color(0xFF963F32),
++        const Color(0xFFFAE8E3),
++      ),
++      'Rejected' => (
++        'Rechazada',
++        const Color(0xFF963F32),
++        const Color(0xFFFAE8E3),
++      ),
++      'Cancelled' => (
++        'Cancelada',
++        const Color(0xFF58655F),
++        const Color(0xFFEDF1ED),
++      ),
++      'Expired' => (
++        'Vencida',
++        const Color(0xFF58655F),
++        const Color(0xFFEDF1ED),
++      ),
++      _ => (value, const Color(0xFF58655F), const Color(0xFFEDF1ED)),
++    };
++    return Container(
++      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
++      decoration: BoxDecoration(
++        color: background,
++        borderRadius: BorderRadius.circular(6),
++      ),
++      child: Text(
++        label,
++        style: TextStyle(
++          color: foreground,
++          fontSize: 12,
++          fontWeight: FontWeight.w600,
++        ),
++      ),
++    );
++  }
++}
+diff --git a/app/src/lib/main.dart b/app/src/lib/main.dart
+--- a/app/src/lib/main.dart
++++ b/app/src/lib/main.dart
+@@ -1,6 +1,7 @@
+ import 'package:flutter/material.dart';
+ 
+ import 'app/presentation/patient_shell.dart';
++import 'app/theme/brand_theme.dart';
+ 
+ void main() => runApp(const MyApp());
+ 
+@@ -8,11 +9,9 @@
+   const MyApp({super.key});
+   @override
+   Widget build(BuildContext context) => MaterialApp(
+-    title: 'Telemedicina · Primer hito',
+-    theme: ThemeData(
+-      colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+-      useMaterial3: true,
+-    ),
++    title: 'Telemedicina',
++    debugShowCheckedModeBanner: false,
++    theme: BrandTheme.light,
+     home: const PatientShell(),
+   );
+ }
+diff --git a/app/src/lib/app/presentation/patient_shell.dart b/app/src/lib/app/presentation/patient_shell.dart
+--- a/app/src/lib/app/presentation/patient_shell.dart
++++ b/app/src/lib/app/presentation/patient_shell.dart
+@@ -1,6 +1,8 @@
+ import 'package:flutter/material.dart';
+ 
+ import '../../core/network/api_client.dart';
++import '../theme/brand_theme.dart';
++import '../../shared/widgets/brand_identity.dart';
+ import '../application/patient_controller.dart';
+ import '../../features/auth/presentation/auth_form.dart';
+ import '../../features/patient_profile/presentation/patient_profile_form.dart';
+@@ -83,7 +85,7 @@
+       final c = controller;
+       return Scaffold(
+         appBar: AppBar(
+-          title: const Text('Telemedicina · Datos sintéticos'),
++          title: const BrandIdentity(),
+           actions: [
+             if (c.authenticated)
+               IconButton(
+@@ -92,14 +94,25 @@
+                 icon: const Icon(Icons.refresh),
+               ),
+             if (c.authenticated)
+-              TextButton(
++              IconButton(
++                tooltip: 'Salir',
+                 onPressed: c.busy ? null : () => c.execute(c.logout),
+-                child: const Text('Salir'),
++                icon: const Icon(Icons.logout_rounded),
+               ),
+           ],
+         ),
+         body: Column(
+           children: [
++            Container(
++              width: double.infinity,
++              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
++              decoration: const BoxDecoration(color: BrandTheme.soft),
++              child: const Text(
++                'Demostración · Datos sintéticos · Sin atención clínica',
++                textAlign: TextAlign.center,
++                style: TextStyle(fontSize: 11, color: BrandTheme.primary),
++              ),
++            ),
+             if (c.busy) const LinearProgressIndicator(),
+             if (c.message.isNotEmpty)
+               Padding(
+@@ -108,11 +121,26 @@
+               ),
+             Expanded(
+               child: SingleChildScrollView(
+-                padding: const EdgeInsets.all(20),
++                padding: const EdgeInsets.symmetric(
++                  horizontal: 20,
++                  vertical: 28,
++                ),
+                 child: Center(
+                   child: ConstrainedBox(
+-                    constraints: const BoxConstraints(maxWidth: 700),
+-                    child: content(),
++                    constraints: BoxConstraints(
++                      maxWidth: c.authenticated ? 760 : 460,
++                    ),
++                    child: Material(
++                      color: Colors.white,
++                      shape: RoundedRectangleBorder(
++                        borderRadius: BorderRadius.circular(20),
++                        side: const BorderSide(color: BrandTheme.border),
++                      ),
++                      child: Padding(
++                        padding: const EdgeInsets.all(24),
++                        child: content(),
++                      ),
++                    ),
+                   ),
+                 ),
+               ),
+@@ -128,19 +156,19 @@
+                     : (value) => setState(() => tab = value),
+                 destinations: const [
+                   NavigationDestination(
+-                    icon: Icon(Icons.person),
++                    icon: Icon(Icons.person_outline_rounded),
+                     label: 'Mi perfil',
+                   ),
+                   NavigationDestination(
+-                    icon: Icon(Icons.calendar_month),
++                    icon: Icon(Icons.add_circle_outline_rounded),
+                     label: 'Solicitar cita',
+                   ),
+                   NavigationDestination(
+-                    icon: Icon(Icons.event_note),
++                    icon: Icon(Icons.calendar_today_outlined),
+                     label: 'Mis citas',
+                   ),
+                   NavigationDestination(
+-                    icon: Icon(Icons.notifications),
++                    icon: Icon(Icons.notifications_none_rounded),
+                     label: 'Avisos',
+                   ),
+                 ],
+diff --git a/app/src/lib/features/auth/presentation/auth_form.dart b/app/src/lib/features/auth/presentation/auth_form.dart
+--- a/app/src/lib/features/auth/presentation/auth_form.dart
++++ b/app/src/lib/features/auth/presentation/auth_form.dart
+@@ -47,7 +47,9 @@
+     } else if (mode == 'verify') {
+       final code = token.text.trim().toUpperCase();
+       if (!RegExp(r'^[A-Z0-9]{6}$').hasMatch(code)) {
+-        widget.onMessage('Introduce el código de 6 letras o números recibido por correo.');
++        widget.onMessage(
++          'Introduce el código de 6 letras o números recibido por correo.',
++        );
+         return;
+       }
+       await widget.auth.verify(email.text.trim(), code);
+@@ -77,17 +79,46 @@
+   Widget build(BuildContext context) => Column(
+     crossAxisAlignment: CrossAxisAlignment.stretch,
+     children: [
+-      const Text(
+-        'Primer hito · Entorno de demostración',
+-        style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
++      Text(
++        'TU ESPACIO DE SALUD',
++        style: TextStyle(
++          fontSize: 10,
++          letterSpacing: 1.8,
++          color: Theme.of(context).colorScheme.primary,
++          fontWeight: FontWeight.w700,
++        ),
+       ),
+-      const Text(
+-        'Las citas y coberturas requieren revisión manual. Este entorno no presta atención clínica.',
++      const SizedBox(height: 16),
++      Text(
++        {
++          'login': 'Qué bueno verte',
++          'register': 'Crea tu cuenta',
++          'verify': 'Verifica tu correo',
++          'forgot': 'Recupera tu acceso',
++          'reset': 'Una nueva contraseña',
++        }[mode]!,
++        style: Theme.of(context).textTheme.headlineMedium,
+       ),
++      const SizedBox(height: 12),
++      Text(
++        {
++          'login': 'Tus citas y avisos, en un mismo lugar.',
++          'register':
++              'Regístrate para completar tu perfil y solicitar una cita.',
++          'verify': 'Introduce las 6 letras o números que enviamos a tu correo. El código dura 15 minutos.',
++          'forgot': 'Te enviaremos las instrucciones para recuperar tu cuenta.',
++          'reset':
++              'Introduce el código recibido y elige una contraseña segura.',
++        }[mode]!,
++        style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
++      ),
++      const SizedBox(height: 24),
+       if (['login', 'register', 'forgot', 'verify'].contains(mode))
+         LabeledTextField(
+           controller: email,
+           label: 'Correo electrónico',
++          keyboardType: TextInputType.emailAddress,
++          autofillHints: const [AutofillHints.username],
+           enabled: !widget.busy,
+         ),
+       if (['login', 'register', 'reset'].contains(mode))
+@@ -95,18 +126,28 @@
+           controller: password,
+           label: 'Contraseña (mínimo 12 caracteres)',
+           secret: true,
++          autofillHints: [
++            mode == 'login'
++                ? AutofillHints.password
++                : AutofillHints.newPassword,
++          ],
+           enabled: !widget.busy,
+         ),
+       if (['verify', 'reset'].contains(mode))
+         LabeledTextField(
+           controller: token,
++          maxLength: mode == 'verify' ? 6 : null,
++          capitalization: mode == 'verify'
++              ? TextCapitalization.characters
++              : TextCapitalization.none,
++          autofillHints: const [AutofillHints.oneTimeCode],
+           label: mode == 'verify'
+               ? 'Código de verificación (6 letras o números)'
+               : 'Código recibido por correo',
+           enabled: !widget.busy,
+         ),
+       if (mode == 'verify')
+-        FilledButton(
++        TextButton(
+           onPressed: widget.busy
+               ? null
+               : () => widget.run(() async {
+@@ -115,6 +156,7 @@
+                 }),
+           child: const Text('Reenviar código'),
+         ),
++      const SizedBox(height: 12),
+       FilledButton(
+         onPressed: widget.busy ? null : () => widget.run(submit),
+         child: Text(
+@@ -127,15 +169,17 @@
+           }[mode]!,
+         ),
+       ),
++      const SizedBox(height: 18),
+       Wrap(
+-        spacing: 8,
++        alignment: WrapAlignment.center,
++        spacing: 4,
+         children: [
+           for (final entry in {
+             'login': 'Iniciar sesión',
+             'register': 'Registrarme',
+             'verify': 'Verificar',
+             'forgot': 'Recuperar acceso',
+-          }.entries)
++          }.entries.where((entry) => entry.key != mode))
+             TextButton(
+               onPressed: widget.busy
+                   ? null
+diff --git a/app/src/lib/shared/widgets/labeled_text_field.dart b/app/src/lib/shared/widgets/labeled_text_field.dart
+--- a/app/src/lib/shared/widgets/labeled_text_field.dart
++++ b/app/src/lib/shared/widgets/labeled_text_field.dart
+@@ -1,27 +1,57 @@
+ import 'package:flutter/material.dart';
+ 
+-class LabeledTextField extends StatelessWidget {
++class LabeledTextField extends StatefulWidget {
+   final TextEditingController controller;
+   final String label;
+-  final bool enabled;
+-  final bool secret;
++  final bool enabled, secret;
++  final TextInputType? keyboardType;
++  final Iterable<String>? autofillHints;
++  final int? maxLength;
++  final TextCapitalization capitalization;
+   const LabeledTextField({
+     super.key,
+     required this.controller,
+     required this.label,
+     this.enabled = true,
+     this.secret = false,
++    this.keyboardType,
++    this.autofillHints,
++    this.maxLength,
++    this.capitalization = TextCapitalization.none,
+   });
+   @override
++  State<LabeledTextField> createState() => _LabeledTextFieldState();
++}
++
++class _LabeledTextFieldState extends State<LabeledTextField> {
++  bool reveal = false;
++  @override
+   Widget build(BuildContext context) => Padding(
+-    padding: const EdgeInsets.symmetric(vertical: 6),
++    padding: const EdgeInsets.symmetric(vertical: 8),
+     child: TextField(
+-      controller: controller,
+-      obscureText: secret,
+-      enabled: enabled,
++      controller: widget.controller,
++      enabled: widget.enabled,
++      obscureText: widget.secret && !reveal,
++      keyboardType: widget.keyboardType,
++      autofillHints: widget.autofillHints,
++      maxLength: widget.maxLength,
++      textCapitalization: widget.capitalization,
+       decoration: InputDecoration(
+-        labelText: label,
+-        border: const OutlineInputBorder(),
++        labelText: widget.label,
++        suffixIcon: widget.secret
++            ? IconButton(
++                tooltip: reveal ? 'Ocultar contraseña' : 'Mostrar contraseña',
++                onPressed: widget.enabled
++                    ? () => setState(() => reveal = !reveal)
++                    : null,
++                icon: Icon(
++                  reveal
++                      ? Icons.visibility_off_outlined
++                      : Icons.visibility_outlined,
++                  size: 20,
++                ),
++              )
++            : null,
+       ),
+     ),
+   );
+diff --git a/app/src/lib/features/patient_profile/presentation/patient_profile_form.dart b/app/src/lib/features/patient_profile/presentation/patient_profile_form.dart
+--- a/app/src/lib/features/patient_profile/presentation/patient_profile_form.dart
++++ b/app/src/lib/features/patient_profile/presentation/patient_profile_form.dart
+@@ -78,12 +78,34 @@
+       const Text(
+         'Alergias, medicamentos y antecedentes son datos autodeclarados, no diagnósticos confirmados.',
+       ),
+-      for (final entry in labels.entries)
++      const SizedBox(height: 20),
++      for (final entry in labels.entries) ...[
++        if ([
++          'firstName',
++          'emergencyName',
++          'allergies',
++        ].contains(entry.key)) ...[
++          if (entry.key != 'firstName') const Divider(),
++          Text(
++            {
++              'firstName': 'Datos personales',
++              'emergencyName': 'Contacto de emergencia',
++              'allergies': 'Información autodeclarada',
++            }[entry.key]!,
++            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
++          ),
++          const SizedBox(height: 8),
++        ],
+         LabeledTextField(
+           controller: fields[entry.key]!,
+           label: entry.value,
+           enabled: !widget.busy,
++          keyboardType: entry.key.toLowerCase().contains('phone')
++              ? TextInputType.phone
++              : null,
+         ),
++      ],
++      const SizedBox(height: 16),
+       FilledButton(
+         onPressed: widget.busy
+             ? null
+diff --git a/app/src/lib/features/appointments/presentation/appointments_view.dart b/app/src/lib/features/appointments/presentation/appointments_view.dart
+--- a/app/src/lib/features/appointments/presentation/appointments_view.dart
++++ b/app/src/lib/features/appointments/presentation/appointments_view.dart
+@@ -1,6 +1,8 @@
+ import 'package:flutter/material.dart';
+ 
+ import '../../../core/models/json_map.dart';
++import '../../../shared/widgets/brand_identity.dart';
++import '../../../shared/widgets/status_pill.dart';
+ import '../../../shared/formatting/date_time.dart';
+ import '../../../shared/presentation/actions.dart';
+ import '../domain/reschedule_options.dart';
+@@ -84,14 +86,19 @@
+         'Mis citas',
+         style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+       ),
+-      const Text(
+-        'Estados: PendingValidation = pendiente; Confirmed = confirmada; Cancelled = cancelada.',
+-      ),
+-      if (appointments.isEmpty) const Text('Aún no tiene citas.'),
++      const Text('Consulta tus solicitudes y el estado de su revisión.'),
++      const SizedBox(height: 24),
++      if (appointments.isEmpty)
++        const EmptyState(
++          icon: Icons.calendar_today_outlined,
++          title: 'Aún no tienes citas',
++          description:
++              'Cuando solicites una cita, podrás seguir su estado aquí.',
++        ),
+       for (final appointment in appointments)
+         Card(
+           child: Padding(
+-            padding: const EdgeInsets.all(12),
++            padding: const EdgeInsets.all(20),
+             child: Column(
+               crossAxisAlignment: CrossAxisAlignment.start,
+               children: [
+@@ -99,8 +106,28 @@
+                   '${appointment['serviceName']} · ${appointment['practitionerName']}',
+                 ),
+                 Text(localTime(appointment['startAt'] as String)),
+-                Text(
+-                  'Cita: ${appointment['status']} · Cobertura: ${appointment['coverageStatus']}',
++                const SizedBox(height: 16),
++                Wrap(
++                  spacing: 12,
++                  runSpacing: 10,
++                  children: [
++                    Column(
++                      crossAxisAlignment: CrossAxisAlignment.start,
++                      children: [
++                        const Text('Cita', style: TextStyle(fontSize: 11)),
++                        const SizedBox(height: 4),
++                        StatusPill(appointment['status'] as String),
++                      ],
++                    ),
++                    Column(
++                      crossAxisAlignment: CrossAxisAlignment.start,
++                      children: [
++                        const Text('Cobertura', style: TextStyle(fontSize: 11)),
++                        const SizedBox(height: 4),
++                        StatusPill(appointment['coverageStatus'] as String),
++                      ],
++                    ),
++                  ],
+                 ),
+                 if ([
+                       'PendingValidation',
+diff --git a/app/src/lib/features/catalog/presentation/booking_form.dart b/app/src/lib/features/catalog/presentation/booking_form.dart
+--- a/app/src/lib/features/catalog/presentation/booking_form.dart
++++ b/app/src/lib/features/catalog/presentation/booking_form.dart
+@@ -43,28 +43,37 @@
+         'Solicitar cita',
+         style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+       ),
++      const SizedBox(height: 16),
+       if (!widget.hasProfile) const Text('Complete primero su perfil.'),
+       if (widget.services.isEmpty)
+         const Text('No hay servicios disponibles. Puede actualizar más tarde.'),
+       if (widget.services.isNotEmpty)
+-        DropdownButton<String>(
+-          value: widget.selectedServiceId,
+-          isExpanded: true,
+-          items: widget.services
+-              .map(
+-                (service) => DropdownMenuItem(
+-                  value: service['id'] as String,
+-                  child: Text(
+-                    '${service['name']} · ${service['durationMinutes']} min',
+-                    overflow: TextOverflow.ellipsis,
+-                  ),
+-                ),
+-              )
+-              .toList(),
+-          onChanged: widget.busy ? null : widget.onServiceChanged,
++        InputDecorator(
++          decoration: const InputDecoration(labelText: 'Servicio'),
++          child: DropdownButtonHideUnderline(
++            child: DropdownButton<String>(
++              value: widget.selectedServiceId,
++              isExpanded: true,
++              items: widget.services
++                  .map(
++                    (service) => DropdownMenuItem(
++                      value: service['id'] as String,
++                      child: Text(
++                        '${service['name']} · ${service['durationMinutes']} min',
++                        overflow: TextOverflow.ellipsis,
++                      ),
++                    ),
++                  )
++                  .toList(),
++              onChanged: widget.busy ? null : widget.onServiceChanged,
++            ),
++          ),
+         ),
++      const SizedBox(height: 16),
+       FilledButton(
+-        onPressed: widget.busy ? null : widget.onAvailability,
++        onPressed: widget.busy || widget.services.isEmpty
++            ? null
++            : widget.onAvailability,
+         child: const Text('Consultar horarios'),
+       ),
+       LabeledTextField(
+@@ -80,20 +89,32 @@
+       const Text(
+         'La disponibilidad no garantiza reserva. No se confirma cobertura ni copago sin revisión.',
+       ),
++      const SizedBox(height: 20),
+       for (final slot in widget.slots)
+         Card(
+-          child: ListTile(
+-            title: Text(localTime(slot['startAt'] as String)),
+-            subtitle: Text(slot['practitionerName'] as String),
+-            trailing: FilledButton(
+-              onPressed: widget.busy || !widget.hasProfile
+-                  ? null
+-                  : () => widget.onBook(
+-                      slot,
+-                      insurer.text.trim(),
+-                      member.text.trim(),
+-                    ),
+-              child: const Text('Solicitar'),
++          child: Padding(
++            padding: const EdgeInsets.all(16),
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(
++                  localTime(slot['startAt'] as String),
++                  style: const TextStyle(fontWeight: FontWeight.w600),
++                ),
++                const SizedBox(height: 4),
++                Text(slot['practitionerName'] as String),
++                const SizedBox(height: 12),
++                FilledButton(
++                  onPressed: widget.busy || !widget.hasProfile
++                      ? null
++                      : () => widget.onBook(
++                          slot,
++                          insurer.text.trim(),
++                          member.text.trim(),
++                        ),
++                  child: const Text('Solicitar'),
++                ),
++              ],
+             ),
+           ),
+         ),
+diff --git a/app/src/lib/features/notifications/presentation/notifications_view.dart b/app/src/lib/features/notifications/presentation/notifications_view.dart
+--- a/app/src/lib/features/notifications/presentation/notifications_view.dart
++++ b/app/src/lib/features/notifications/presentation/notifications_view.dart
+@@ -1,6 +1,7 @@
+ import 'package:flutter/material.dart';
+ 
+ import '../../../core/models/json_map.dart';
++import '../../../shared/widgets/brand_identity.dart';
+ import '../../../shared/formatting/date_time.dart';
+ 
+ class NotificationsView extends StatelessWidget {
+@@ -32,18 +33,45 @@
+         ),
+         onChanged: busy ? null : onEmailChanged,
+       ),
+-      if (notifications.isEmpty) const Text('No tienes avisos.'),
++      const SizedBox(height: 20),
++      if (notifications.isEmpty)
++        const EmptyState(
++          icon: Icons.notifications_none_rounded,
++          title: 'Estás al día',
++          description: 'Los cambios de tus citas aparecerán aquí.',
++        ),
+       for (final notification in notifications)
+         Card(
+-          child: ListTile(
+-            title: Text(notification['body'] as String),
+-            subtitle: Text(localTime(notification['createdAt'] as String)),
+-            trailing: notification['readAt'] == null
+-                ? TextButton(
++          child: Padding(
++            padding: const EdgeInsets.all(18),
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(notification['body'] as String),
++                const SizedBox(height: 8),
++                Text(
++                  localTime(notification['createdAt'] as String),
++                  style: TextStyle(
++                    fontSize: 12,
++                    color: Theme.of(context).colorScheme.onSurfaceVariant,
++                  ),
++                ),
++                const SizedBox(height: 8),
++                if (notification['readAt'] == null)
++                  TextButton(
+                     onPressed: busy ? null : () => onRead(notification),
+                     child: const Text('Marcar leído'),
+                   )
+-                : const Icon(Icons.done),
++                else
++                  const Row(
++                    children: [
++                      Icon(Icons.done, size: 16),
++                      SizedBox(width: 6),
++                      Text('Leído'),
++                    ],
++                  ),
++              ],
++            ),
+           ),
+         ),
+     ],
+diff --git a/app/src/test/app/patient_shell_test.dart b/app/src/test/app/patient_shell_test.dart
+--- a/app/src/test/app/patient_shell_test.dart
++++ b/app/src/test/app/patient_shell_test.dart
+@@ -9,6 +9,7 @@
+     expect(find.text('Entrar'), findsOneWidget);
+     expect(find.text('Crear cuenta'), findsNothing);
+     expect(find.text('Flutter Demo Home Page'), findsNothing);
++    await tester.ensureVisible(find.text('Registrarme'));
+     await tester.tap(find.text('Registrarme'));
+     await tester.pump();
+     expect(find.text('Crear cuenta'), findsOneWidget);
+diff --git a/app/src/test/features/notifications/notifications_view_test.dart b/app/src/test/features/notifications/notifications_view_test.dart
+--- a/app/src/test/features/notifications/notifications_view_test.dart
++++ b/app/src/test/features/notifications/notifications_view_test.dart
+@@ -56,6 +56,7 @@
+     final inputs = find.byType(TextField);
+     await tester.enterText(inputs.at(0), 'synthetic@example.invalid');
+     await tester.enterText(inputs.at(1), 'synthetic-password');
++    await tester.ensureVisible(find.text('Entrar'));
+     await tester.tap(find.text('Entrar'));
+     await tester.pumpAndSettle();
+     await tester.tap(find.text('Avisos'));
+diff --git a/app/src/test/app/brand_layout_test.dart b/app/src/test/app/brand_layout_test.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/test/app/brand_layout_test.dart
+@@ -0,0 +1,25 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:telemedicina_app/main.dart';
++
++void main() {
++  for (final scale in [1.0, 1.5]) {
++    testWidgets('Acceso y registro a 390px con texto $scale', (tester) async {
++      await tester.binding.setSurfaceSize(const Size(390, 844));
++      addTearDown(() => tester.binding.setSurfaceSize(null));
++      await tester.pumpWidget(
++        MediaQuery(
++          data: MediaQueryData(textScaler: TextScaler.linear(scale)),
++          child: const MyApp(),
++        ),
++      );
++      expect(tester.takeException(), isNull);
++      await tester.ensureVisible(find.text('Registrarme'));
++      await tester.tap(find.text('Registrarme'));
++      await tester.pumpAndSettle();
++      await tester.ensureVisible(find.text('Crear cuenta'));
++      expect(find.text('Crear cuenta'), findsOneWidget);
++      expect(tester.takeException(), isNull);
++    });
++  }
++}
+diff --git a/portalweb/src/src/shared/components/brand.tsx b/portalweb/src/src/shared/components/brand.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/shared/components/brand.tsx
+@@ -0,0 +1,6 @@
++export default function Brand({subtitle="Portal de admisión"}:{subtitle?:string}) {
++  return <span className="brand">
++    <span className="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M16 8v16M8 16h16" stroke="currentColor" strokeWidth="5" strokeLinecap="round"/></svg></span>
++    <span><strong>telemedicina</strong><small>{subtitle}</small></span>
++  </span>;
++}
+diff --git a/portalweb/src/src/shared/components/app-frame.tsx b/portalweb/src/src/shared/components/app-frame.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/shared/components/app-frame.tsx
+@@ -0,0 +1,36 @@
++"use client";
++import Link from "next/link";
++import {usePathname} from "next/navigation";
++import {CalendarDays,ClipboardList,Layers3,Mail,ShieldCheck,ArrowUpRight} from "lucide-react";
++import Brand from "./brand";
++const navigation=[
++  {href:"/admision",label:"Admisión",icon:ClipboardList},
++  {href:"/agenda",label:"Horarios",icon:CalendarDays},
++  {href:"/catalogo",label:"Catálogo",icon:Layers3},
++  {href:"/entregas",label:"Entregas de correo",icon:Mail},
++  {href:"/admin",label:"Auditoría",icon:ShieldCheck},
++];
++export default function AppFrame({children}:{children:React.ReactNode}) {
++  const path=usePathname();
++  const login=path==="/login";
++  return <div className={login?"auth-frame":"portal-frame"}>
++    <a className="skip-link" href="#contenido">Ir al contenido</a>
++    {login?<header className="auth-header"><Link href="/login" aria-label="Telemedicina · Acceso"><Brand/></Link><span className="environment-tag">Entorno de demostración</span></header>:
++      <aside className="sidebar">
++        <Link href="/" className="brand-link" aria-label="Telemedicina · Inicio"><Brand/></Link>
++        <p className="nav-caption">ESPACIO DE TRABAJO</p>
++        <nav aria-label="Navegación principal">{navigation.map(({href,label,icon:Icon})=>{
++          const active=path===href||(href==="/admision"&&path==="/");
++          return <Link key={href} href={href} className={active?"nav-link active":"nav-link"} aria-current={active?"page":undefined}>
++            <Icon size={19} aria-hidden="true"/><span>{label}</span></Link>;
++        })}</nav>
++        <div className="sidebar-bottom"><span className="environment-tag">Datos sintéticos</span>
++          <p>Un espacio para organizar cada solicitud.</p><Link href="/login" className="access-link">Acceso al portal <ArrowUpRight size={16} aria-hidden="true"/></Link></div>
++      </aside>}
++    <div className="workspace">
++      {!login&&<header className="workspace-bar"><span>Portal de admisión</span><span className="timezone">Hora de Santo Domingo · UTC−4</span></header>}
++      <main id="contenido" tabIndex={-1}>{children}</main>
++      <footer className="workspace-footer">Entorno de demostración · Sin atención clínica, video ni documentos habilitados.</footer>
++    </div>
++  </div>;
++}
+diff --git a/portalweb/src/src/app/layout.tsx b/portalweb/src/src/app/layout.tsx
+--- a/portalweb/src/src/app/layout.tsx
++++ b/portalweb/src/src/app/layout.tsx
+@@ -1,18 +1,7 @@
+ import type {Metadata} from "next";
+-import Link from "next/link";
++import AppFrame from "@/shared/components/app-frame";
+ import "./globals.css";
+-export const metadata:Metadata={title:"Telemedicina · Admisión",description:"Primer hito con datos sintéticos"};
++export const metadata:Metadata={title:"Telemedicina · Admisión",description:"Gestiona solicitudes, horarios y cobertura en un mismo espacio."};
+ export default function RootLayout({children}:Readonly<{children:React.ReactNode}>){
+-  return <html lang="es"><body className="min-h-screen bg-slate-50 text-slate-900">
+-    <header className="bg-slate-900 p-4 text-white">
+-      <nav className="mx-auto flex max-w-7xl flex-wrap gap-5" aria-label="Navegación principal">
+-        <Link href="/">Telemedicina · Primer hito</Link>
+-        <Link href="/admision">Admisión</Link><Link href="/agenda">Horarios</Link><Link href="/admin">Auditoría</Link>
+-        <Link href="/catalogo">Catálogo</Link><Link href="/entregas">Entregas de correo</Link>
+-        <Link href="/login">Acceso</Link>
+-      </nav>
+-    </header>
+-    <main className="mx-auto max-w-7xl p-5">{children}</main>
+-    <footer className="p-5 text-center text-sm">Entorno sintético. Video, atención clínica y documentos no habilitados.</footer>
+-  </body></html>;
++  return <html lang="es"><body><AppFrame>{children}</AppFrame></body></html>;
+ }
+diff --git a/portalweb/src/src/app/globals.css b/portalweb/src/src/app/globals.css
+--- a/portalweb/src/src/app/globals.css
++++ b/portalweb/src/src/app/globals.css
+@@ -3,34 +3,170 @@
+ @tailwind utilities;
+ 
+ :root {
+-  --background: #f8fafc;
+-  --foreground: #0f172a;
++  color-scheme: light;
++  --brand: #205c4d;
++  --brand-dark: #173f35;
++  --brand-soft: #e5f0e9;
++  --background: #f5f7f4;
++  --surface: #ffffff;
++  --foreground: #172e27;
++  --muted: #5c6f65;
++  --border: #dbe4dd;
++  --field-border: #81958a;
++  --radius: 16px;
+ }
++* { box-sizing: border-box; }
++body { margin:0; color:var(--foreground); background:var(--background); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; font-size:14px; line-height:1.6; -webkit-font-smoothing:antialiased; }
++a { color:inherit; }
++button,input,select,textarea { font:inherit; }
++button,a,input,select,textarea { -webkit-tap-highlight-color:transparent; }
++button { cursor:pointer; }
++button:disabled { cursor:not-allowed; opacity:.5; }
++button,input:not([type=checkbox]),select,textarea { min-height:44px; }
++input:not([type=checkbox]),select,textarea { max-width:100%; color:var(--foreground); border:1px solid var(--field-border); border-radius:10px; background:#fff; padding:11px 13px; }
++input:not([type=checkbox]):focus,select:focus,textarea:focus { outline:2px solid var(--brand); outline-offset:2px; border-color:var(--brand); }
++input[type=checkbox] { accent-color:var(--brand); width:17px; height:17px; vertical-align:middle; margin-right:6px; }
++label,legend { font-size:13px; font-weight:600; }
++label>input:not([type=checkbox]),label>select { margin-top:7px; }
++:focus-visible { outline:3px solid var(--brand); outline-offset:4px; }
++h1,h2,h3 { letter-spacing:-.035em; line-height:1.2; }
++h1 { font-size:clamp(26px,3vw,34px); font-weight:650; }
++h2 { font-size:20px; font-weight:650; }
++p { overflow-wrap:anywhere; }
++.skip-link { position:fixed; z-index:100; top:12px; left:12px; padding:12px 20px; background:var(--brand); color:white; border-radius:10px; transform:translateY(-180%); }
++.skip-link:focus { transform:translateY(0); }
++.brand { display:inline-flex; gap:12px; align-items:center; line-height:1.2; }
++.brand-mark { display:grid; place-items:center; flex-shrink:0; width:42px; height:42px; color:white; background:var(--brand); border-radius:13px; }
++.brand-mark svg { width:30px; height:30px; }
++.brand strong { display:block; font-size:20px; font-weight:650; letter-spacing:-.7px; }
++.brand small { display:block; margin-top:5px; font-size:11px; color:var(--muted); letter-spacing:.035em; }
++.portal-frame { display:grid; grid-template-columns:236px minmax(0,1fr); min-height:100dvh; }
++.sidebar { position:sticky; top:0; height:100dvh; border-right:1px solid var(--border); background:#fff; padding:34px 20px 24px; display:flex; flex-direction:column; }
++.brand-link { margin-left:8px; }
++.nav-caption { margin:48px 12px 14px; color:var(--muted); font-size:10px; font-weight:650; letter-spacing:.12em; }
++.sidebar nav { display:grid; gap:6px; }
++.nav-link { display:flex; align-items:center; gap:12px; padding:12px 14px; border-radius:10px; color:var(--muted); font-weight:550; }
++.nav-link:hover { background:var(--background); }
++.nav-link.active { color:var(--brand-dark); background:var(--brand-soft); font-weight:650; }
++.sidebar-bottom { margin-top:auto; padding:24px 12px 0; }
++.sidebar-bottom p { margin:14px 0; font-size:12px; color:var(--muted); }
++.access-link { display:flex; align-items:center; justify-content:space-between; font-size:12px; font-weight:600; }
++.environment-tag { display:inline-flex; align-items:center; gap:7px; color:var(--brand-dark); border:1px solid var(--border); padding:5px 9px; border-radius:7px; font-size:11px; font-weight:600; white-space:nowrap; }
++.environment-tag:before { content:""; width:6px; height:6px; border-radius:50%; background:var(--brand); }
++.workspace { display:flex; flex-direction:column; min-width:0; }
++.workspace-bar { min-height:76px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 36px; border-bottom:1px solid var(--border); background:rgba(255,255,255,.65); font-size:12px; color:var(--muted); }
++.timezone { font-size:11px; }
++.workspace main { width:100%; max-width:1440px; padding:36px; margin:0 auto; flex:1; }
++.workspace-footer { padding:20px 36px; font-size:11px; color:var(--muted); border-top:1px solid var(--border); }
++.eyebrow { color:var(--brand); font-size:10px; font-weight:700; letter-spacing:.15em; text-transform:uppercase; }
++.page-header { display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:20px; }
++.page-header h1 { margin:7px 0 10px; }
++.page-description { color:var(--muted); max-width:640px; }
++.account-actions { display:flex; align-items:center; flex-wrap:wrap; gap:12px; font-size:12px; color:var(--muted); }
++.account-actions span { max-width:240px; overflow-wrap:anywhere; }
++.button-primary,.button-secondary,.button-danger { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:10px 16px; border-radius:10px; font-weight:600; font-size:13px; text-decoration:none; }
++.button-primary { background:var(--brand); border:1px solid var(--brand); color:white; }
++.button-primary:hover:not(:disabled) { background:var(--brand-dark); }
++.button-secondary { border:1px solid var(--border); background:white; color:var(--foreground); }
++.button-secondary:hover:not(:disabled) { background:var(--brand-soft); }
++.button-danger { background:#fff4f1; color:#9b3427; border:1px solid #eacbc4; }
++.stats-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
++.stat-card { border:1px solid var(--border); background:var(--surface); border-radius:var(--radius); padding:20px 24px; }
++.stat-card span { color:var(--muted); font-size:12px; }
++.stat-card strong { display:block; margin:9px 0 4px; font-size:30px; font-weight:600; letter-spacing:-1px; }
++.stat-card small { font-size:11px; color:var(--muted); }
++.surface { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); }
++.panel-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:16px; justify-content:space-between; padding:22px 24px; border-bottom:1px solid var(--border); }
++.panel-toolbar h2 { font-size:16px; margin:0; }
++.panel-toolbar p { font-size:12px; color:var(--muted); margin-top:4px; }
++.table-filters { display:flex; flex-wrap:wrap; gap:10px; }
++.table-filters input { width:230px; }
++.data-table { width:100%; text-align:left; border-collapse:collapse; font-size:12px; }
++.data-table th { color:var(--muted); background:#fafbf9; font-size:10px; font-weight:650; letter-spacing:.06em; text-transform:uppercase; }
++.data-table th,.data-table td { padding:16px 20px; vertical-align:top; border-bottom:1px solid #edf1ec; }
++.data-table tbody tr:last-child td { border-bottom:0; }
++.data-table tbody tr:hover { background:#fafcf9; }
++.data-table td { max-width:260px; overflow-wrap:anywhere; }
++.cell-primary { display:block; font-weight:600; color:var(--foreground); }
++.cell-secondary { display:block; margin-top:4px; color:var(--muted); font-size:11px; }
++.status-pill,.badge { display:inline-flex; align-items:center; gap:6px; padding:4px 9px; border-radius:6px; font-size:10px; font-weight:650; white-space:nowrap; }
++.status-success,.badge-success { color:#205440; background:#e5f1e8; }
++.status-warning,.badge-warning { color:#785316; background:#f9efda; }
++.status-info,.badge-info { color:#28566a; background:#e7f0f5; }
++.status-danger,.badge-danger { color:#963f32; background:#fae8e3; }
++.status-neutral,.badge-neutral { color:#58655f; background:#edf1ed; }
++.empty-state { display:grid; place-items:center; text-align:center; gap:8px; padding:52px 24px; color:var(--muted); }
++.empty-state strong { color:var(--foreground); font-weight:600; }
++.notice { padding:14px 18px; border:1px solid var(--border); border-radius:10px; background:white; color:var(--muted); font-size:12px; }
++.error-notice { border-color:#eacbc4; background:#fff4f1; color:#963f32; }
++.auth-frame { min-height:100dvh; }
++.auth-header { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:28px 5vw; }
++.auth-frame .workspace main { max-width:1180px; padding:48px 36px 64px; }
++.auth-frame .workspace-footer { text-align:center; }
++.login-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,420px); gap:8vw; align-items:center; min-height:550px; }
++.login-story h2 { font-size:clamp(36px,4.5vw,56px); font-weight:550; line-height:1.12; letter-spacing:-.05em; margin:22px 0; max-width:550px; }
++.login-story>p { max-width:370px; font-size:16px; color:var(--muted); }
++.login-note { border-left:2px solid var(--brand); margin-top:38px; padding:0 0 0 18px; max-width:350px; color:var(--muted); font-size:12px; }
++.login-card { padding:32px; border-radius:20px; background:white; border:1px solid var(--border); }
++.login-card h1 { font-size:25px; margin:10px 0; }
++.login-card>p { font-size:13px; color:var(--muted); margin-bottom:24px; }
++.login-card label { display:block; }
++.login-card input { display:block; width:100%; }
++.login-card .button-primary { width:100%; }
++.login-card form { display:grid; gap:18px; }
++.login-card [role=alert]:empty { display:none; }
++.login-card [role=alert] { color:#963f32; font-size:12px; }
++/* Keep existing feature forms aligned with the shared system. */
++.workspace .rounded-xl.border.bg-white { border-color:var(--border); border-radius:var(--radius); padding:24px; }
++.workspace .bg-teal-700 { background:var(--brand); border-radius:10px; min-height:44px; padding:10px 16px; font-weight:600; }
++.workspace .underline { color:var(--brand); text-underline-offset:4px; }
++@media(max-width:1100px) {
++ .portal-frame { grid-template-columns:210px minmax(0,1fr); }
++ .workspace main { padding:28px 24px; }
++ .workspace-bar { padding-inline:24px; }
++ .table-filters input { width:190px; }
++}
++@media(max-width:760px) {
++ .portal-frame { display:block; }
++ .sidebar { position:relative; height:auto; padding:20px 16px 12px; border-right:0; border-bottom:1px solid var(--border); }
++ .brand-link { margin:0 0 18px; }
++ .nav-caption,.sidebar-bottom { display:none; }
++ .sidebar nav { display:flex; overflow-x:auto; padding-bottom:4px; }
++ .nav-link { flex-shrink:0; padding:10px; gap:7px; font-size:12px; }
++ .nav-link svg { width:16px; }
++ .workspace-bar { min-height:52px; padding:12px 20px; }
++ .timezone { font-size:10px; }
++ .workspace main { padding:24px 16px; }
++ .workspace-footer { padding:20px 16px; }
++ .stats-grid { gap:8px; }
++ .stat-card { padding:14px 12px; }
++ .stat-card strong { font-size:25px; }
++ .stat-card span,.stat-card small { font-size:10px; }
++ .account-actions { width:100%; justify-content:space-between; }
++ .panel-toolbar { padding:18px 16px; }
++ .table-filters { width:100%; }
++ .table-filters input { flex:1; min-width:140px; }
++ .auth-header { padding:22px 20px; }
++ .auth-header .environment-tag { font-size:9px; padding:5px 7px; }
++ .auth-frame .workspace main { padding:16px 20px 40px; }
++ .login-grid { grid-template-columns:1fr; gap:28px; min-height:auto; }
++ .login-story h2 { font-size:34px; margin:12px 0; }
++ .login-story>p { font-size:14px; }
++ .login-note { display:none; }
++ .login-card { padding:24px; }
++}
++@media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition:none!important; animation:none!important; } }
+ 
+-body {
+-  color: var(--foreground);
+-  background: var(--background);
+-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+-  margin: 0;
+-  padding: 0;
++.admission-mobile { display:none; }
++.admission-desktop .data-table { min-width:880px; }
++@media(max-width:760px) {
++ .admission-desktop { display:none; }
++ .admission-mobile { display:grid; padding:0 18px; }
++ .appointment-mobile-card { padding:22px 0; border-bottom:1px solid var(--border); }
++ .appointment-mobile-card:last-child { border-bottom:0; }
++ .appointment-mobile-card h3 { font-size:16px; margin:18px 0 6px; font-weight:600; }
++ .appointment-mobile-card .appointment-date { margin-top:14px; font-size:12px; color:var(--muted); }
++ .mobile-statuses { display:flex; gap:28px; margin:18px 0; }
++ .mobile-statuses .cell-secondary { margin-bottom:6px; }
++ .appointment-mobile-card>.button-secondary { width:100%; }
+ }
+-
+-* {
+-  box-sizing: border-box;
+-}
+-
+-.badge {
+-  display: inline-flex;
+-  align-items: center;
+-  padding: 0.25rem 0.625rem;
+-  border-radius: 9999px;
+-  font-size: 0.75rem;
+-  font-weight: 600;
+-}
+-
+-.badge-success { background-color: #dcfce7; color: #166534; }
+-.badge-warning { background-color: #fef3c7; color: #92400e; }
+-.badge-info { background-color: #e0f2fe; color: #075985; }
+-.badge-danger { background-color: #fee2e2; color: #991b1b; }
+-.badge-neutral { background-color: #f1f5f9; color: #475569; }
+-
+diff --git a/portalweb/src/src/shared/components/status-badge.tsx b/portalweb/src/src/shared/components/status-badge.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/shared/components/status-badge.tsx
+@@ -0,0 +1,9 @@
++const states:Record<string,[string,string]>={
++  PendingValidation:["Pendiente","warning"],Confirmed:["Confirmada","success"],Cancelled:["Cancelada","neutral"],Rejected:["Rechazada","danger"],
++  Pending:["Pendiente","warning"],ManualReview:["En revisión","warning"],Approved:["Aprobada","success"],Denied:["Denegada","danger"],Expired:["Vencida","neutral"],
++  Queued:["En cola","neutral"],Sending:["Enviando","info"],Sent:["Enviado","success"],Captured:["Capturado","info"],Failed:["Fallido","danger"],Unknown:["Sin confirmar","warning"],Superseded:["Sustituido","neutral"],
++};
++export default function StatusBadge({value}:{value:unknown}) {
++  const raw=String(value??"");const [label,tone]=states[raw]??[raw||"Sin estado","neutral"];
++  return <span className={"status-pill status-"+tone}>{label}</span>;
++}
+diff --git a/portalweb/src/src/features/auth/components/login-form.tsx b/portalweb/src/src/features/auth/components/login-form.tsx
+--- a/portalweb/src/src/features/auth/components/login-form.tsx
++++ b/portalweb/src/src/features/auth/components/login-form.tsx
+@@ -7,9 +7,14 @@
+   const router=useRouter();
+   const [email,setEmail]=useState(""),[password,setPassword]=useState(""),[otp,setOtp]=useState("");
+   const [busy,setBusy]=useState(false),[error,setError]=useState("");
+-  return <section className="mx-auto max-w-md space-y-4 rounded-xl border bg-white p-6">
+-    <h1 className="text-xl font-bold">Acceso de admisión</h1>
+-    <p>Entorno sintético. Use la cuenta de admisión configurada por el responsable y su autenticador TOTP.</p>
++  return <div className="login-grid"><aside className="login-story">
++    <span className="eyebrow">CADA SOLICITUD, EN SU LUGAR</span>
++    <h2>Más claridad.<br/>Mejor organización.</h2>
++    <p>Solicitudes, horarios y cobertura en un espacio pensado para tu equipo.</p>
++    <div className="login-note">La confirmación de citas y la cobertura requieren revisión de admisión.</div>
++  </aside><section className="login-card"><span className="eyebrow">BIENVENIDO AL PORTAL</span>
++    <h1 >Acceso de admisión</h1>
++    <p>Ingresa con tu cuenta y el código de tu aplicación autenticadora.</p>
+     <form className="space-y-4" onSubmit={async event=>{
+       event.preventDefault(); setBusy(true); setError("");
+       try {
+@@ -23,15 +28,15 @@
+       finally {setBusy(false);}
+     }}>
+       <label className="block">Correo<input className="block w-full rounded border p-2"
+-        type="email" autoComplete="username" required value={email} onChange={e=>setEmail(e.target.value)}/></label>
++        type="email" autoComplete="username" required disabled={busy} value={email} onChange={e=>setEmail(e.target.value)}/></label>
+       <label className="block">Contraseña<input className="block w-full rounded border p-2"
+-        type="password" autoComplete="current-password" required value={password} onChange={e=>setPassword(e.target.value)}/></label>
++        type="password" autoComplete="current-password" required disabled={busy} value={password} onChange={e=>setPassword(e.target.value)}/></label>
+       <label className="block">Código del autenticador<input className="block w-full rounded border p-2"
+-        inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" required
++        inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" required disabled={busy}
+         value={otp} onChange={e=>setOtp(e.target.value)}/></label>
+-      <button disabled={busy} className="rounded bg-teal-700 px-4 py-2 text-white disabled:opacity-50">
++      <button disabled={busy} className="button-primary">
+         {busy?"Verificando…":"Entrar"}</button>
+-      <p role="alert">{error}</p>
++      <p role="alert" aria-live="polite">{error}</p>
+     </form>
+-  </section>;
++  </section></div>;
+ }
+diff --git a/portalweb/src/src/shared/components/portal-console.tsx b/portalweb/src/src/shared/components/portal-console.tsx
+--- a/portalweb/src/src/shared/components/portal-console.tsx
++++ b/portalweb/src/src/shared/components/portal-console.tsx
+@@ -1,5 +1,6 @@
+ "use client";
+ import {useCallback,useEffect,useState} from "react";
++import {RefreshCw,LogOut} from "lucide-react";
+ import {useRouter} from "next/navigation";
+ import {api,ApiError,Item} from "@/shared/api/client";
+ import CatalogPanel from "@/features/catalog/components/catalog-panel";
+@@ -48,17 +49,22 @@
+     finally {setBusy(false);}
+   }
+   if(!user) return <p role="status">{busy?"Verificando sesión…":error||"Se requiere iniciar sesión."}</p>;
+-  return <section className="space-y-5">
+-    <div className="flex flex-wrap justify-between gap-3">
+-      <h1 className="text-2xl font-bold">{view==="queue"?"Admisión y cobertura":view==="audit"?"Auditoría":view==="catalog"?"Catálogo":view==="delivery"?"Entregas de correo":"Horarios"}</h1>
+-      <div>{user.email} · Admisión <button className="ml-4 underline" disabled={busy}
+-        onClick={()=>run(async()=>{await api("/auth/logout","POST",{});setUser(null);router.replace("/login");})}>Salir</button></div>
++  const titles={queue:"Admisión y cobertura",audit:"Auditoría",catalog:"Catálogo",delivery:"Entregas de correo",schedule:"Horarios"};
++  const descriptions={queue:"Revisa las solicitudes y mantén al día cada cita.",audit:"Consulta el registro de acciones del equipo.",catalog:"Organiza los servicios y profesionales disponibles.",delivery:"Consulta el estado de los mensajes enviados.",schedule:"Organiza la disponibilidad de los profesionales."};
++  return <section className="space-y-6" aria-busy={busy}>
++    <div className="page-header">
++      <div><span className="eyebrow">TU ESPACIO DE TRABAJO</span><h1>{titles[view]}</h1><p className="page-description">{descriptions[view]}</p></div>
++      <div className="account-actions"><span>{user.email}<br/>Admisión</span><button className="button-secondary" disabled={busy}
++        onClick={()=>run(async()=>{await api("/auth/logout","POST",{});setUser(null);router.replace("/login");})}><LogOut size={15} aria-hidden="true"/>Salir</button></div>
+     </div>
+-    <p>Datos sintéticos · Estados persistentes · Zona horaria: America/Santo_Domingo</p>
+-    <p role="alert" className="text-red-700">{error}</p>
+-    <button disabled={busy} className="rounded border p-2" onClick={()=>run(load)}>
+-      {busy?"Procesando…":"Actualizar"}</button>
+-
++    {error&&<p role="alert" className="notice error-notice">{error}</p>}
++    {view==="queue"&&<div className="stats-grid" aria-label="Resumen de las citas cargadas">{[
++      ["Por revisar",items.filter(item=>item.status==="PendingValidation").length],
++      ["Confirmadas",items.filter(item=>item.status==="Confirmed").length],
++      ["Citas cargadas",items.length],
++    ].map(([label,count])=><div className="stat-card" key={String(label)}><span>{label}</span><strong>{count}</strong><small>En esta vista</small></div>)}</div>}
++    <div className="flex justify-end"><button disabled={busy} className="button-secondary" onClick={()=>run(load)}>
++      <RefreshCw size={15} aria-hidden="true"/>{busy?"Procesando…":"Actualizar"}</button></div>
+ 
+     {view==="catalog" && <CatalogPanel services={services} practitioners={practitioners} busy={busy}
+       onSave={async(path,method,body)=>run(async()=>{await api(path,method,body);await load();})}/>}
+diff --git a/portalweb/src/src/features/admission/components/admission-queue.tsx b/portalweb/src/src/features/admission/components/admission-queue.tsx
+--- a/portalweb/src/src/features/admission/components/admission-queue.tsx
++++ b/portalweb/src/src/features/admission/components/admission-queue.tsx
+@@ -1,5 +1,7 @@
+ "use client";
+-import {useEffect,useState} from "react";
++import {useEffect,useRef,useState} from "react";
++import {ClipboardList} from "lucide-react";
++import StatusBadge from "@/shared/components/status-badge";
+ import {api,Item} from "@/shared/api/client";
+ import {localTime} from "@/shared/formatting/date-time";
+ import type {OperationRunner} from "@/shared/api/operation";
+@@ -9,21 +11,38 @@
+   const [selectedAppointment,setSelected]=useState<Item|null>(null);
+   const selected=selectedAppointment;
+   const [evidence,setEvidence]=useState(""),[until,setUntil]=useState("");
+-  return <>{items.length===0 && <p>No hay citas registradas.</p>}
+-      <div className="overflow-x-auto"><table className="w-full text-left">
++  const [query,setQuery]=useState(""),[statusFilter,setStatusFilter]=useState("");
++  const evidenceRef=useRef<HTMLInputElement>(null);
++  useEffect(()=>{if(selected) evidenceRef.current?.focus();},[selected]);
++  const visible=items.filter(item=>(!statusFilter||item.status===statusFilter)&&
++    [item.patientEmail,item.serviceName,item.practitionerName].some(value=>String(value??"").toLocaleLowerCase("es").includes(query.toLocaleLowerCase("es"))));
++  return <><section className="surface" aria-label="Solicitudes de cita">
++    <div className="panel-toolbar"><div><h2>Solicitudes de cita</h2><p>{visible.length} de {items.length} citas cargadas</p></div>
++      <div className="table-filters"><label className="sr-only" htmlFor="queue-search">Buscar citas</label><input id="queue-search" type="search" placeholder="Paciente, servicio o profesional" value={query} onChange={e=>setQuery(e.target.value)}/>
++        <select aria-label="Filtrar por estado" value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option value="">Todos los estados</option><option value="PendingValidation">Pendientes</option><option value="Confirmed">Confirmadas</option><option value="Cancelled">Canceladas</option><option value="Rejected">Rechazadas</option></select></div>
++    </div>
++    {visible.length===0?<div className="empty-state"><ClipboardList size={28} aria-hidden="true"/><strong>{items.length===0?"No hay citas registradas.":"No hay coincidencias."}</strong><p>{items.length===0?"Las nuevas solicitudes aparecerán aquí.":"Prueba con otro filtro o término de búsqueda."}</p></div>:
++      <><div className="admission-desktop overflow-x-auto"><table className="data-table">
+         <thead><tr>{["Paciente","Servicio / profesional","Fecha","Cita","Cobertura","Acción"].map(t=><th key={t} className="p-2">{t}</th>)}</tr></thead>
+-        <tbody>{items.map(a=><tr key={String(a.id)} className="border-t">
+-          <td className="max-w-xs break-words p-2 align-top">{String(a.patientEmail)}</td><td className="p-2 align-top">{String(a.serviceName)} / {String(a.practitionerName)}</td>
+-          <td className="p-2 align-top">{localTime(a.startAt)}</td><td className="p-2 align-top">{String(a.status)}</td><td className="p-2 align-top">{String(a.coverageStatus)}</td>
+-          <td className="p-2 align-top"><button className="underline" disabled={busy || !["PendingValidation","Confirmed"].includes(String(a.status))}
++        <tbody>{visible.map(a=><tr key={String(a.id)} className="border-t">
++          <td className="max-w-xs break-words p-2 align-top">{String(a.patientEmail)}</td><td className="p-2 align-top"><span className="cell-primary">{String(a.serviceName)}</span><span className="cell-secondary">{String(a.practitionerName)}</span></td>
++          <td className="p-2 align-top">{localTime(a.startAt)}</td><td className="p-2 align-top"><StatusBadge value={a.status}/></td><td className="p-2 align-top"><StatusBadge value={a.coverageStatus}/></td>
++          <td className="p-2 align-top"><button className="button-secondary" disabled={busy || !["PendingValidation","Confirmed"].includes(String(a.status))}
+             onClick={()=>{setSelected(a);setEvidence("");setUntil("");}}>Revisar</button></td>
+         </tr>)}</tbody>
+-      </table></div>
++      </table></div><div className="admission-mobile">{visible.map(a=><article key={String(a.id)} className="appointment-mobile-card">
++        <span className="cell-secondary">Paciente</span><p className="cell-primary">{String(a.patientEmail)}</p>
++        <h3>{String(a.serviceName)}</h3><p className="cell-secondary">{String(a.practitionerName)}</p>
++        <p className="appointment-date">{localTime(a.startAt)}</p>
++        <div className="mobile-statuses"><div><span className="cell-secondary">Cita</span><StatusBadge value={a.status}/></div><div><span className="cell-secondary">Cobertura</span><StatusBadge value={a.coverageStatus}/></div></div>
++        <button className="button-secondary" disabled={busy||!["PendingValidation","Confirmed"].includes(String(a.status))}
++          onClick={()=>{setSelected(a);setEvidence("");setUntil("");}}>Revisar</button>
++      </article>)}</div></>}</section>
+       {selected && <form className="space-y-3 rounded-xl border bg-white p-5" onSubmit={e=>e.preventDefault()}>
+         <h2 className="font-bold">Revisión manual · {String(selected.patientEmail)}</h2>
+         <p>Aseguradora: {String(selected.insurer)} · Afiliación: ****{String(selected.memberLast4)}</p>
+         <label className="block">Referencia de evidencia (sin texto clínico)
+-          <input className="block w-full rounded border p-2" required maxLength={250} value={evidence}
++          <input ref={evidenceRef} className="block w-full rounded border p-2" required maxLength={250} value={evidence}
+             onChange={e=>setEvidence(e.target.value)}/></label>
+         <label className="block">Vigencia hasta (hora de Santo Domingo)
+           <input className="block rounded border p-2" type="datetime-local" value={until}
+@@ -32,7 +51,7 @@
+         <div className="flex flex-wrap gap-3">{[
+           ["ManualReview","Mantener en revisión"],["Approved","Aprobar cobertura y confirmar"],["Denied","Denegar cobertura"]
+         ].map(([status,label])=><button key={status} disabled={busy||!evidence.trim()||(status==="Approved"&&!until)}
+-          className="rounded bg-teal-700 p-2 text-white disabled:opacity-50"
++          className={status==="Approved"?"button-primary":status==="Denied"?"button-danger":"button-secondary"}
+           onClick={()=>run(async()=>{
+             await api("/admin/appointments/"+selected.id+"/validation","PATCH",{
+               status,evidence,version:selected.version,validUntil:until?new Date(until+"-04:00").toISOString():null
+diff --git a/portalweb/src/src/features/notifications/components/delivery-panel.tsx b/portalweb/src/src/features/notifications/components/delivery-panel.tsx
+--- a/portalweb/src/src/features/notifications/components/delivery-panel.tsx
++++ b/portalweb/src/src/features/notifications/components/delivery-panel.tsx
+@@ -1,11 +1,12 @@
++import StatusBadge from "@/shared/components/status-badge";
+ import type {Item} from "@/shared/api/client";
+ 
+ export default function DeliveryPanel({items}:{items:Item[]}){
+-  return (<div className="overflow-x-auto"><table className="w-full text-left">
++  return (<div className="surface overflow-x-auto"><table className="data-table">
+       <thead><tr>{["Evento","Estado","Intentos","Último código"].map(name=><th key={name} className="p-2">{name}</th>)}</tr></thead>
+       <tbody>{items.map(item=><tr key={String(item.id)} className="border-t">
+-        <td className="p-2">{String(item.kind)}</td><td className="p-2">{String(item.state)}</td>
++        <td className="p-2">{String(item.kind)}</td><td className="p-2"><StatusBadge value={item.state}/></td>
+         <td className="p-2">{String(item.attempts)}</td><td className="p-2">{String(item.lastErrorCode??"—")}</td>
+       </tr>)}</tbody>
+-    </table><p>Unknown indica confirmación SMTP incierta: no se reenvía automáticamente.</p></div>);
++    </table><p className="notice">Un mensaje «Sin confirmar» tiene una aceptación de envío incierta y no se reenvía automáticamente.</p></div>);
+ }
+diff --git a/portalweb/src/tests/browser/first-milestone/flow.spec.ts b/portalweb/src/tests/browser/first-milestone/flow.spec.ts
+--- a/portalweb/src/tests/browser/first-milestone/flow.spec.ts
++++ b/portalweb/src/tests/browser/first-milestone/flow.spec.ts
+@@ -83,7 +83,7 @@
+   appointmentId=(await created.json()).data.id;
+   await page.goto("/admision");
+   const row=page.getByRole("row").filter({hasText:patientEmail});
+-  await expect(row).toContainText("PendingValidation");
++  await expect(row).toContainText("Pendiente");
+   await row.getByRole("button",{name:"Revisar",exact:true}).click();
+   await page.getByLabel("Referencia de evidencia (sin texto clínico)").fill("Evidencia sintética de Playwright");
+   const valid=new Date(new Date(slot.endAt).getTime()+2*3600000-4*3600000).toISOString().slice(0,16);
+@@ -91,8 +91,8 @@
+   const reviewed=page.waitForResponse(r=>r.url().includes("/validation")&&r.request().method()==="PATCH");
+   await page.getByRole("button",{name:"Aprobar cobertura y confirmar",exact:true}).click();
+   expect((await reviewed).status()).toBe(200);
+-  await expect(row).toContainText("Confirmed");
+-  await expect(row).toContainText("Approved");
++  await expect(row).toContainText("Confirmada");
++  await expect(row).toContainText("Aprobada");
+   const persisted=(await (await patient.get("/api/backend/appointments/"+appointmentId)).json()).data;
+   expect(persisted.status).toBe("Confirmed");
+   expect(persisted.coverageStatus).toBe("Approved");
+diff --git a/portalweb/src/tailwind.config.ts b/portalweb/src/tailwind.config.ts
+--- a/portalweb/src/tailwind.config.ts
++++ b/portalweb/src/tailwind.config.ts
+@@ -1,31 +1,9 @@
+-import type { Config } from "tailwindcss";
+-
+-const config: Config = {
+-  content: [
+-    "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
+-    "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
+-    "./src/app/**/*.{js,ts,jsx,tsx,mdx}",
+-  ],
+-  theme: {
+-    extend: {
+-      colors: {
+-        primary: {
+-          50: "#eff6ff",
+-          100: "#dbeafe",
+-          500: "#3b82f6",
+-          600: "#2563eb",
+-          700: "#1d4ed8",
+-        },
+-        clinical: {
+-          teal: "#0d9488",
+-          blue: "#0284c7",
+-          navy: "#0f172a",
+-        },
+-      },
+-    },
+-  },
+-  plugins: [],
++import type {Config} from "tailwindcss";
++const config:Config={
++  content:["./src/**/*.{js,ts,jsx,tsx,mdx}"],
++  theme:{extend:{colors:{
++    primary:{50:"#f5f7f4",100:"#e5f0e9",500:"#39715d",600:"#205c4d",700:"#173f35"},
++    clinical:{teal:"#205c4d",blue:"#28566a",navy:"#172e27"},
++  }}},plugins:[],
+ };
+-
+ export default config;
+-

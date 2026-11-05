@@ -1,0 +1,51 @@
+{
+  "name": "Telemedicina",
+  "version": 1,
+  "colors": {
+    "primary": "#205C4D",
+    "primaryDark": "#173F35",
+    "primarySoft": "#E5F0E9",
+    "background": "#F5F7F4",
+    "surface": "#FFFFFF",
+    "ink": "#172E27",
+    "muted": "#5C6F65",
+    "border": "#DBE4DD",
+    "fieldBorder": "#81958A"
+  },
+  "radius": {
+    "brand": 12,
+    "surface": 16,
+    "authCard": 20
+  },
+  "spacing": [
+    4,
+    8,
+    12,
+    16,
+    20,
+    24,
+    28,
+    32,
+    36,
+    40,
+    48
+  ],
+  "typography": {
+    "family": "Sans serif nativa de cada plataforma",
+    "body": 14,
+    "label": 14,
+    "heading": 30,
+    "brand": 20
+  },
+  "interaction": {
+    "minimumWebTarget": 44,
+    "minimumAppTarget": 48,
+    "focus": "Visible, primary color",
+    "state": "Text label plus semantic color"
+  },
+  "contrast": {
+    "primaryOnWhite": 7.78,
+    "mutedOnWhite": 5.36,
+    "fieldBoundaryOnWhite": 3.18
+  }
+}

@@ -1,0 +1,24 @@
+- heading "telemedicina Tu espacio de salud" [level=2]
+- button "Actualizar"
+- button "Salir"
+- text: Demostración · Datos sintéticos · Sin atención clínica
+- group:
+  - text: Mi perfil Alergias, medicamentos y antecedentes son datos autodeclarados, no diagnósticos confirmados. Datos personales
+  - textbox "Nombres"
+  - textbox "Apellidos"
+  - textbox "Nacimiento (AAAA-MM-DD)"
+  - textbox "Teléfono"
+  - textbox "Dirección"
+  - text: Contacto de emergencia
+  - textbox "Contacto de emergencia"
+  - textbox "Teléfono de emergencia"
+  - text: Información autodeclarada
+  - textbox "Alergias (separadas por comas)"
+  - textbox "Medicamentos habituales (separados por comas)"
+  - textbox "Antecedentes (separados por comas)"
+  - button "Guardar perfil"
+- tablist:
+  - tab "Mi perfil" [selected]
+  - tab "Solicitar cita"
+  - tab "Mis citas"
+  - tab "Avisos"

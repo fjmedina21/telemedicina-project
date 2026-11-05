@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "telemedicina-ai-harness"
 version = "0.4.0"
 description = "Harness de desarrollo agnóstico para telemedicina Flutter / ASP.NET Core"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]

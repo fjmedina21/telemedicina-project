@@ -1,0 +1,3290 @@
+diff --git a/api/src/PRIMER_HITO.md b/api/src/PRIMER_HITO.md
+new file mode 100644
+--- /dev/null
++++ b/api/src/PRIMER_HITO.md
+@@ -0,0 +1,165 @@
++# Primer hito usable — propuesta para revisión
++
++Estado: parche propuesto, no integrado, no compilado ni ejecutado.
++Responsable backend: backend_mobile. Flutter: ambos colaboradores. Portal: asignar responsable por PR.
++Rutas del cambio: api/src/, app/src/ y portalweb/src/. Sin despliegue ni cambios remotos automáticos.
++
++## Alcance y decisiones
++
++Incremento local con datos sintéticos: registro/verificación, login, recuperación, sesiones revocables,
++perfil, catálogo y disponibilidad, solicitud, revisión manual de cobertura, confirmación, cancelación,
++reprogramación e historial. Portal protegido de admisión con MFA TOTP y consulta de auditoría.
++No activa video, consentimiento, expediente clínico, pagos ni recetas.
++
++PostgreSQL es la base indicada por el usuario. Credenciales solo por configuración del proceso:
++ConnectionStrings__Telemedicina. El parche nunca contiene la URL privada ni contraseñas.
++Se acepta una URI postgres:// o una cadena Npgsql. La URI exige TLS; para validar certificado y
++hostname usar cadena Npgsql con SSL Mode=VerifyFull y Root Certificate según la CA del proveedor.
++Ver https://www.npgsql.org/doc/security.html.
++
++La migración usa el esquema telemedicina_m1; conserva las tablas de public.
++Requiere btree_gist para restricciones de solapamiento. No asume permisos ni disponibilidad de esa
++extensión en Aiven: comprobarlos antes de aplicar. No se inspeccionó aún el esquema remoto.
++Esquema y seeds solo se ejecutan por comandos explícitos; nunca al iniciar normalmente.
++
++El servicio y profesional sembrados son demostraciones, no oferta clínica aprobada.
++No se prometen tarifas, cobertura, atención particular ni políticas clínicas.
++En este entorno sintético se permite cancelar/reprogramar antes del inicio.
++Las políticas de anticipación y cancelación configurables de producción siguen pendientes.
++La cobertura aprobada requiere referencia de evidencia y vigencia hasta el final de la cita.
++Denegar cobertura mantiene la cita pendiente, sin convertirla automáticamente a particular.
++Reprogramar invalida la revisión anterior y vuelve a ManualReview.
++
++## Contrato propuesto
++
++Todas las rutas están bajo /api/v1. Éxito: {success,status,detail,data}.
++Errores operativos: {status,title,code,traceId}; conservar códigos HTTP 400/401/403/404/409/429.
++La validación automática de DTO usa ValidationProblemDetails de ASP.NET Core.
++UUID públicos. Fechas UTC en API/DB; clientes muestran America/Santo_Domingo.
++
++| Método / ruta | Acceso | Efecto |
++|---|---|---|
++| POST /auth/register | Público limitado | Crea cuenta Patient sin verificar; respuesta genérica 202 |
++| POST /auth/verify | Token de un uso | Verifica cuenta |
++| POST /auth/login | Credenciales; MFA para Admission | Sesión opaca con acceso 30 min y límite absoluto 8 h |
++| POST /auth/refresh | Refresh válido | Rota acceso/refresh y revoca sesión anterior |
++| POST /auth/logout | Autenticado | Revoca acceso y refresh de esa sesión |
++| POST /auth/password/forgot | Público limitado | Respuesta genérica 202 |
++| POST /auth/password/reset | Token de un uso | Cambia contraseña y revoca sesiones |
++| GET /auth/me | Autenticado | Identidad y rol del servidor |
++| GET /auth/dev-mailbox?email=...&purpose=verify/reset | Clave de desarrollador | Solo pruebas sintéticas |
++| GET/PATCH /patients/me | Patient | Perfil con versión optimista y datos SelfDeclared |
++| GET /specialties, /services, /practitioners | Autenticado | Catálogo activo |
++| GET /availability?serviceId=UUID | Autenticado | Horarios futuros libres; rango máximo 31 días |
++| POST /appointments | Patient | Solicita con Idempotency-Key UUID |
++| GET /appointments/me | Patient | Sus citas |
++| GET /appointments/{id}, /appointments/{id}/history | Dueño o Admission | Detalle e historial |
++| POST /appointments/{id}/cancel | Dueño | Cancela con versión y libera horario |
++| POST /appointments/{id}/reschedule | Dueño | Nuevo horario y versión; conserva historial |
++| GET /admin/work-queue | Admission | Citas persistentes |
++| PATCH /admin/appointments/{id}/validation | Admission | Evidencia, vigencia, actor y versión |
++| POST /admin/slots | Admission | Crea horario sin solapamientos |
++| PATCH /admin/slots/{id}/block | Admission | Bloquea libre; rechaza si hay reserva |
++| PATCH /admin/users/{id}/active | Admission | Suspende/reactiva Patient; revoca sesiones al suspender |
++| GET /admin/audit-events?after=0 | Admission | Página de 100 eventos sin contenido clínico |
++
++Los estados de cita y cobertura se mantienen independientes.
++El perfil no permite editar identificadores legales; solo datos de contacto y autodeclaraciones.
++Idempotency-Key conserva resultado ante reintentos y devuelve 409 si cambia el payload.
++La exclusión PostgreSQL evita reservas concurrentes solapadas incluso desde otros procesos.
++Historial conserva horarios, estados y referencias de cobertura previos; no borra notas clínicas.
++La auditoría e historial bloquean UPDATE/DELETE/TRUNCATE por triggers. El dueño de la base puede
++alterar objetos: requiere rol de aplicación sin DDL y controles externos antes de producción.
++
++## Configuración local después de aprobar el parche
++
++Variables de entorno privadas, sin valores por defecto:
++- ASPNETCORE_ENVIRONMENT=Development
++- Milestone__Enabled=true
++- ConnectionStrings__Telemedicina: conexión privada PostgreSQL
++- Milestone__MailboxKey: clave aleatoria de desarrollo
++- Milestone__AdmissionEmail: cuenta sintética de admisión
++- Milestone__AdmissionPassword: contraseña privada de al menos 12 caracteres
++- Milestone__AdmissionTotpSecret: secreto Base32 aleatorio de al menos 32 caracteres,
++  provisionado en un autenticador por canal seguro; no enviarlo a logs ni al navegador.
++
++El buzón de desarrollo requiere X-Dev-Mailbox-Key. No es correo real ni prueba de identidad
++apta para producción. No incorporar esa clave a Flutter ni a variables NEXT_PUBLIC.
++Los endpoints del hito están desactivados fuera de Development o sin Milestone__Enabled.
++Registro público solo crea Patient; el rol Admission se provisiona explícitamente por seed.
++
++Compilar:
++dotnet build api/src/Telemedicina.Api/Telemedicina.Api.csproj
++
++Aplicar migración revisada:
++dotnet run --project api/src/Telemedicina.Api/Telemedicina.Api.csproj -- --migrate
++
++Sembrar únicamente en base sintética:
++dotnet run --project api/src/Telemedicina.Api/Telemedicina.Api.csproj -- --seed-synthetic
++
++Iniciar:
++dotnet run --project api/src/Telemedicina.Api/Telemedicina.Api.csproj
++El proyecto requiere runtime .NET 9; el SDK 10 instalado no lo sustituye.
++DOTNET_ROLL_FORWARD=Major permite comprobación local temporal en .NET 10; no se cambia el target.
++
++Portal (desde portalweb/src):
++npm ci
++npm run build
++npm run dev
++
++Portal usa cookies HttpOnly SameSite=Strict mediante /api/backend, sin tokens en localStorage.
++API_INTERNAL_URL es configuración de servidor, no contiene credenciales de base de datos.
++Milestone__PortalOrigin debe coincidir exactamente con el origen del portal (por defecto http://localhost:3000).
++El cliente envía cabecera anti-CSRF; se rechazan otros orígenes.
++Las cookies usan Secure cuando la solicitud API es HTTPS; producción requiere configurar forwarding
++y TLS correctamente antes de habilitar este incremento fuera del entorno local.
++
++Flutter (desde app/src):
++flutter pub get
++flutter analyze
++flutter test
++flutter run -d macos --dart-define=API_BASE_URL=http://127.0.0.1:5000/api/v1
++Android Emulator: API_BASE_URL=http://10.0.2.2:5000/api/v1.
++Dispositivos físicos: URL HTTPS alcanzable. No se habilitan excepciones HTTP de release.
++Regenerar y revisar pubspec.lock al restaurar la dependencia http.
++Los tokens solo se mantienen en memoria; reiniciar requiere login.
++La ruta inicial nueva no enlaza los prototipos de video/documentos.
++
++## Validación pendiente
++
++Pruebas Flutter incluidas: acceso inicial, preservación de 409, renovación con la misma clave
++de idempotencia y borrado de sesión incluso ante fallo de red.
++
++Pruebas HTTP reales, contra una API local que apunte a una base de prueba separada:
++MILESTONE_TEST_SYNTHETIC=1 python3 api/src/Telemedicina.Tests/milestone_e2e.py
++Requieren las variables privadas del buzón y la cuenta Admission indicadas arriba.
++Generan solo datos sintéticos identificables con example.invalid, no borran objetos ni registros.
++No ejecutarlas contra una base con datos reales.
++Cubren permisos, acceso cruzado, 404, idempotencia, concurrencia, revisión/versiones,
++historial, reprogramación, cancelación/liberación, bloqueo y revocación.
++
++Falta ejecutar tras aprobación: restauración, builds, análisis, pruebas HTTP y UI en macOS,
++Android/iOS y navegador; reiniciar API y confirmar persistencia; probar recuperación y MFA negativa.
++La CI raíz requiere después su PR autorizado: incorporar portal, ejecutar pruebas de consola .NET
++con dotnet run y alinear runtime net9.0; no se cambia .github fuera de las tres áreas asignadas.
++
++## Recorrido de aceptación
++
++1. Crear/verificar dos pacientes sintéticos y completar sus perfiles.
++2. Ver catálogo y horarios de demostración; solicitar sin afirmar cobertura.
++3. Admisión inicia con TOTP, revisa evidencia y confirma cobertura vigente.
++4. Paciente actualiza y observa los mismos estados persistidos.
++5. Reprogramar vuelve a revisión; cancelar libera horario y conserva historial.
++6. Reservas concurrentes: una gana y la otra recibe 409.
++7. Paciente B no lee la cita de A; paciente no puede usar endpoints de admisión.
++8. Reiniciar API conserva registros. Salir/reset/suspender invalida sesiones.
++9. Historial y auditoría muestran actor y cambios sin contraseñas ni tokens.
++10. Registrar resultado real de cada prueba antes de declarar el hito completo.
++
++## Pendientes para cumplimiento total de specs
++
++Proveedor de identidad/correo y recuperación real; MFA de personal con gestión de enrolamiento;
++configuración clínica aprobada de servicios; políticas configurables de agenda, cancelación y feriados;
++gestión de servicios/profesionales; resolución manual de duplicados; controles de retención y auditoría
++con rol mínimo; notificaciones/outbox reales y CI integral. Dependientes completos son P1.
++Estos pendientes no deben presentarse como implementados por el flujo sintético.
+diff --git a/api/src/Telemedicina.Api/Milestone/001_initial.sql b/api/src/Telemedicina.Api/Milestone/001_initial.sql
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/001_initial.sql
+@@ -0,0 +1,85 @@
++-- Review and apply explicitly using --migrate. Never run automatically on API startup.
++-- Dedicated schema; no changes to existing public tables. Synthetic data only.
++CREATE EXTENSION IF NOT EXISTS btree_gist;
++CREATE SCHEMA IF NOT EXISTS telemedicina_m1;
++SET LOCAL search_path TO telemedicina_m1, public;
++CREATE TABLE IF NOT EXISTS schema_versions(version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
++DO $migration$
++BEGIN
++IF NOT EXISTS (SELECT 1 FROM schema_versions WHERE version=1) THEN
++CREATE TABLE users (
++    id text PRIMARY KEY, email text NOT NULL, password_hash text NOT NULL,
++    role text NOT NULL CHECK(role IN ('Patient','Admission')), verified boolean NOT NULL DEFAULT false,
++    active boolean NOT NULL DEFAULT true, totp_secret text, last_totp_step bigint NOT NULL DEFAULT -1,
++    failed_logins integer NOT NULL DEFAULT 0, locked_until bigint NOT NULL DEFAULT 0);
++CREATE UNIQUE INDEX users_email ON users(lower(email));
++CREATE TABLE profiles(user_id text PRIMARY KEY REFERENCES users(id), body text NOT NULL, version integer NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now());
++CREATE TABLE sessions(
++    id text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id),
++    access_hash text NOT NULL UNIQUE, refresh_hash text NOT NULL UNIQUE,
++    access_expires bigint NOT NULL, expires bigint NOT NULL, revoked boolean NOT NULL DEFAULT false);
++CREATE TABLE challenges(
++    token_hash text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id),
++    purpose text NOT NULL, expires bigint NOT NULL, used boolean NOT NULL DEFAULT false);
++CREATE TABLE dev_mailbox(
++    user_id text NOT NULL REFERENCES users(id), purpose text NOT NULL, token text NOT NULL,
++    expires bigint NOT NULL, PRIMARY KEY(user_id,purpose));
++CREATE TABLE services(
++    id text PRIMARY KEY, specialty text NOT NULL, name text NOT NULL,
++    duration integer NOT NULL CHECK(duration BETWEEN 5 AND 240), active boolean NOT NULL DEFAULT true);
++CREATE TABLE practitioners(id text PRIMARY KEY, name text NOT NULL, active boolean NOT NULL DEFAULT true);
++CREATE TABLE slots(
++    id text PRIMARY KEY, service_id text NOT NULL REFERENCES services(id),
++    practitioner_id text NOT NULL REFERENCES practitioners(id),
++    start_utc timestamptz NOT NULL, end_utc timestamptz NOT NULL, blocked boolean NOT NULL DEFAULT false,
++    CHECK(start_utc < end_utc),
++    UNIQUE(id,practitioner_id,start_utc,end_utc),
++    EXCLUDE USING gist(practitioner_id WITH =, tstzrange(start_utc,end_utc,'[)') WITH &&));
++CREATE TABLE appointments(
++    id text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id),
++    slot_id text NOT NULL, practitioner_id text NOT NULL,
++    start_utc timestamptz NOT NULL, end_utc timestamptz NOT NULL,
++    FOREIGN KEY(slot_id,practitioner_id,start_utc,end_utc) REFERENCES slots(id,practitioner_id,start_utc,end_utc),
++    status text NOT NULL CHECK(status IN ('PendingValidation','Confirmed','Cancelled','Rejected')),
++    coverage text NOT NULL CHECK(coverage IN ('Pending','ManualReview','Approved','Denied','Expired')),
++    insurer text NOT NULL, member_last4 text NOT NULL CHECK(member_last4 ~ '^[0-9]{4}$'),
++    evidence text, coverage_valid_until timestamptz, reviewed_by text REFERENCES users(id), reviewed_at timestamptz,
++    version integer NOT NULL DEFAULT 1,
++    EXCLUDE USING gist(practitioner_id WITH =, tstzrange(start_utc,end_utc,'[)') WITH &&)
++        WHERE(status IN ('PendingValidation','Confirmed')));
++CREATE TABLE appointment_history(
++    sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
++    appointment_id text NOT NULL REFERENCES appointments(id), old_slot_id text, new_slot_id text NOT NULL,
++    old_status text, new_status text NOT NULL, old_coverage text, new_coverage text NOT NULL,
++    old_evidence text, new_evidence text, old_valid_until timestamptz, new_valid_until timestamptz,
++    version integer NOT NULL, actor_id text NOT NULL, occurred_at timestamptz NOT NULL DEFAULT now());
++CREATE FUNCTION track_appointment() RETURNS trigger LANGUAGE plpgsql AS $history$
++BEGIN
++    INSERT INTO appointment_history(appointment_id,old_slot_id,new_slot_id,old_status,new_status,
++        old_coverage,new_coverage,old_evidence,new_evidence,old_valid_until,new_valid_until,version,actor_id)
++    VALUES(NEW.id,CASE WHEN TG_OP='UPDATE' THEN OLD.slot_id ELSE NULL END,NEW.slot_id,
++        CASE WHEN TG_OP='UPDATE' THEN OLD.status ELSE NULL END,NEW.status,
++        CASE WHEN TG_OP='UPDATE' THEN OLD.coverage ELSE NULL END,NEW.coverage,
++        CASE WHEN TG_OP='UPDATE' THEN OLD.evidence ELSE NULL END,NEW.evidence,
++        CASE WHEN TG_OP='UPDATE' THEN OLD.coverage_valid_until ELSE NULL END,NEW.coverage_valid_until,NEW.version,
++        coalesce(current_setting('telemedicina.actor',true),NEW.user_id));
++    RETURN NEW;
++END $history$;
++CREATE TRIGGER appointment_history_written AFTER INSERT OR UPDATE ON appointments
++    FOR EACH ROW EXECUTE FUNCTION track_appointment();
++CREATE TABLE idempotency(
++    user_id text NOT NULL REFERENCES users(id), key text NOT NULL, request_hash text NOT NULL,
++    response text NOT NULL, PRIMARY KEY(user_id,key));
++CREATE TABLE audit(
++    sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, id text NOT NULL UNIQUE,
++    actor_id text NOT NULL, action text NOT NULL, resource_id text NOT NULL,
++    occurred_at timestamptz NOT NULL DEFAULT now(), trace_id text NOT NULL);
++CREATE FUNCTION protect_audit() RETURNS trigger LANGUAGE plpgsql AS $body$
++BEGIN RAISE EXCEPTION 'Audit events are append only'; END $body$;
++CREATE TRIGGER audit_no_mutation BEFORE UPDATE OR DELETE OR TRUNCATE ON audit
++    FOR EACH STATEMENT EXECUTE FUNCTION protect_audit();
++CREATE TRIGGER history_no_mutation BEFORE UPDATE OR DELETE OR TRUNCATE ON appointment_history
++    FOR EACH STATEMENT EXECUTE FUNCTION protect_audit();
++INSERT INTO schema_versions(version) VALUES(1);
++END IF;
++END $migration$;
+diff --git a/api/src/Telemedicina.Api/Milestone/AuthController.cs b/api/src/Telemedicina.Api/Milestone/AuthController.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/AuthController.cs
+@@ -0,0 +1,179 @@
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.AspNetCore.RateLimiting;
++using Npgsql;
++using static Telemedicina.Api.Milestone.Database;
++using static Telemedicina.Api.Milestone.Security;
++
++namespace Telemedicina.Api.Milestone;
++
++[ApiController, Route("api/v1/auth"), EnableRateLimiting("auth")]
++public sealed class AuthController(Database database, IConfiguration configuration) : ControllerBase
++{
++    private IActionResult OkData(object data) => Ok(new {success=true,status=200,detail="OK",data});
++    private IActionResult Failure(int status,string code) => StatusCode(status,new {
++        status,title="No se pudo completar la operación",code,traceId=HttpContext.TraceIdentifier});
++    private static readonly string DummyHash = Password(NewToken());
++
++    [HttpPost("register")]
++    public IActionResult Register(RegisterRequest request)
++    {
++        using var c=database.Open(); using var t=c.BeginTransaction();
++        var id=Guid.NewGuid().ToString();
++        var inserted=Execute(c,t,"""
++            INSERT INTO users(id,email,password_hash,role) VALUES(@id,@email,@hash,'Patient')
++            ON CONFLICT DO NOTHING
++            """,("id",id),("email",request.Email.Trim().ToLowerInvariant()),("hash",Password(request.Password)));
++        if(inserted>0) {
++            Challenge(c,t,id,"verify"); Audit(c,t,id,"account.registered",id,HttpContext.TraceIdentifier);
++        }
++        t.Commit();
++        return Accepted(new {success=true,status=202,detail="Si corresponde, revise el mensaje de verificación."});
++    }
++    private void Challenge(NpgsqlConnection c,NpgsqlTransaction t,string user,string purpose)
++    {
++        var token=NewToken(); var expires=Now+900;
++        Execute(c,t,"UPDATE challenges SET used=true WHERE user_id=@u AND purpose=@p",
++            ("u",user),("p",purpose));
++        Execute(c,t,"INSERT INTO challenges(token_hash,user_id,purpose,expires) VALUES(@h,@u,@p,@e)",
++            ("h",Hash(token)),("u",user),("p",purpose),("e",expires));
++        Execute(c,t,"""
++            INSERT INTO dev_mailbox(user_id,purpose,token,expires) VALUES(@u,@p,@token,@e)
++            ON CONFLICT(user_id,purpose) DO UPDATE SET token=excluded.token,expires=excluded.expires
++            """,("u",user),("p",purpose),("token",token),("e",expires));
++    }
++    [HttpPost("verify")]
++    public IActionResult Verify(TokenRequest request)
++    {
++        using var c=database.Open(); using var t=c.BeginTransaction();
++        var user=Scalar(c,t,"""
++            UPDATE challenges SET used=true WHERE token_hash=@h AND purpose='verify'
++            AND NOT used AND expires>@now RETURNING user_id
++            """,("h",Hash(request.Token)),("now",Now)) as string;
++        if(user is null) return Failure(400,"INVALID_CHALLENGE");
++        Execute(c,t,"UPDATE users SET verified=true WHERE id=@u",("u",user));
++        Execute(c,t,"DELETE FROM dev_mailbox WHERE user_id=@u AND purpose='verify'",("u",user));
++        Audit(c,t,user,"account.verified",user,HttpContext.TraceIdentifier); t.Commit();
++        return OkData(new {verified=true});
++    }
++    [HttpPost("password/forgot")]
++    public IActionResult Forgot(ForgotRequest request)
++    {
++        using var c=database.Open(); using var t=c.BeginTransaction();
++        var user=Scalar(c,t,"SELECT id FROM users WHERE lower(email)=lower(@e) AND active",
++            ("e",request.Email.Trim())) as string;
++        if(user is not null) Challenge(c,t,user,"reset");
++        t.Commit();
++        return Accepted(new {success=true,status=202,detail="Si corresponde, revise el mensaje de recuperación."});
++    }
++    [HttpPost("password/reset")]
++    public IActionResult Reset(ResetRequest request)
++    {
++        using var c=database.Open(); using var t=c.BeginTransaction();
++        var user=Scalar(c,t,"""
++            UPDATE challenges SET used=true WHERE token_hash=@h AND purpose='reset'
++            AND NOT used AND expires>@now RETURNING user_id
++            """,("h",Hash(request.Token)),("now",Now)) as string;
++        if(user is null) return Failure(400,"INVALID_CHALLENGE");
++        Execute(c,t,"UPDATE users SET password_hash=@h,failed_logins=0,locked_until=0 WHERE id=@u",
++            ("h",Password(request.Password)),("u",user));
++        Execute(c,t,"UPDATE sessions SET revoked=true WHERE user_id=@u",("u",user));
++        Execute(c,t,"DELETE FROM dev_mailbox WHERE user_id=@u AND purpose='reset'",("u",user));
++        Audit(c,t,user,"account.password_reset",user,HttpContext.TraceIdentifier); t.Commit();
++        return OkData(new {reset=true});
++    }
++    [HttpGet("dev-mailbox")]
++    public IActionResult Mailbox([FromQuery] string email,[FromQuery] string purpose)
++    {
++        var expected=configuration["Milestone:MailboxKey"];
++        var supplied=Request.Headers["X-Dev-Mailbox-Key"].ToString();
++        if(string.IsNullOrEmpty(expected) || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
++            System.Text.Encoding.UTF8.GetBytes(Hash(expected)),System.Text.Encoding.UTF8.GetBytes(Hash(supplied))))
++            return NotFound();
++        using var c=database.Open();
++        var rows=Rows(c,null,"""
++            SELECT m.token,m.expires FROM dev_mailbox m JOIN users u ON u.id=m.user_id
++            WHERE lower(u.email)=lower(@e) AND m.purpose=@p AND m.expires>@n
++            """,("e",email),("p",purpose),("n",Now));
++        return rows.Count==0 ? NotFound() : OkData(rows[0]);
++    }
++    [HttpPost("login")]
++    public IActionResult Login(LoginRequest request)
++    {
++        using var c=database.Open(); using var t=c.BeginTransaction();
++        var rows=Rows(c,t,"SELECT * FROM users WHERE lower(email)=lower(@e) FOR UPDATE",
++            ("e",request.Email.Trim()));
++        var row=rows.FirstOrDefault();
++        var passwordValid=CheckPassword(row?["password_hash"] as string ?? DummyHash,request.Password);
++        long? step=null;
++        if(row is not null && (string)row["role"]! == "Admission")
++            step=TotpStep((string?)row["totp_secret"] ?? "",request.Otp);
++        var valid=row is not null && passwordValid && (bool)row["active"]! && (bool)row["verified"]!
++            && (long)row["locked_until"]!<=Now &&
++            ((string)row["role"]! != "Admission" || (step.HasValue && step.Value>(long)row["last_totp_step"]!));
++        if(!valid) {
++            if(row is not null) {
++                Execute(c,t,"""
++                    UPDATE users SET failed_logins=failed_logins+1,
++                    locked_until=CASE WHEN failed_logins>=4 THEN @until ELSE locked_until END WHERE id=@u
++                    """,("until",Now+300),("u",row["id"]));
++                Audit(c,t,(string)row["id"]!,"account.login_denied",(string)row["id"]!,HttpContext.TraceIdentifier);
++            }
++            t.Commit(); return Failure(401,"INVALID_CREDENTIALS");
++        }
++        Execute(c,t,"UPDATE users SET failed_logins=0,locked_until=0,last_totp_step=@step WHERE id=@u",
++            ("step",step ?? -1),("u",row!["id"]));
++        var result=CreateSession(c,t,(string)row["id"]!,(string)row["role"]!);
++        Audit(c,t,(string)row["id"]!,"session.created",(string)row["id"]!,HttpContext.TraceIdentifier);
++        t.Commit(); return OkData(result);
++    }
++    private object CreateSession(NpgsqlConnection c,NpgsqlTransaction t,string user,string role,long? absoluteExpiry=null)
++    {
++        var access=NewToken(); var refresh=NewToken(); var expires=absoluteExpiry ?? Now+28800;
++        Execute(c,t,"""
++            INSERT INTO sessions(id,user_id,access_hash,refresh_hash,access_expires,expires)
++            VALUES(@id,@u,@a,@r,@ae,@e)
++            """,("id",Guid.NewGuid().ToString()),("u",user),("a",Hash(access)),("r",Hash(refresh)),
++            ("ae",Now+1800),("e",expires));
++        SetCookies(access,refresh);
++        // Browser client requests cookies; secrets never enter browser storage or response JSON.
++        return Request.Headers["X-Session-Mode"]=="cookie"
++            ? new {userId=user,role} : (object)new {userId=user,role,accessToken=access,refreshToken=refresh,expiresIn=1800};
++    }
++    private void SetCookies(string access,string refresh)
++    {
++        var options=new CookieOptions {HttpOnly=true,Secure=Request.IsHttps,SameSite=SameSiteMode.Strict,
++            Path="/",MaxAge=TimeSpan.FromHours(8)};
++        Response.Cookies.Append("tm_access",access,options);
++        Response.Cookies.Append("tm_refresh",refresh,options);
++    }
++    [HttpPost("refresh")]
++    public IActionResult Refresh(RefreshRequest request)
++    {
++        var token=request.RefreshToken ?? Request.Cookies["tm_refresh"];
++        if(string.IsNullOrEmpty(token)) return Failure(401,"SESSION_REQUIRED");
++        using var c=database.Open(); using var t=c.BeginTransaction();
++        var rows=Rows(c,t,"""
++            SELECT s.id,s.user_id,s.expires,u.role FROM sessions s JOIN users u ON u.id=s.user_id
++            WHERE s.refresh_hash=@h AND NOT s.revoked AND s.expires>@now AND u.active AND u.verified
++            FOR UPDATE OF s
++            """,("h",Hash(token)),("now",Now));
++        if(rows.Count==0) return Failure(401,"SESSION_REQUIRED");
++        var row=rows[0];
++        Execute(c,t,"UPDATE sessions SET revoked=true WHERE id=@id",("id",row["id"]));
++        var result=CreateSession(c,t,(string)row["user_id"]!,(string)row["role"]!,(long)row["expires"]!);
++        t.Commit(); return OkData(result);
++    }
++    [Authorize,HttpGet("me")]
++    public IActionResult Me() => OkData(new {userId=UserId(User),email=User.Identity!.Name,
++        role=User.FindFirst(System.Security.Claims.ClaimTypes.Role)!.Value});
++    [Authorize,HttpPost("logout")]
++    public IActionResult Logout()
++    {
++        using var c=database.Open(); using var t=c.BeginTransaction();
++        Execute(c,t,"UPDATE sessions SET revoked=true WHERE id=@id",("id",User.FindFirst("session_id")!.Value));
++        Audit(c,t,UserId(User),"session.revoked",UserId(User),HttpContext.TraceIdentifier); t.Commit();
++        Response.Cookies.Delete("tm_access"); Response.Cookies.Delete("tm_refresh");
++        return OkData(new {loggedOut=true});
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Milestone/Bootstrap.cs b/api/src/Telemedicina.Api/Milestone/Bootstrap.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/Bootstrap.cs
+@@ -0,0 +1,87 @@
++using System.Threading.RateLimiting;
++using Microsoft.AspNetCore.Authentication;
++using static Telemedicina.Api.Milestone.Database;
++using static Telemedicina.Api.Milestone.Security;
++
++namespace Telemedicina.Api.Milestone;
++
++public static class Bootstrap
++{
++    public static void AddMilestone(this WebApplicationBuilder builder)
++    {
++        builder.Services.AddSingleton<Database>();
++        builder.Services.AddAuthentication(Security.Scheme)
++            .AddScheme<AuthenticationSchemeOptions,SessionHandler>(Security.Scheme,_=>{});
++        builder.Services.AddAuthorization();
++        builder.Services.AddRateLimiter(options => {
++            options.RejectionStatusCode=429;
++            options.AddPolicy("auth",context=>RateLimitPartition.GetFixedWindowLimiter(
++                context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
++                _=>new FixedWindowRateLimiterOptions {PermitLimit=30,Window=TimeSpan.FromMinutes(1),QueueLimit=0}));
++        });
++    }
++    public static void UseMilestone(this WebApplication app)
++    {
++        app.Use(async(context,next)=> {
++            if(context.Request.Path.StartsWithSegments("/api/v1") &&
++                !context.Request.Path.Equals("/api/v1/health",StringComparison.OrdinalIgnoreCase))
++            {
++                if(!app.Environment.IsDevelopment() || !app.Configuration.GetValue<bool>("Milestone:Enabled")) {
++                    context.Response.StatusCode=404; return;
++                }
++                context.Response.Headers.CacheControl="no-store";
++                var origin=context.Request.Headers.Origin.ToString();
++                var allowed=app.Configuration["Milestone:PortalOrigin"] ?? "http://localhost:3000";
++                if(!string.IsNullOrEmpty(origin) && origin!=allowed) {
++                    context.Response.StatusCode=403; return;
++                }
++                if(!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsOptions(context.Request.Method)
++                    && context.Request.Headers["X-Telemedicina-Client"]!="milestone") {
++                    context.Response.StatusCode=403; return;
++                }
++            }
++            await next(context);
++        });
++        app.UseRateLimiter();
++        app.UseAuthentication();
++    }
++
++    public static void SeedSynthetic(Database database,IConfiguration config)
++    {
++        using var c=database.Open(); using var t=c.BeginTransaction();
++        Execute(c,t,"SELECT pg_advisory_xact_lock(19041302)");
++        const string service="10000000-0000-4000-8000-000000000001";
++        const string practitioner="20000000-0000-4000-8000-000000000001";
++        Execute(c,t,"""
++            INSERT INTO services(id,specialty,name,duration)
++            VALUES(@id,'Demostración','Servicio sintético: no habilitado para atención clínica',30)
++            ON CONFLICT DO NOTHING
++            """,("id",service));
++        Execute(c,t,"INSERT INTO practitioners(id,name) VALUES(@id,'Profesional de demostración') ON CONFLICT DO NOTHING",
++            ("id",practitioner));
++        for(var day=1;day<=14;day++)
++        for(var hour=9;hour<=16;hour++) {
++            var date=DateTime.UtcNow.Date.AddDays(day);
++            var start=new DateTimeOffset(date.Year,date.Month,date.Day,hour,0,0,TimeSpan.FromHours(-4)).UtcDateTime;
++            var id=new Guid(System.Security.Cryptography.MD5.HashData(
++                System.Text.Encoding.UTF8.GetBytes(practitioner+start.ToString("O")))).ToString();
++            Execute(c,t,"""
++                INSERT INTO slots(id,service_id,practitioner_id,start_utc,end_utc)
++                VALUES(@id,@s,@p,@start,@end) ON CONFLICT DO NOTHING
++                """,("id",id),("s",service),("p",practitioner),("start",start),("end",start.AddMinutes(30)));
++        }
++        var email=config["Milestone:AdmissionEmail"];
++        var password=config["Milestone:AdmissionPassword"];
++        var totp=config["Milestone:AdmissionTotpSecret"];
++        if(string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password) || password.Length<12 ||
++            string.IsNullOrWhiteSpace(totp) || totp.Length<32 ||
++            totp.Any(ch=>!"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".Contains(char.ToUpperInvariant(ch))))
++            throw new InvalidOperationException("Configure synthetic admission email, password (12+ chars) and Base32 TOTP secret (32+ chars).");
++        Execute(c,t,"""
++            INSERT INTO users(id,email,password_hash,role,verified,totp_secret)
++            VALUES(@id,@email,@hash,'Admission',true,@totp) ON CONFLICT DO NOTHING
++            """,("id",Guid.NewGuid().ToString()),("email",email.Trim().ToLowerInvariant()),
++            ("hash",Password(password)),("totp",totp));
++        Audit(c,t,"seed","synthetic.seed_applied",service,"seed"); t.Commit();
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Milestone/CareController.cs b/api/src/Telemedicina.Api/Milestone/CareController.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/CareController.cs
+@@ -0,0 +1,287 @@
++using System.Text.Json;
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Mvc;
++using static Telemedicina.Api.Milestone.Database;
++using static Telemedicina.Api.Milestone.Security;
++
++namespace Telemedicina.Api.Milestone;
++
++[ApiController,Authorize,Route("api/v1")]
++public sealed class CareController(Database database) : ControllerBase
++{
++    private static readonly JsonSerializerOptions Json=new(JsonSerializerDefaults.Web);
++    private IActionResult Data(object? data,int status=200) => StatusCode(status,new {success=true,status,detail="OK",data});
++    private IActionResult Fail(int status,string code,string message) => StatusCode(status,new {
++        status,title=message,code,traceId=HttpContext.TraceIdentifier});
++    private Npgsql.NpgsqlTransaction Begin(Npgsql.NpgsqlConnection c)
++    {
++        var t=c.BeginTransaction();
++        Execute(c,t,"SELECT set_config('telemedicina.actor',@actor,true)",("actor",UserId(User)));
++        return t;
++    }
++    private void Log(Npgsql.NpgsqlConnection c,Npgsql.NpgsqlTransaction t,string action,string id) =>
++        Audit(c,t,UserId(User),action,id,HttpContext.TraceIdentifier);
++
++    [Authorize(Roles="Patient"),HttpGet("patients/me")]
++    public IActionResult Profile()
++    {
++        using var c=database.Open();
++        var rows=Rows(c,null,"SELECT body,version,updated_at FROM profiles WHERE user_id=@u",("u",UserId(User)));
++        return Data(rows.Count==0 ? null : new {profile=JsonSerializer.Deserialize<JsonElement>((string)rows[0]["body"]!),
++            version=rows[0]["version"],updatedAt=rows[0]["updated_at"],source="SelfDeclared"});
++    }
++    [Authorize(Roles="Patient"),HttpPatch("patients/me")]
++    public IActionResult SaveProfile(ProfileRequest request)
++    {
++        if(request.BirthDate>=DateOnly.FromDateTime(DateTime.UtcNow) || request.BirthDate.Year<1900 ||
++            new[]{request.FirstName,request.LastName,request.Address,request.EmergencyName}.Any(string.IsNullOrWhiteSpace) ||
++            request.Allergies is null || request.Medications is null || request.Conditions is null ||
++            request.Allergies.Concat(request.Medications).Concat(request.Conditions).Any(x=>string.IsNullOrWhiteSpace(x)||x.Length>200))
++            return Fail(400,"INVALID_PROFILE","Revise los datos del perfil.");
++        using var c=database.Open(); using var t=Begin(c);
++        Execute(c,t,"SELECT pg_advisory_xact_lock(hashtextextended(@key,0))",("key","profile:"+UserId(User)));
++        var version=Scalar(c,t,"SELECT version FROM profiles WHERE user_id=@u FOR UPDATE",("u",UserId(User)));
++        if((version is null && request.Version!=0) || (version is not null && (int)version!=request.Version))
++            return Fail(409,"VERSION_CONFLICT","El perfil cambió. Actualice antes de guardar.");
++        Execute(c,t,"""
++            INSERT INTO profiles(user_id,body,version) VALUES(@u,@body,1)
++            ON CONFLICT(user_id) DO UPDATE SET body=excluded.body,version=profiles.version+1,updated_at=now()
++            """,("u",UserId(User)),("body",JsonSerializer.Serialize(request,Json)));
++        Log(c,t,"profile.updated",UserId(User)); t.Commit();
++        return Data(new {version=request.Version+1});
++    }
++
++    [HttpGet("specialties")]
++    public IActionResult Specialties()
++    {
++        using var c=database.Open();
++        return Data(Rows(c,null,"SELECT DISTINCT specialty AS name FROM services WHERE active ORDER BY specialty"));
++    }
++    [HttpGet("services")]
++    public IActionResult Services([FromQuery]string? specialty=null)
++    {
++        using var c=database.Open();
++        return Data(Rows(c,null,"""
++            SELECT id,name,specialty,duration AS "durationMinutes" FROM services
++            WHERE active AND (@s='' OR specialty=@s) ORDER BY name
++            """,("s",specialty ?? "")));
++    }
++    [HttpGet("practitioners")]
++    public IActionResult Practitioners()
++    {
++        using var c=database.Open();
++        return Data(Rows(c,null,"SELECT id,name FROM practitioners WHERE active ORDER BY name"));
++    }
++    [HttpGet("availability")]
++    public IActionResult Availability([FromQuery]Guid serviceId,[FromQuery]DateTimeOffset? from=null,
++        [FromQuery]DateTimeOffset? to=null,[FromQuery]string? practitionerId=null)
++    {
++        var start=(from ?? DateTimeOffset.UtcNow).UtcDateTime;
++        var end=(to ?? DateTimeOffset.UtcNow.AddDays(14)).UtcDateTime;
++        if(end<=start || end-start>TimeSpan.FromDays(31)) return Fail(400,"INVALID_RANGE","Rango máximo: 31 días.");
++        using var c=database.Open();
++        return Data(Rows(c,null,"""
++            SELECT s.id,s.service_id AS "serviceId",p.id AS "practitionerId",p.name AS "practitionerName",
++                s.start_utc AS "startAt",s.end_utc AS "endAt",v.name AS "serviceName",v.specialty
++            FROM slots s JOIN services v ON v.id=s.service_id JOIN practitioners p ON p.id=s.practitioner_id
++            WHERE s.service_id=@sid AND v.active AND p.active AND NOT s.blocked
++            AND s.start_utc>now() AND s.start_utc>=@from AND s.end_utc<=@to
++            AND (@pid='' OR p.id=@pid)
++            AND NOT EXISTS(SELECT 1 FROM appointments a WHERE a.slot_id=s.id AND a.status IN ('PendingValidation','Confirmed'))
++            ORDER BY s.start_utc,p.name LIMIT 300
++            """,("sid",serviceId.ToString()),("from",start),("to",end),("pid",practitionerId ?? "")));
++    }
++    private const string AppointmentSelect="""
++        SELECT a.id,a.user_id AS "patientId",u.email AS "patientEmail",a.slot_id AS "slotId",
++            p.name AS "practitionerName",v.name AS "serviceName",v.specialty,
++            a.start_utc AS "startAt",a.end_utc AS "endAt",a.status,
++            CASE WHEN a.coverage='Approved' AND a.coverage_valid_until<now() THEN 'Expired' ELSE a.coverage END AS "coverageStatus",
++            a.insurer,a.member_last4 AS "memberLast4",a.version,a.evidence,
++            a.reviewed_by AS "reviewedBy",a.reviewed_at AS "reviewedAt",a.coverage_valid_until AS "validUntil"
++        FROM appointments a JOIN slots s ON s.id=a.slot_id JOIN services v ON v.id=s.service_id
++        JOIN practitioners p ON p.id=a.practitioner_id JOIN users u ON u.id=a.user_id
++        """;
++    [Authorize(Roles="Patient"),HttpGet("appointments/me")]
++    public IActionResult Mine()
++    {
++        using var c=database.Open();
++        return Data(Rows(c,null,AppointmentSelect+" WHERE a.user_id=@u ORDER BY a.start_utc DESC LIMIT 100",("u",UserId(User))));
++    }
++    [HttpGet("appointments/{id:guid}")]
++    public IActionResult Detail(Guid id)
++    {
++        using var c=database.Open(); using var t=Begin(c);
++        var rows=Rows(c,t,AppointmentSelect+" WHERE a.id=@id AND (@staff OR a.user_id=@u)",
++            ("id",id.ToString()),("staff",User.IsInRole("Admission")),("u",UserId(User)));
++        if(rows.Count==0) return NotFound();
++        Log(c,t,"appointment.read",id.ToString()); t.Commit(); return Data(rows[0]);
++    }
++    [Authorize(Roles="Patient"),HttpPost("appointments")]
++    public IActionResult Book(BookRequest request)
++    {
++        var key=Request.Headers["Idempotency-Key"].ToString();
++        if(!Guid.TryParse(key,out _)) return Fail(400,"IDEMPOTENCY_REQUIRED","Envíe Idempotency-Key como UUID.");
++        if(string.IsNullOrWhiteSpace(request.Insurer)) return Fail(400,"INSURER_REQUIRED","Indique aseguradora para revisión manual.");
++        var payload=Hash(JsonSerializer.Serialize(request,Json));
++        using var c=database.Open(); using var t=Begin(c);
++        // Serialize retries for this user/key before checking the stored result.
++        Execute(c,t,"SELECT pg_advisory_xact_lock(hashtextextended(@key,0))",("key",UserId(User)+":"+key));
++        var old=Rows(c,t,"SELECT request_hash,response FROM idempotency WHERE user_id=@u AND key=@k",
++            ("u",UserId(User)),("k",key));
++        if(old.Count>0) return (string)old[0]["request_hash"]! == payload
++            ? Data(JsonSerializer.Deserialize<JsonElement>((string)old[0]["response"]!))
++            : Fail(409,"IDEMPOTENCY_MISMATCH","La clave ya se usó con otra solicitud.");
++        if(Scalar(c,t,"SELECT user_id FROM profiles WHERE user_id=@u",("u",UserId(User))) is null)
++            return Fail(400,"PROFILE_REQUIRED","Complete el perfil antes de solicitar.");
++        var slots=Rows(c,t,"""
++            SELECT s.* FROM slots s JOIN services v ON v.id=s.service_id
++            JOIN practitioners p ON p.id=s.practitioner_id
++            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>now() AND p.active AND v.active FOR UPDATE OF s
++            """,("id",request.SlotId.ToString()));
++        if(slots.Count==0) return Fail(409,"SLOT_UNAVAILABLE","Horario no disponible.");
++        var slot=slots[0]; var id=Guid.NewGuid().ToString();
++        try {
++            Execute(c,t,"""
++                INSERT INTO appointments(id,user_id,slot_id,practitioner_id,start_utc,end_utc,status,coverage,insurer,member_last4)
++                VALUES(@id,@u,@s,@p,@start,@end,'PendingValidation','ManualReview',@insurer,@member)
++                """,("id",id),("u",UserId(User)),("s",request.SlotId.ToString()),("p",slot["practitioner_id"]),
++                ("start",slot["start_utc"]),("end",slot["end_utc"]),("insurer",request.Insurer.Trim()),("member",request.MemberLast4));
++        } catch(Npgsql.PostgresException e) when(e.SqlState is "23505" or "23P01") {
++            return Fail(409,"SLOT_UNAVAILABLE","Otro paciente solicitó ese horario. Seleccione otro.");
++        }
++        var result=new {id,status="PendingValidation",coverageStatus="ManualReview",version=1};
++        Execute(c,t,"INSERT INTO idempotency(user_id,key,request_hash,response) VALUES(@u,@k,@h,@r)",
++            ("u",UserId(User)),("k",key),("h",payload),("r",JsonSerializer.Serialize(result,Json)));
++        Log(c,t,"appointment.requested",id); t.Commit(); return Data(result,201);
++    }
++    [HttpGet("appointments/{id:guid}/history")]
++    public IActionResult History(Guid id)
++    {
++        using var c=database.Open(); using var t=Begin(c);
++        if(Scalar(c,t,"SELECT id FROM appointments WHERE id=@id AND (@staff OR user_id=@u)",
++            ("id",id.ToString()),("staff",User.IsInRole("Admission")),("u",UserId(User))) is null) return NotFound();
++        var rows=Rows(c,t,"""
++            SELECT sequence,old_slot_id AS "oldSlotId",new_slot_id AS "newSlotId",old_status AS "oldStatus",
++            new_status AS "newStatus",old_coverage AS "oldCoverage",new_coverage AS "newCoverage",
++            version,actor_id AS "actorId",occurred_at AS "occurredAt"
++            FROM appointment_history WHERE appointment_id=@id ORDER BY sequence
++            """,("id",id.ToString()));
++        Log(c,t,"appointment.history_read",id.ToString()); t.Commit(); return Data(rows);
++    }
++    [Authorize(Roles="Patient"),HttpPost("appointments/{id:guid}/cancel")]
++    public IActionResult Cancel(Guid id,VersionRequest request)
++    {
++        using var c=database.Open(); using var t=Begin(c);
++        var row=Rows(c,t,"SELECT * FROM appointments WHERE id=@id AND user_id=@u FOR UPDATE",
++            ("id",id.ToString()),("u",UserId(User))).FirstOrDefault();
++        if(row is null) return NotFound();
++        if((int)row["version"]! != request.Version || (string)row["status"]! is not ("PendingValidation" or "Confirmed")
++            || (DateTime)row["start_utc"]!<=DateTime.UtcNow)
++            return Fail(409,"INVALID_TRANSITION","La cita cambió o ya no permite cancelación.");
++        Execute(c,t,"UPDATE appointments SET status='Cancelled',version=version+1 WHERE id=@id",("id",id.ToString()));
++        Log(c,t,"appointment.cancelled",id.ToString()); t.Commit(); return Data(new {cancelled=true});
++    }
++    [Authorize(Roles="Patient"),HttpPost("appointments/{id:guid}/reschedule")]
++    public IActionResult Reschedule(Guid id,RescheduleRequest request)
++    {
++        using var c=database.Open(); using var t=Begin(c);
++        var a=Rows(c,t,"SELECT * FROM appointments WHERE id=@id AND user_id=@u FOR UPDATE",
++            ("id",id.ToString()),("u",UserId(User))).FirstOrDefault();
++        if(a is null) return NotFound();
++        if((int)a["version"]! != request.Version || (string)a["status"]! is not ("PendingValidation" or "Confirmed") ||
++            (DateTime)a["start_utc"]!<=DateTime.UtcNow)
++            return Fail(409,"INVALID_TRANSITION","La cita cambió o ya no permite reprogramación.");
++        var s=Rows(c,t,"""
++            SELECT s.* FROM slots s JOIN services v ON v.id=s.service_id JOIN practitioners p ON p.id=s.practitioner_id
++            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>now() AND v.active AND p.active FOR UPDATE OF s
++            """,("id",request.SlotId.ToString())).FirstOrDefault();
++        if(s is null) return Fail(409,"SLOT_UNAVAILABLE","Horario no disponible.");
++        try {
++            Execute(c,t,"""
++                UPDATE appointments SET slot_id=@slot,practitioner_id=@p,start_utc=@start,end_utc=@end,
++                status='PendingValidation',coverage='ManualReview',evidence=NULL,coverage_valid_until=NULL,
++                reviewed_by=NULL,reviewed_at=NULL,version=version+1 WHERE id=@id
++                """,("slot",request.SlotId.ToString()),("p",s["practitioner_id"]),("start",s["start_utc"]),
++                ("end",s["end_utc"]),("id",id.ToString()));
++        } catch(Npgsql.PostgresException e) when(e.SqlState is "23505" or "23P01") {
++            return Fail(409,"SLOT_UNAVAILABLE","El horario ya fue solicitado.");
++        }
++        Log(c,t,"appointment.rescheduled",id.ToString()); t.Commit(); return Data(new {rescheduled=true});
++    }
++    [Authorize(Roles="Admission"),HttpGet("admin/work-queue")]
++    public IActionResult Queue()
++    {
++        using var c=database.Open();
++        return Data(Rows(c,null,AppointmentSelect+" ORDER BY a.start_utc DESC LIMIT 200"));
++    }
++    [Authorize(Roles="Admission"),HttpPatch("admin/appointments/{id:guid}/validation")]
++    public IActionResult Review(Guid id,CoverageRequest request)
++    {
++        using var c=database.Open(); using var t=Begin(c);
++        var a=Rows(c,t,"SELECT * FROM appointments WHERE id=@id FOR UPDATE",("id",id.ToString())).FirstOrDefault();
++        if(a is null) return NotFound();
++        if((int)a["version"]! != request.Version || (string)a["status"]! is not ("PendingValidation" or "Confirmed")
++            || (DateTime)a["start_utc"]!<=DateTime.UtcNow)
++            return Fail(409,"INVALID_TRANSITION","La cita cambió o ya no permite revisión.");
++        if(string.IsNullOrWhiteSpace(request.Evidence) || (request.Status=="Approved" &&
++            (request.ValidUntil is null || request.ValidUntil.Value.UtcDateTime<(DateTime)a["end_utc"]!)))
++            return Fail(400,"EVIDENCE_REQUIRED","Registre evidencia y una vigencia que cubra la cita.");
++        var next=request.Status=="Approved" ? "Confirmed" : "PendingValidation";
++        Execute(c,t,"""
++            UPDATE appointments SET coverage=@coverage,status=@status,evidence=@e,coverage_valid_until=@until,
++            reviewed_by=@actor,reviewed_at=now(),version=version+1 WHERE id=@id
++            """,("coverage",request.Status),("status",next),("e",request.Evidence.Trim()),
++            ("until",request.ValidUntil?.UtcDateTime),("actor",UserId(User)),("id",id.ToString()));
++        Log(c,t,"coverage."+request.Status.ToLowerInvariant(),id.ToString()); t.Commit();
++        return Data(new {status=next,coverageStatus=request.Status,version=request.Version+1});
++    }
++    [Authorize(Roles="Admission"),HttpGet("admin/audit-events")]
++    public IActionResult AuditEvents([FromQuery]int after=0)
++    {
++        using var c=database.Open();
++        return Data(Rows(c,null,"""
++            SELECT sequence,id,actor_id AS "actorId",action,resource_id AS "resourceId",
++            occurred_at AS "occurredAt",trace_id AS "traceId" FROM audit
++            WHERE sequence>@after ORDER BY sequence LIMIT 100
++            """,("after",after)));
++    }
++    [Authorize(Roles="Admission"),HttpPost("admin/slots")]
++    public IActionResult AddSlot(SlotRequest request)
++    {
++        if(request.StartAt<=DateTimeOffset.UtcNow) return Fail(400,"INVALID_DATE","Seleccione una fecha futura.");
++        using var c=database.Open(); using var t=Begin(c);
++        var duration=Scalar(c,t,"SELECT duration FROM services WHERE id=@id AND active",("id",request.ServiceId.ToString()));
++        if(duration is null || Scalar(c,t,"SELECT id FROM practitioners WHERE id=@id AND active",
++            ("id",request.PractitionerId.ToString())) is null) return NotFound();
++        var id=Guid.NewGuid().ToString();
++        try {
++            Execute(c,t,"INSERT INTO slots(id,service_id,practitioner_id,start_utc,end_utc) VALUES(@id,@s,@p,@start,@end)",
++                ("id",id),("s",request.ServiceId.ToString()),("p",request.PractitionerId.ToString()),
++                ("start",request.StartAt.UtcDateTime),("end",request.StartAt.AddMinutes((int)duration).UtcDateTime));
++        } catch(Npgsql.PostgresException e) when(e.SqlState=="23P01") {
++            return Fail(409,"SCHEDULE_OVERLAP","El profesional ya tiene un horario que solapa.");
++        }
++        Log(c,t,"schedule.slot_created",id); t.Commit(); return Data(new {id},201);
++    }
++    [Authorize(Roles="Admission"),HttpPatch("admin/slots/{id:guid}/block")]
++    public IActionResult Block(Guid id,BlockRequest request)
++    {
++        using var c=database.Open(); using var t=Begin(c);
++        if(Scalar(c,t,"SELECT id FROM slots WHERE id=@id FOR UPDATE",("id",id.ToString())) is null) return NotFound();
++        if(request.Blocked && Scalar(c,t,"SELECT id FROM appointments WHERE slot_id=@id AND status IN ('PendingValidation','Confirmed')",
++            ("id",id.ToString())) is not null) return Fail(409,"SLOT_RESERVED","Gestione primero las citas existentes.");
++        Execute(c,t,"UPDATE slots SET blocked=@b WHERE id=@id",("b",request.Blocked),("id",id.ToString()));
++        Log(c,t,"schedule.block_changed",id.ToString()); t.Commit(); return Data(new {blocked=request.Blocked});
++    }
++    [Authorize(Roles="Admission"),HttpPatch("admin/users/{id:guid}/active")]
++    public IActionResult Active(Guid id,ActiveRequest request)
++    {
++        if(id.ToString()==UserId(User)) return Fail(400,"SELF_SUSPENSION","No puede suspender su propia cuenta.");
++        using var c=database.Open(); using var t=Begin(c);
++        var count=Execute(c,t,"UPDATE users SET active=@active WHERE id=@id AND role='Patient'",
++            ("active",request.Active),("id",id.ToString()));
++        if(count==0) return NotFound();
++        if(!request.Active) Execute(c,t,"UPDATE sessions SET revoked=true WHERE user_id=@id",("id",id.ToString()));
++        Log(c,t,"account.active_changed",id.ToString()); t.Commit(); return Data(new {active=request.Active});
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Milestone/Contracts.cs b/api/src/Telemedicina.Api/Milestone/Contracts.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/Contracts.cs
+@@ -0,0 +1,43 @@
++using System.ComponentModel.DataAnnotations;
++
++namespace Telemedicina.Api.Milestone;
++
++public sealed record RegisterRequest(
++    [Required, EmailAddress, MaxLength(254)] string Email,
++    [Required, MinLength(12), MaxLength(128)] string Password);
++public sealed record LoginRequest(
++    [Required, EmailAddress, MaxLength(254)] string Email,
++    [Required, MaxLength(128)] string Password,
++    [MaxLength(6)] string? Otp = null);
++public sealed record TokenRequest([Required, MaxLength(128)] string Token);
++public sealed record RefreshRequest([MaxLength(128)] string? RefreshToken = null);
++public sealed record ForgotRequest([Required, EmailAddress, MaxLength(254)] string Email);
++public sealed record ResetRequest(
++    [Required, MaxLength(128)] string Token,
++    [Required, MinLength(12), MaxLength(128)] string Password);
++public sealed record ProfileRequest(
++    [Required, MaxLength(80)] string FirstName,
++    [Required, MaxLength(80)] string LastName,
++    DateOnly BirthDate,
++    [Required, Phone, MaxLength(30)] string Phone,
++    [Required, MaxLength(250)] string Address,
++    [Required, MaxLength(100)] string EmergencyName,
++    [Required, Phone, MaxLength(30)] string EmergencyPhone,
++    [MaxLength(20)] string[] Allergies,
++    [MaxLength(20)] string[] Medications,
++    [MaxLength(20)] string[] Conditions,
++    [Range(0, int.MaxValue)] int Version);
++public sealed record BookRequest(
++    [Required] Guid SlotId,
++    [Required, MaxLength(100)] string Insurer,
++    [Required, RegularExpression(@"^[0-9]{4}$")] string MemberLast4);
++public sealed record CoverageRequest(
++    [Required, RegularExpression("^(Approved|Denied|ManualReview)$")] string Status,
++    [Required, MaxLength(250)] string Evidence,
++    DateTimeOffset? ValidUntil,
++    [Range(1, int.MaxValue)] int Version);
++public sealed record VersionRequest([Range(1, int.MaxValue)] int Version);
++public sealed record RescheduleRequest(Guid SlotId, [Range(1, int.MaxValue)] int Version);
++public sealed record SlotRequest(Guid ServiceId, Guid PractitionerId, DateTimeOffset StartAt);
++public sealed record BlockRequest(bool Blocked);
++public sealed record ActiveRequest(bool Active);
+diff --git a/api/src/Telemedicina.Api/Milestone/Database.cs b/api/src/Telemedicina.Api/Milestone/Database.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/Database.cs
+@@ -0,0 +1,79 @@
++using Npgsql;
++using System.Text;
++
++namespace Telemedicina.Api.Milestone;
++
++public sealed class Database
++{
++    private readonly string _connectionString;
++    public Database(IConfiguration configuration)
++    {
++        var configured = configuration.GetConnectionString("Telemedicina")
++            ?? throw new InvalidOperationException("Configure ConnectionStrings__Telemedicina outside source control.");
++        if (configured.StartsWith("postgres://") || configured.StartsWith("postgresql://"))
++        {
++            var uri = new Uri(configured);
++            var credentials = uri.UserInfo.Split(':', 2);
++            var builder = new NpgsqlConnectionStringBuilder {
++                Host = uri.Host, Port = uri.Port > 0 ? uri.Port : 5432,
++                Database = Uri.UnescapeDataString(uri.AbsolutePath.TrimStart('/')),
++                Username = Uri.UnescapeDataString(credentials[0]),
++                Password = credentials.Length > 1 ? Uri.UnescapeDataString(credentials[1]) : "",
++                SslMode = SslMode.Require, IncludeErrorDetail = false, Timeout = 15
++            };
++            _connectionString = builder.ConnectionString;
++        }
++        else _connectionString = new NpgsqlConnectionStringBuilder(configured) {
++            IncludeErrorDetail = false
++        }.ConnectionString;
++    }
++    public NpgsqlConnection Open()
++    {
++        var c = new NpgsqlConnection(_connectionString);
++        c.Open();
++        Execute(c, null, "SET search_path TO telemedicina_m1, public;");
++        return c;
++    }
++    public void Migrate(string path)
++    {
++        using var c = Open();
++        using var t = c.BeginTransaction();
++        Execute(c, t, "SELECT pg_advisory_xact_lock(19041301);");
++        Execute(c, t, File.ReadAllText(path, Encoding.UTF8));
++        t.Commit();
++    }
++    public static object? Scalar(NpgsqlConnection c, NpgsqlTransaction? t, string sql,
++        params (string, object?)[] parameters)
++    {
++        using var cmd = Command(c, t, sql, parameters);
++        return cmd.ExecuteScalar();
++    }
++    public static int Execute(NpgsqlConnection c, NpgsqlTransaction? t, string sql,
++        params (string, object?)[] parameters)
++    {
++        using var cmd = Command(c, t, sql, parameters);
++        return cmd.ExecuteNonQuery();
++    }
++    public static List<Dictionary<string, object?>> Rows(NpgsqlConnection c, NpgsqlTransaction? t,
++        string sql, params (string, object?)[] parameters)
++    {
++        using var cmd = Command(c, t, sql, parameters);
++        using var reader = cmd.ExecuteReader();
++        var result = new List<Dictionary<string, object?>>();
++        while (reader.Read()) {
++            var row = new Dictionary<string, object?>();
++            for (var i=0; i<reader.FieldCount; i++)
++                row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
++            result.Add(row);
++        }
++        return result;
++    }
++    private static NpgsqlCommand Command(NpgsqlConnection c, NpgsqlTransaction? t, string sql,
++        (string, object?)[] parameters)
++    {
++        var cmd = new NpgsqlCommand(sql, c, t);
++        foreach (var (name, value) in parameters)
++            cmd.Parameters.Add(new NpgsqlParameter(name, value ?? DBNull.Value));
++        return cmd;
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Milestone/Security.cs b/api/src/Telemedicina.Api/Milestone/Security.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/Security.cs
+@@ -0,0 +1,88 @@
++using System.Security.Claims;
++using System.Security.Cryptography;
++using System.Text;
++using System.Text.Encodings.Web;
++using Microsoft.AspNetCore.Authentication;
++using Microsoft.AspNetCore.Identity;
++using Microsoft.Extensions.Options;
++using static Telemedicina.Api.Milestone.Database;
++
++namespace Telemedicina.Api.Milestone;
++
++public static class Security
++{
++    public const string Scheme = "MilestoneSession";
++    public static long Now => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
++    public static string NewToken() => Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
++    public static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
++    public static string Password(string value) => new PasswordHasher<string>().HashPassword("account", value);
++    public static bool CheckPassword(string hash, string value) =>
++        new PasswordHasher<string>().VerifyHashedPassword("account", hash, value) != PasswordVerificationResult.Failed;
++    public static string UserId(ClaimsPrincipal user) => user.FindFirstValue(ClaimTypes.NameIdentifier)!;
++    public static void Audit(Npgsql.NpgsqlConnection c, Npgsql.NpgsqlTransaction t,
++        string actor, string action, string resource, string trace) =>
++        Execute(c,t,"INSERT INTO audit(id,actor_id,action,resource_id,trace_id) VALUES(@id,@a,@b,@r,@t)",
++            ("id",Guid.NewGuid().ToString()),("a",actor),("b",action),("r",resource),("t",trace));
++
++    // RFC 6238, six digits, 30-second steps. Used only for local synthetic staff accounts.
++    public static long? TotpStep(string secret, string? code)
++    {
++        if (code is null || code.Length != 6 || code.Any(c => !char.IsAsciiDigit(c))) return null;
++        const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
++        var key = new List<byte>(); var bits=0; var buffer=0;
++        foreach(var character in secret.TrimEnd('=').ToUpperInvariant()) {
++            var index=alphabet.IndexOf(character);
++            if(index<0) return null;
++            buffer=(buffer<<5)|index; bits+=5;
++            if(bits>=8) { bits-=8; key.Add((byte)(buffer>>bits)); }
++        }
++        if(key.Count<20) return null;
++        var current=Now/30;
++        for(var step=current-1;step<=current+1;step++) {
++            var counter=BitConverter.GetBytes(System.Net.IPAddress.HostToNetworkOrder(step));
++            var digest=HMACSHA1.HashData(key.ToArray(),counter);
++            var offset=digest[^1]&15;
++            var number=((digest[offset]&127)<<24)|(digest[offset+1]<<16)|(digest[offset+2]<<8)|digest[offset+3];
++            var expected=Encoding.ASCII.GetBytes((number%1000000).ToString("D6"));
++            if(CryptographicOperations.FixedTimeEquals(expected,Encoding.ASCII.GetBytes(code))) return step;
++        }
++        return null;
++    }
++}
++
++public sealed class SessionHandler(
++    IOptionsMonitor<AuthenticationSchemeOptions> options, ILoggerFactory logger,
++    UrlEncoder encoder, Database database) : AuthenticationHandler<AuthenticationSchemeOptions>(options,logger,encoder)
++{
++    protected override Task<AuthenticateResult> HandleAuthenticateAsync()
++    {
++        var header=Request.Headers.Authorization.ToString();
++        var token=header.StartsWith("Bearer ",StringComparison.OrdinalIgnoreCase) ? header[7..] :
++            Request.Cookies["tm_access"];
++        if(string.IsNullOrEmpty(token) || token.Length>128) return Task.FromResult(AuthenticateResult.NoResult());
++        using var c=database.Open();
++        var rows=Rows(c,null,"""
++            SELECT u.id,u.email,u.role,s.id AS session_id FROM sessions s JOIN users u ON u.id=s.user_id
++            WHERE s.access_hash=@hash AND NOT s.revoked AND s.access_expires>@now
++            AND s.expires>@now AND u.active AND u.verified
++            """,("hash",Security.Hash(token)),("now",Security.Now));
++        if(rows.Count==0) return Task.FromResult(AuthenticateResult.Fail("Session expired or revoked."));
++        var row=rows[0];
++        var claims=new[] { new Claim(ClaimTypes.NameIdentifier,(string)row["id"]!),
++            new Claim(ClaimTypes.Name,(string)row["email"]!), new Claim(ClaimTypes.Role,(string)row["role"]!),
++            new Claim("session_id",(string)row["session_id"]!) };
++        return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(
++            new ClaimsPrincipal(new ClaimsIdentity(claims,Security.Scheme)),Security.Scheme)));
++    }
++    protected override Task HandleChallengeAsync(AuthenticationProperties properties) =>
++        Reject(401,"SESSION_REQUIRED");
++    protected override Task HandleForbiddenAsync(AuthenticationProperties properties) =>
++        Reject(403,"ACCESS_DENIED");
++    private Task Reject(int status,string code)
++    {
++        Response.StatusCode=status;
++        Response.ContentType="application/problem+json";
++        return Response.WriteAsJsonAsync(new {status,title="Acceso no autorizado",code,traceId=Context.TraceIdentifier},
++            contentType:"application/problem+json");
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Program.cs b/api/src/Telemedicina.Api/Program.cs
+--- a/api/src/Telemedicina.Api/Program.cs
++++ b/api/src/Telemedicina.Api/Program.cs
+@@ -1,7 +1,9 @@
+ using Microsoft.AspNetCore.Diagnostics;
++using Telemedicina.Api.Milestone;
+ using Telemedicina.Common.Models.ApiResponses;
+ 
+ var builder = WebApplication.CreateBuilder(args);
++builder.AddMilestone();
+ 
+ // Add services to the container
+ builder.Services.AddControllers();
+@@ -30,6 +32,18 @@
+ 
+ var app = builder.Build();
+ 
++if (args.Contains("--migrate") || args.Contains("--seed-synthetic"))
++{
++    if (!app.Environment.IsDevelopment() || !app.Configuration.GetValue<bool>("Milestone:Enabled"))
++        throw new InvalidOperationException("Milestone commands require explicit development configuration.");
++    var database = app.Services.GetRequiredService<Database>();
++    if (args.Contains("--migrate"))
++        database.Migrate(Path.Combine(app.Environment.ContentRootPath, "Milestone", "001_initial.sql"));
++    if (args.Contains("--seed-synthetic"))
++        Bootstrap.SeedSynthetic(database, app.Configuration);
++    return;
++}
++
+ // Configure the HTTP request pipeline
+ if (app.Environment.IsDevelopment())
+ {
+@@ -57,7 +71,7 @@
+             status: StatusCodes.Status500InternalServerError,
+             title: "An unexpected error occurred while processing the request.",
+             instance: context.Request.Path,
+-            errors: app.Environment.IsDevelopment() && error != null ? [error.Message] : null
++            errors: null // Database/credentials must never appear in HTTP errors.
+         );
+ 
+         await context.Response.WriteAsJsonAsync(errorResponse);
+@@ -69,6 +83,7 @@
+ // Liveness probe for infra / orchestrator
+ app.MapHealthChecks("/health");
+ 
++app.UseMilestone();
+ app.UseAuthorization();
+ app.MapControllers();
+ 
+diff --git a/api/src/Telemedicina.Api/Telemedicina.Api.csproj b/api/src/Telemedicina.Api/Telemedicina.Api.csproj
+--- a/api/src/Telemedicina.Api/Telemedicina.Api.csproj
++++ b/api/src/Telemedicina.Api/Telemedicina.Api.csproj
+@@ -9,6 +9,7 @@
+   <ItemGroup>
+     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.3" />
+     <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" Version="9.0.6" />
++    <PackageReference Include="Npgsql" Version="9.0.3" />
+   </ItemGroup>
+ 
+   <ItemGroup>
+diff --git a/api/src/Telemedicina.Tests/milestone_e2e.py b/api/src/Telemedicina.Tests/milestone_e2e.py
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/milestone_e2e.py
+@@ -0,0 +1,160 @@
++"""Explicit synthetic HTTP integration tests; does not migrate or delete database objects.
++Run with MILESTONE_TEST_SYNTHETIC=1 against a local, development-only API.
++The test requires a separately provisioned synthetic database and admission account.
++"""
++import base64
++import concurrent.futures
++import hashlib
++import hmac
++import json
++import os
++import struct
++import time
++import unittest
++import urllib.error
++import urllib.parse
++import urllib.request
++import uuid
++from datetime import datetime, timezone, timedelta
++
++BASE = os.environ.get("MILESTONE_TEST_URL", "http://127.0.0.1:5000/api/v1")
++ALLOWED = {"localhost", "127.0.0.1", "::1"}
++
++def request(path, method="GET", body=None, token=None, extra=None):
++    headers = {"Content-Type": "application/json", "X-Telemedicina-Client": "milestone"}
++    if token:
++        headers["Authorization"] = "Bearer " + token
++    headers.update(extra or {})
++    payload = None if body is None else json.dumps(body).encode()
++    req = urllib.request.Request(BASE + path, data=payload, headers=headers, method=method)
++    try:
++        with urllib.request.urlopen(req, timeout=20) as response:
++            return response.status, json.load(response).get("data")
++    except urllib.error.HTTPError as error:
++        # Do not print bodies: credentials and patient data never belong in test output.
++        return error.code, None
++
++def otp(secret):
++    key = base64.b32decode(secret.upper() + "=" * ((8 - len(secret) % 8) % 8))
++    digest = hmac.new(key, struct.pack(">Q", int(time.time()) // 30), hashlib.sha1).digest()
++    offset = digest[-1] & 15
++    return str((struct.unpack(">I", digest[offset:offset+4])[0] & 0x7fffffff) % 1000000).zfill(6)
++
++@unittest.skipUnless(os.environ.get("MILESTONE_TEST_SYNTHETIC") == "1",
++    "Requires explicit synthetic test environment")
++class MilestoneE2E(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        if urllib.parse.urlparse(BASE).hostname not in ALLOWED:
++            raise RuntimeError("Tests refuse non-loopback API URLs.")
++        mailbox = os.environ["Milestone__MailboxKey"]
++        cls.patients = []
++        for _ in range(2):
++            email = "synthetic-" + uuid.uuid4().hex + "@example.invalid"
++            password = uuid.uuid4().hex + "!a9"
++            status, _ = request("/auth/register", "POST", {"email": email, "password": password})
++            assert status == 202
++            query = urllib.parse.urlencode({"email": email, "purpose": "verify"})
++            status, challenge = request("/auth/dev-mailbox?" + query, extra={"X-Dev-Mailbox-Key": mailbox})
++            assert status == 200
++            assert request("/auth/verify", "POST", {"token": challenge["token"]})[0] == 200
++            status, session = request("/auth/login", "POST", {"email": email, "password": password})
++            assert status == 200
++            profile = {"firstName": "Paciente", "lastName": "Sintético", "birthDate": "1990-01-01",
++                "phone": "8095550101", "address": "Dirección de prueba",
++                "emergencyName": "Contacto sintético", "emergencyPhone": "8095550102",
++                "allergies": [], "medications": [], "conditions": [], "version": 0}
++            assert request("/patients/me", "PATCH", profile, session["accessToken"])[0] == 200
++            cls.patients.append(session)
++        status, cls.staff = request("/auth/login", "POST", {
++            "email": os.environ["Milestone__AdmissionEmail"],
++            "password": os.environ["Milestone__AdmissionPassword"],
++            "otp": otp(os.environ["Milestone__AdmissionTotpSecret"])})
++        assert status == 200
++        cls.service = request("/services", token=cls.patients[0]["accessToken"])[1][0]["id"]
++        cls.practitioner = request("/practitioners", token=cls.patients[0]["accessToken"])[1][0]["id"]
++
++    def new_slot(self):
++        # Isolated future slot per test; avoids depending on seed availability.
++        offset = 30 + (uuid.uuid4().int % 100000)
++        start = datetime.now(timezone.utc).replace(second=0, microsecond=0) + timedelta(hours=offset)
++        status, result = request("/admin/slots", "POST", {
++            "serviceId": self.service, "practitionerId": self.practitioner,
++            "startAt": start.isoformat()}, self.staff["accessToken"])
++        self.assertEqual(status, 201)
++        return result["id"], start
++
++    def book(self, slot, patient=0, key=None):
++        return request("/appointments", "POST",
++            {"slotId": slot, "insurer": "Aseguradora sintética", "memberLast4": "0000"},
++            self.patients[patient]["accessToken"], {"Idempotency-Key": key or str(uuid.uuid4())})
++
++    def test_01_auth_and_horizontal_access(self):
++        self.assertEqual(request("/patients/me")[0], 401)
++        self.assertEqual(request("/admin/work-queue", token=self.patients[0]["accessToken"])[0], 403)
++        slot, _ = self.new_slot()
++        status, appointment = self.book(slot)
++        self.assertEqual(status, 201)
++        self.assertEqual(request("/appointments/" + appointment["id"], token=self.patients[1]["accessToken"])[0], 404)
++        self.assertEqual(request("/appointments/" + str(uuid.uuid4()), token=self.staff["accessToken"])[0], 404)
++
++    def test_02_idempotency_conflicts_and_database_read(self):
++        slot, _ = self.new_slot()
++        key = str(uuid.uuid4())
++        first = self.book(slot, key=key)
++        second = self.book(slot, key=key)
++        self.assertEqual((first[0], second[0]), (201, 200))
++        self.assertEqual(first[1]["id"], second[1]["id"])
++        other, _ = self.new_slot()
++        self.assertEqual(self.book(other, key=key)[0], 409)
++        # A separately opened DB connection serves this GET; full process restart is a manual check.
++        self.assertEqual(request("/appointments/" + first[1]["id"], token=self.patients[0]["accessToken"])[0], 200)
++
++    def test_03_concurrent_booking(self):
++        slot, _ = self.new_slot()
++        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
++            results = list(executor.map(lambda patient: self.book(slot, patient), [0, 1]))
++        self.assertEqual(sorted(result[0] for result in results), [201, 409])
++
++    def test_04_coverage_version_history_reschedule_and_cancel(self):
++        slot, start = self.new_slot()
++        status, appointment = self.book(slot)
++        self.assertEqual(status, 201)
++        body = {"status": "Approved", "evidence": "Referencia sintética",
++                "validUntil": (start + timedelta(hours=2)).isoformat(), "version": 1}
++        endpoint = "/admin/appointments/" + appointment["id"] + "/validation"
++        self.assertEqual(request(endpoint, "PATCH", body, self.staff["accessToken"])[0], 200)
++        self.assertEqual(request(endpoint, "PATCH", body, self.staff["accessToken"])[0], 409)
++        detail = request("/appointments/" + appointment["id"], token=self.patients[0]["accessToken"])[1]
++        self.assertEqual((detail["status"], detail["coverageStatus"]), ("Confirmed", "Approved"))
++        new, _ = self.new_slot()
++        self.assertEqual(request("/appointments/" + appointment["id"] + "/reschedule", "POST",
++            {"slotId": new, "version": 2}, self.patients[0]["accessToken"])[0], 200)
++        detail = request("/appointments/" + appointment["id"], token=self.patients[0]["accessToken"])[1]
++        self.assertEqual((detail["status"], detail["coverageStatus"]), ("PendingValidation", "ManualReview"))
++        self.assertEqual(request("/appointments/" + appointment["id"] + "/cancel", "POST",
++            {"version": 3}, self.patients[0]["accessToken"])[0], 200)
++        self.assertEqual(self.book(new, patient=1)[0], 201)
++        history = request("/appointments/" + appointment["id"] + "/history",
++            token=self.patients[0]["accessToken"])[1]
++        self.assertEqual([h["newStatus"] for h in history],
++            ["PendingValidation", "Confirmed", "PendingValidation", "Cancelled"])
++
++    def test_05_blocked_slot_and_profile_concurrency(self):
++        slot, _ = self.new_slot()
++        self.assertEqual(request("/admin/slots/" + slot + "/block", "PATCH",
++            {"blocked": True}, self.staff["accessToken"])[0], 200)
++        self.assertEqual(self.book(slot)[0], 409)
++        profile = request("/patients/me", token=self.patients[0]["accessToken"])[1]
++        body = profile["profile"]; body["version"] = profile["version"]
++        self.assertEqual(request("/patients/me", "PATCH", body, self.patients[0]["accessToken"])[0], 200)
++        self.assertEqual(request("/patients/me", "PATCH", body, self.patients[0]["accessToken"])[0], 409)
++
++    def test_99_logout_revokes_access_and_refresh(self):
++        for patient in self.patients:
++            self.assertEqual(request("/auth/logout", "POST", {}, patient["accessToken"])[0], 200)
++            self.assertEqual(request("/auth/me", token=patient["accessToken"])[0], 401)
++            self.assertEqual(request("/auth/refresh", "POST", {"refreshToken": patient["refreshToken"]})[0], 401)
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/app/src/android/app/src/main/AndroidManifest.xml b/app/src/android/app/src/main/AndroidManifest.xml
+--- a/app/src/android/app/src/main/AndroidManifest.xml
++++ b/app/src/android/app/src/main/AndroidManifest.xml
+@@ -1,4 +1,5 @@
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android">
++    <uses-permission android:name="android.permission.INTERNET"/>
+     <application
+         android:label="telemedicina_app"
+         android:name="${applicationName}"
+diff --git a/app/src/lib/app/routes.dart b/app/src/lib/app/routes.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/lib/app/routes.dart
+@@ -0,0 +1,6 @@
++// Legacy prototypes are not reachable from the first milestone app.
++class AppRoutes {
++  static const home='/',login='/login',register='/register',profile='/profile',
++    appointments='/appointments',bookAppointment='/book',documents='/documents',
++    checkIn='/check-in',videoVisit='/video';
++}
+diff --git a/app/src/lib/core/network/milestone_repository.dart b/app/src/lib/core/network/milestone_repository.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/lib/core/network/milestone_repository.dart
+@@ -0,0 +1,85 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:math';
++import 'package:http/http.dart' as http;
++
++typedef JsonMap = Map<String, dynamic>;
++
++class ApiFailure implements Exception {
++  final int status;
++  final String message;
++  ApiFailure(this.status, this.message);
++  @override
++  String toString() => message;
++}
++
++/// Tokens remain in process memory: no disk preferences, logs or URLs.
++class MilestoneRepository {
++  final http.Client _client;
++  final String baseUrl;
++  String? _access;
++  String? _refresh;
++  Future<void>? _refreshing;
++  MilestoneRepository({http.Client? client, this.baseUrl = const String.fromEnvironment(
++    'API_BASE_URL', defaultValue: 'http://127.0.0.1:5000/api/v1')}) : _client = client ?? http.Client();
++
++  bool get authenticated => _access != null;
++  void clearSession() { _access = null; _refresh = null; }
++  void close() { clearSession(); _client.close(); }
++  static String uuid() {
++    final random = Random.secure();
++    final bytes = List<int>.generate(16, (_) => random.nextInt(256));
++    bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
++    final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
++    return '${hex.substring(0,8)}-${hex.substring(8,12)}-${hex.substring(12,16)}-${hex.substring(16,20)}-${hex.substring(20)}';
++  }
++
++  Future<dynamic> request(String method, String path, {JsonMap? body,
++    Map<String,String> extraHeaders = const {}, bool retry = true}) async {
++    try {
++      final request = http.Request(method, Uri.parse('$baseUrl$path'));
++      request.headers.addAll({'Content-Type':'application/json',
++        'X-Telemedicina-Client':'milestone', if (_access != null) 'Authorization':'Bearer $_access',
++        ...extraHeaders});
++      if (body != null) request.body = jsonEncode(body);
++      final response = await http.Response.fromStream(
++        await _client.send(request).timeout(const Duration(seconds: 15)))
++        .timeout(const Duration(seconds: 15));
++      if (response.statusCode == 401 && retry && _refresh != null && !path.startsWith('/auth/')) {
++        _refreshing ??= _rotate().whenComplete(() => _refreshing = null);
++        await _refreshing;
++        return this.request(method, path, body: body, extraHeaders: extraHeaders, retry: false);
++      }
++      final parsed = response.body.isEmpty ? <String,dynamic>{} : jsonDecode(response.body);
++      if (response.statusCode < 200 || response.statusCode >= 300) {
++        if (response.statusCode == 401) clearSession();
++        throw ApiFailure(response.statusCode, parsed is Map
++          ? (parsed['title'] ?? parsed['detail'] ?? 'Solicitud rechazada').toString()
++          : 'Solicitud rechazada (${response.statusCode})');
++      }
++      return parsed is Map ? parsed['data'] : null;
++    } on ApiFailure { rethrow; }
++    on TimeoutException { throw ApiFailure(503, 'La solicitud tardó demasiado. Puede reintentar.'); }
++    on FormatException { throw ApiFailure(502, 'Respuesta del servidor no válida.'); }
++    on http.ClientException { throw ApiFailure(503, 'No se pudo conectar con la API.'); }
++  }
++  Future<void> login(String email, String password) async {
++    final data = await request('POST','/auth/login',body:{'email':email,'password':password});
++    if (data['role'] != 'Patient') {
++      _access = data['accessToken']; _refresh = data['refreshToken'];
++      await logout();
++      throw ApiFailure(403, 'Utilice una cuenta de paciente en esta app.');
++    }
++    _access = data['accessToken']; _refresh = data['refreshToken'];
++  }
++  Future<void> _rotate() async {
++    try {
++      final data = await request('POST','/auth/refresh',body:{'refreshToken':_refresh},retry:false);
++      _access=data['accessToken']; _refresh=data['refreshToken'];
++    } catch (_) { clearSession(); rethrow; }
++  }
++  Future<void> logout() async {
++    try { await request('POST','/auth/logout',body:{}); }
++    finally { clearSession(); }
++  }
++}
+diff --git a/app/src/lib/features/auth/presentation/login_screen.dart b/app/src/lib/features/auth/presentation/login_screen.dart
+--- a/app/src/lib/features/auth/presentation/login_screen.dart
++++ b/app/src/lib/features/auth/presentation/login_screen.dart
+@@ -72,7 +72,7 @@
+                     decoration: BoxDecoration(
+                       color: Colors.red.shade50,
+                       borderRadius: BorderRadius.circular(8),
+-                      border: Border.parse('1px solid red'),
++                      border: Border.all(color: Colors.red),
+                     ),
+                     child: Text(
+                       _errorMessage!,
+diff --git a/app/src/lib/features/auth/presentation/welcome_screen.dart b/app/src/lib/features/auth/presentation/welcome_screen.dart
+--- a/app/src/lib/features/auth/presentation/welcome_screen.dart
++++ b/app/src/lib/features/auth/presentation/welcome_screen.dart
+@@ -24,7 +24,7 @@
+                     width: 90,
+                     height: 90,
+                     decoration: BoxDecoration(
+-                      color: theme.primaryColor.withOpacity(0.12),
++                      color: theme.primaryColor.withValues(alpha: 0.12),
+                       shape: BoxShape.circle,
+                     ),
+                     child: Icon(
+diff --git a/app/src/lib/features/home/presentation/home_screen.dart b/app/src/lib/features/home/presentation/home_screen.dart
+--- a/app/src/lib/features/home/presentation/home_screen.dart
++++ b/app/src/lib/features/home/presentation/home_screen.dart
+@@ -68,7 +68,7 @@
+                 ),
+                 CircleAvatar(
+                   radius: 22,
+-                  backgroundColor: theme.primaryColor.withOpacity(0.15),
++                  backgroundColor: theme.primaryColor.withValues(alpha: 0.15),
+                   child: Text(
+                     'JP',
+                     style: TextStyle(color: theme.primaryColor, fontWeight: FontWeight.bold),
+@@ -90,7 +90,7 @@
+                 borderRadius: BorderRadius.circular(16),
+                 boxShadow: [
+                   BoxShadow(
+-                    color: theme.primaryColor.withOpacity(0.3),
++                    color: theme.primaryColor.withValues(alpha: 0.3),
+                     blurRadius: 10,
+                     offset: const Offset(0, 4),
+                   ),
+@@ -105,7 +105,7 @@
+                       Container(
+                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                         decoration: BoxDecoration(
+-                          color: Colors.white.withOpacity(0.2),
++                          color: Colors.white.withValues(alpha: 0.2),
+                           borderRadius: BorderRadius.circular(20),
+                         ),
+                         child: const Row(
+@@ -132,7 +132,7 @@
+                   ),
+                   Text(
+                     _nextAppointment.specialty,
+-                    style: TextStyle(color: Colors.white.withOpacity(0.85), fontSize: 13),
++                    style: TextStyle(color: Colors.white.withValues(alpha: 0.85), fontSize: 13),
+                   ),
+                   const SizedBox(height: 16),
+                   Row(
+@@ -144,7 +144,7 @@
+                           const SizedBox(width: 6),
+                           Text(
+                             'En 1 hora (30 min)',
+-                            style: TextStyle(color: Colors.white.withOpacity(0.9), fontSize: 12),
++                            style: TextStyle(color: Colors.white.withValues(alpha: 0.9), fontSize: 12),
+                           ),
+                         ],
+                       ),
+@@ -258,7 +258,7 @@
+           border: Border.all(color: Colors.grey.shade200),
+           boxShadow: [
+             BoxShadow(
+-              color: Colors.black.withOpacity(0.02),
++              color: Colors.black.withValues(alpha: 0.02),
+               blurRadius: 4,
+               offset: const Offset(0, 2),
+             ),
+@@ -271,7 +271,7 @@
+             Container(
+               padding: const EdgeInsets.all(8),
+               decoration: BoxDecoration(
+-                color: color.withOpacity(0.12),
++                color: color.withValues(alpha: 0.12),
+                 borderRadius: BorderRadius.circular(8),
+               ),
+               child: Icon(icon, color: color, size: 22),
+diff --git a/app/src/lib/features/milestone/milestone_screen.dart b/app/src/lib/features/milestone/milestone_screen.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/lib/features/milestone/milestone_screen.dart
+@@ -0,0 +1,223 @@
++import 'dart:convert';
++import 'package:flutter/material.dart';
++import '../../core/network/milestone_repository.dart';
++
++String localTime(String value) {
++  final d=DateTime.parse(value).toUtc().subtract(const Duration(hours:4));
++  String p(int n)=>n.toString().padLeft(2,'0');
++  return '${p(d.day)}/${p(d.month)}/${d.year} ${p(d.hour)}:${p(d.minute)} (Santo Domingo)';
++}
++
++class MilestoneScreen extends StatefulWidget {
++  final MilestoneRepository? repository;
++  const MilestoneScreen({super.key,this.repository});
++  @override
++  State<MilestoneScreen> createState()=>_MilestoneScreenState();
++}
++class _MilestoneScreenState extends State<MilestoneScreen> {
++  late final MilestoneRepository api=widget.repository ?? MilestoneRepository();
++  final email=TextEditingController(), password=TextEditingController(), token=TextEditingController();
++  final insurer=TextEditingController(), member=TextEditingController();
++  final profileFields=<String,TextEditingController>{
++    for(final key in ['firstName','lastName','birthDate','phone','address','emergencyName','emergencyPhone',
++      'allergies','medications','conditions']) key:TextEditingController()
++  };
++  bool busy=false, signedIn=false;
++  String mode='login', message='';
++  int tab=0, version=0;
++  List<dynamic> services=[],slots=[],appointments=[];
++  String? serviceId;
++  final keys=<String,String>{};
++
++  @override
++  void dispose() {
++    for(final c in [email,password,token,insurer,member,...profileFields.values]) { c.dispose(); }
++    api.close(); super.dispose();
++  }
++  Future<void> run(Future<void> Function() action) async {
++    if(busy) return;
++    setState(()=>{busy=true,message=''});
++    try { await action(); }
++    catch(e) { if(mounted) setState(()=>message=e.toString()); }
++    finally {
++      if(mounted) setState(() {
++        busy=false; signedIn=api.authenticated;
++        if(!signedIn) {
++          appointments=[]; slots=[]; version=0;
++          for(final c in profileFields.values) { c.clear(); }
++        }
++      });
++    }
++  }
++  Future<void> load() async {
++    final results=await Future.wait([
++      api.request('GET','/patients/me'),api.request('GET','/services'),api.request('GET','/appointments/me')
++    ]);
++    if(!mounted) return;
++    setState(() {
++      final data=results[0] as Map?;
++      version=data?['version'] as int? ?? 0;
++      final profile=data?['profile'] as Map? ?? {};
++      for(final entry in profileFields.entries) {
++        final value=profile[entry.key];
++        entry.value.text=value is List ? value.join(', ') : (value ?? '').toString();
++      }
++      services=results[1] as List; appointments=results[2] as List;
++      serviceId=services.any((s)=>s['id']==serviceId) ? serviceId : services.firstOrNull?['id'] as String?;
++    });
++  }
++  Future<void> authenticate() async {
++    if(mode=='login') { await api.login(email.text.trim(),password.text); await load(); }
++    else if(mode=='register') {
++      await api.request('POST','/auth/register',body:{'email':email.text.trim(),'password':password.text});
++      setState(()=>{mode='verify',message='Revise la verificación en el buzón de desarrollo. No use datos reales.'});
++    } else if(mode=='verify') {
++      await api.request('POST','/auth/verify',body:{'token':token.text.trim()});
++      token.clear(); setState(()=>{mode='login',message='Cuenta verificada. Inicie sesión.'});
++    } else if(mode=='forgot') {
++      await api.request('POST','/auth/password/forgot',body:{'email':email.text.trim()});
++      setState(()=>{mode='reset',message='Si corresponde, revise el buzón de desarrollo.'});
++    } else {
++      await api.request('POST','/auth/password/reset',body:{'token':token.text.trim(),'password':password.text});
++      token.clear(); password.clear(); setState(()=>{mode='login',message='Contraseña actualizada.'});
++    }
++  }
++  Widget field(TextEditingController c,String label,{bool secret=false}) => Padding(
++    padding:const EdgeInsets.symmetric(vertical:6),
++    child:TextField(controller:c,obscureText:secret,enabled:!busy,
++      decoration:InputDecoration(labelText:label,border:const OutlineInputBorder())));
++  Widget action(String label,Future<void> Function() fn) =>
++    FilledButton(onPressed:busy ? null : ()=>run(fn),child:Text(label));
++
++  @override
++  Widget build(BuildContext context) => Scaffold(
++    appBar:AppBar(title:const Text('Telemedicina · Datos sintéticos'),actions:[
++      if(signedIn) IconButton(tooltip:'Actualizar',onPressed:busy?null:()=>run(load),icon:const Icon(Icons.refresh)),
++      if(signedIn) TextButton(onPressed:busy?null:()=>run(() async {
++        try { await api.logout(); } finally {
++          if(mounted) setState(() { signedIn=false; appointments=[]; services=[]; slots=[]; version=0;
++            password.clear(); for(final c in profileFields.values) { c.clear(); } });
++        }
++      }),child:const Text('Salir'))
++    ]),
++    body:Column(children:[
++      if(busy) const LinearProgressIndicator(),
++      if(message.isNotEmpty) Padding(padding:const EdgeInsets.all(12),
++        child:Semantics(liveRegion:true,child:Text(message))),
++      Expanded(child:SingleChildScrollView(padding:const EdgeInsets.all(20),
++        child:Center(child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:700),
++          child:!signedIn ? authForm() : tab==0 ? profileForm() : tab==1 ? catalog() : appointmentList()))))
++    ]),
++    bottomNavigationBar:!signedIn ? null : NavigationBar(selectedIndex:tab,
++      onDestinationSelected:busy?null:(value)=>setState(()=>tab=value),
++      destinations:const [
++        NavigationDestination(icon:Icon(Icons.person),label:'Mi perfil'),
++        NavigationDestination(icon:Icon(Icons.calendar_month),label:'Solicitar cita'),
++        NavigationDestination(icon:Icon(Icons.event_note),label:'Mis citas')
++      ]),
++  );
++  Widget authForm()=>Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
++    const Text('Primer hito · Entorno de demostración',style:TextStyle(fontSize:22,fontWeight:FontWeight.bold)),
++    const Text('Las citas y coberturas requieren revisión manual. Este entorno no presta atención clínica.'),
++    if(['login','register','forgot'].contains(mode)) field(email,'Correo electrónico'),
++    if(['login','register','reset'].contains(mode)) field(password,'Contraseña (mínimo 12 caracteres)',secret:true),
++    if(['verify','reset'].contains(mode)) field(token,'Código del mensaje de desarrollo'),
++    action({'login':'Entrar','register':'Crear cuenta','verify':'Verificar cuenta',
++      'forgot':'Solicitar recuperación','reset':'Cambiar contraseña'}[mode]!,authenticate),
++    Wrap(spacing:8,children: [
++      for(final entry in {'login':'Iniciar sesión','register':'Registrarme','verify':'Verificar',
++        'forgot':'Recuperar acceso'}.entries)
++        TextButton(onPressed:busy?null:()=>setState(()=>{mode=entry.key,message=''}),child:Text(entry.value))
++    ])
++  ]);
++  Widget profileForm()=>Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
++    const Text('Mi perfil',style:TextStyle(fontSize:22,fontWeight:FontWeight.bold)),
++    const Text('Alergias, medicamentos y antecedentes son datos autodeclarados, no diagnósticos confirmados.'),
++    for(final entry in {
++      'firstName':'Nombres','lastName':'Apellidos','birthDate':'Nacimiento (AAAA-MM-DD)',
++      'phone':'Teléfono','address':'Dirección','emergencyName':'Contacto de emergencia',
++      'emergencyPhone':'Teléfono de emergencia','allergies':'Alergias (separadas por comas)',
++      'medications':'Medicamentos habituales (separados por comas)','conditions':'Antecedentes (separados por comas)'
++    }.entries) field(profileFields[entry.key]!,entry.value),
++    action('Guardar perfil',() async {
++      final body=<String,dynamic>{'version':version};
++      for(final entry in profileFields.entries) {
++        body[entry.key]=['allergies','medications','conditions'].contains(entry.key)
++          ? entry.value.text.split(',').map((x)=>x.trim()).where((x)=>x.isNotEmpty).toList()
++          : entry.value.text.trim();
++      }
++      await api.request('PATCH','/patients/me',body:body); await load();
++      if(mounted) setState(()=>message='Perfil guardado.');
++    })
++  ]);
++  Future<void> availability() async {
++    if(serviceId==null) return;
++    final result=await api.request('GET','/availability?serviceId=$serviceId');
++    if(mounted) setState(()=>slots=result as List);
++  }
++  Widget catalog()=>Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
++    const Text('Solicitar cita',style:TextStyle(fontSize:22,fontWeight:FontWeight.bold)),
++    if(version==0) const Text('Complete primero su perfil.'),
++    if(services.isEmpty) const Text('No hay servicios disponibles. Puede actualizar más tarde.'),
++    if(services.isNotEmpty) DropdownButton<String>(value:serviceId,isExpanded:true,
++      items:services.map((s)=>DropdownMenuItem(value:s['id'] as String,child:Text(
++        '${s['name']} · ${s['durationMinutes']} min',overflow:TextOverflow.ellipsis))).toList(),
++      onChanged:busy?null:(value)=>setState(()=>{serviceId=value,slots=[]})),
++    action('Consultar horarios',availability),
++    field(insurer,'Aseguradora para revisión manual'),
++    field(member,'Últimos 4 dígitos de afiliación'),
++    const Text('La disponibilidad no garantiza reserva. No se confirma cobertura ni copago sin revisión.'),
++    for(final slot in slots) Card(child:ListTile(
++      title:Text(localTime(slot['startAt'] as String)),
++      subtitle:Text(slot['practitionerName'] as String),
++      trailing:FilledButton(onPressed:busy||version==0?null:()=>run(() async {
++        final payload=<String,dynamic>{'slotId':slot['id'],'insurer':insurer.text.trim(),'memberLast4':member.text.trim()};
++        final fingerprint=jsonEncode(payload);
++        final key=keys.putIfAbsent(fingerprint,MilestoneRepository.uuid);
++        await api.request('POST','/appointments',body:payload,extraHeaders:{'Idempotency-Key':key});
++        await load(); await availability();
++        if(mounted) setState(()=>{tab=2,message='Solicitud guardada. Pendiente de validación; cobertura en revisión manual.'});
++      }),child:const Text('Solicitar'))))
++  ]);
++  Widget appointmentList()=>Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
++    const Text('Mis citas',style:TextStyle(fontSize:22,fontWeight:FontWeight.bold)),
++    const Text('Estados: PendingValidation = pendiente; Confirmed = confirmada; Cancelled = cancelada.'),
++    if(appointments.isEmpty) const Text('Aún no tiene citas.'),
++    for(final a in appointments) Card(child:Padding(padding:const EdgeInsets.all(12),
++      child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
++        Text('${a['serviceName']} · ${a['practitionerName']}'),
++        Text(localTime(a['startAt'] as String)),
++        Text('Cita: ${a['status']} · Cobertura: ${a['coverageStatus']}'),
++        if(['PendingValidation','Confirmed'].contains(a['status']) &&
++          DateTime.parse(a['startAt'] as String).isAfter(DateTime.now()))
++          Wrap(spacing:8,children:[
++            TextButton(onPressed:busy?null:()=>run(() async {
++              final confirmed=await showDialog<bool>(context:context,builder:(ctx)=>AlertDialog(
++                title:const Text('¿Cancelar esta cita?'),actions:[
++                  TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('Volver')),
++                  FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('Cancelar cita'))]));
++              if(confirmed!=true) return;
++              await api.request('POST','/appointments/${a['id']}/cancel',body:{'version':a['version']});
++              await load();
++            }),child:const Text('Cancelar')),
++            TextButton(onPressed:busy?null:()=>run(()=>reschedule(a)),child:const Text('Reprogramar'))
++          ])
++      ])))
++  ]);
++  Future<void> reschedule(dynamic appointment) async {
++    final current=await api.request('GET','/appointments/${appointment['id']}');
++    final servicesForSpecialty=services.where((s)=>s['name']==current['serviceName']);
++    if(servicesForSpecialty.isEmpty) throw ApiFailure(409,'Servicio no disponible para reprogramar.');
++    final candidates=await api.request('GET','/availability?serviceId=${servicesForSpecialty.first['id']}') as List;
++    if(!mounted) return;
++    final chosen=await showDialog<String>(context:context,builder:(ctx)=>SimpleDialog(
++      title:const Text('Nuevo horario · volverá a revisión'),
++      children: candidates.isEmpty ? [const Padding(padding:EdgeInsets.all(16),child:Text('Sin horarios disponibles.'))] :
++        candidates.map<Widget>((s)=>SimpleDialogOption(
++          onPressed:()=>Navigator.pop(ctx,s['id'] as String),
++          child:Text('${localTime(s['startAt'] as String)} · ${s['practitionerName']}'))).toList()));
++    if(chosen==null) return;
++    await api.request('POST','/appointments/${appointment['id']}/reschedule',
++      body:{'slotId':chosen,'version':current['version']}); await load();
++  }
++}
+diff --git a/app/src/lib/features/video_visit/presentation/video_visit_screen.dart b/app/src/lib/features/video_visit/presentation/video_visit_screen.dart
+--- a/app/src/lib/features/video_visit/presentation/video_visit_screen.dart
++++ b/app/src/lib/features/video_visit/presentation/video_visit_screen.dart
+@@ -68,7 +68,7 @@
+                         Container(
+                           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                           decoration: BoxDecoration(
+-                            color: Colors.teal.shade900.withOpacity(0.8),
++                            color: Colors.teal.shade900.withValues(alpha: 0.8),
+                             borderRadius: BorderRadius.circular(20),
+                             border: Border.all(color: Colors.teal.shade400, width: 0.5),
+                           ),
+diff --git a/app/src/lib/main.dart b/app/src/lib/main.dart
+--- a/app/src/lib/main.dart
++++ b/app/src/lib/main.dart
+@@ -1,122 +1,14 @@
+ import 'package:flutter/material.dart';
++import 'features/milestone/milestone_screen.dart';
+ 
+-void main() {
+-  runApp(const MyApp());
+-}
++void main() => runApp(const MyApp());
+ 
+ class MyApp extends StatelessWidget {
+   const MyApp({super.key});
+-
+-  // This widget is the root of your application.
+   @override
+-  Widget build(BuildContext context) {
+-    return MaterialApp(
+-      title: 'Flutter Demo',
+-      theme: ThemeData(
+-        // This is the theme of your application.
+-        //
+-        // TRY THIS: Try running your application with "flutter run". You'll see
+-        // the application has a purple toolbar. Then, without quitting the app,
+-        // try changing the seedColor in the colorScheme below to Colors.green
+-        // and then invoke "hot reload" (save your changes or press the "hot
+-        // reload" button in a Flutter-supported IDE, or press "r" if you used
+-        // the command line to start the app).
+-        //
+-        // Notice that the counter didn't reset back to zero; the application
+-        // state is not lost during the reload. To reset the state, use hot
+-        // restart instead.
+-        //
+-        // This works for code too, not just values: Most code changes can be
+-        // tested with just a hot reload.
+-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+-      ),
+-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+-    );
+-  }
++  Widget build(BuildContext context) => MaterialApp(
++    title: 'Telemedicina · Primer hito',
++    theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal), useMaterial3: true),
++    home: const MilestoneScreen(),
++  );
+ }
+-
+-class MyHomePage extends StatefulWidget {
+-  const MyHomePage({super.key, required this.title});
+-
+-  // This widget is the home page of your application. It is stateful, meaning
+-  // that it has a State object (defined below) that contains fields that affect
+-  // how it looks.
+-
+-  // This class is the configuration for the state. It holds the values (in this
+-  // case the title) provided by the parent (in this case the App widget) and
+-  // used by the build method of the State. Fields in a Widget subclass are
+-  // always marked "final".
+-
+-  final String title;
+-
+-  @override
+-  State<MyHomePage> createState() => _MyHomePageState();
+-}
+-
+-class _MyHomePageState extends State<MyHomePage> {
+-  int _counter = 0;
+-
+-  void _incrementCounter() {
+-    setState(() {
+-      // This call to setState tells the Flutter framework that something has
+-      // changed in this State, which causes it to rerun the build method below
+-      // so that the display can reflect the updated values. If we changed
+-      // _counter without calling setState(), then the build method would not be
+-      // called again, and so nothing would appear to happen.
+-      _counter++;
+-    });
+-  }
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    // This method is rerun every time setState is called, for instance as done
+-    // by the _incrementCounter method above.
+-    //
+-    // The Flutter framework has been optimized to make rerunning build methods
+-    // fast, so that you can just rebuild anything that needs updating rather
+-    // than having to individually change instances of widgets.
+-    return Scaffold(
+-      appBar: AppBar(
+-        // TRY THIS: Try changing the color here to a specific color (to
+-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
+-        // change color while the other colors stay the same.
+-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+-        // Here we take the value from the MyHomePage object that was created by
+-        // the App.build method, and use it to set our appbar title.
+-        title: Text(widget.title),
+-      ),
+-      body: Center(
+-        // Center is a layout widget. It takes a single child and positions it
+-        // in the middle of the parent.
+-        child: Column(
+-          // Column is also a layout widget. It takes a list of children and
+-          // arranges them vertically. By default, it sizes itself to fit its
+-          // children horizontally, and tries to be as tall as its parent.
+-          //
+-          // Column has various properties to control how it sizes itself and
+-          // how it positions its children. Here we use mainAxisAlignment to
+-          // center the children vertically; the main axis here is the vertical
+-          // axis because Columns are vertical (the cross axis would be
+-          // horizontal).
+-          //
+-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
+-          // action in the IDE, or press "p" in the console), to see the
+-          // wireframe for each widget.
+-          mainAxisAlignment: .center,
+-          children: [
+-            const Text('You have pushed the button this many times:'),
+-            Text(
+-              '$_counter',
+-              style: Theme.of(context).textTheme.headlineMedium,
+-            ),
+-          ],
+-        ),
+-      ),
+-      floatingActionButton: FloatingActionButton(
+-        onPressed: _incrementCounter,
+-        tooltip: 'Increment',
+-        child: const Icon(Icons.add),
+-      ),
+-    );
+-  }
+-}
+diff --git a/app/src/macos/Runner/DebugProfile.entitlements b/app/src/macos/Runner/DebugProfile.entitlements
+--- a/app/src/macos/Runner/DebugProfile.entitlements
++++ b/app/src/macos/Runner/DebugProfile.entitlements
+@@ -2,6 +2,8 @@
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
++	<key>com.apple.security.network.client</key>
++	<true/>
+ 	<key>com.apple.security.app-sandbox</key>
+ 	<true/>
+ 	<key>com.apple.security.cs.allow-jit</key>
+diff --git a/app/src/macos/Runner/Release.entitlements b/app/src/macos/Runner/Release.entitlements
+--- a/app/src/macos/Runner/Release.entitlements
++++ b/app/src/macos/Runner/Release.entitlements
+@@ -2,6 +2,8 @@
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
++	<key>com.apple.security.network.client</key>
++	<true/>
+ 	<key>com.apple.security.app-sandbox</key>
+ 	<true/>
+ </dict>
+diff --git a/app/src/pubspec.yaml b/app/src/pubspec.yaml
+--- a/app/src/pubspec.yaml
++++ b/app/src/pubspec.yaml
+@@ -34,6 +34,7 @@
+   # The following adds the Cupertino Icons font to your application.
+   # Use with the CupertinoIcons class for iOS style icons.
+   cupertino_icons: ^1.0.8
++  http: ^1.6.0
+ 
+ dev_dependencies:
+   flutter_test:
+diff --git a/app/src/test/milestone_repository_test.dart b/app/src/test/milestone_repository_test.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/test/milestone_repository_test.dart
+@@ -0,0 +1,44 @@
++import 'dart:convert';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:http/testing.dart';
++import 'package:telemedicina_app/core/network/milestone_repository.dart';
++
++void main() {
++  test('Conserva 409 para que la interfaz permita resolver un conflicto',() async {
++    final api=MilestoneRepository(client:MockClient((r) async =>
++      http.Response(jsonEncode({'title':'Horario ocupado'}),409)));
++    await expectLater(api.request('POST','/appointments',body:{}),
++      throwsA(isA<ApiFailure>().having((e)=>e.status,'status',409)));
++    api.close();
++  });
++  test('Renueva sesión y conserva Idempotency-Key al reintentar',() async {
++    var bookingCalls=0;
++    final key=MilestoneRepository.uuid();
++    final api=MilestoneRepository(client:MockClient((r) async {
++      if(r.url.path.endsWith('/auth/login')) return http.Response(jsonEncode({'data':{
++        'role':'Patient','accessToken':'old','refreshToken':'refresh'}}),200);
++      if(r.url.path.endsWith('/auth/refresh')) return http.Response(jsonEncode({'data':{
++        'accessToken':'new','refreshToken':'rotated'}}),200);
++      expect(r.headers['Idempotency-Key'],key);
++      bookingCalls++;
++      return bookingCalls==1 ? http.Response('{}',401) :
++        http.Response(jsonEncode({'data':{'id':'one'}}),201);
++    }));
++    await api.login('synthetic@example.invalid','synthetic-password');
++    final result=await api.request('POST','/appointments',body:{'slotId':'slot'},
++      extraHeaders:{'Idempotency-Key':key});
++    expect(result['id'],'one'); expect(bookingCalls,2);
++    api.close();
++  });
++  test('Cerrar sesión borra tokens incluso si falla la red',() async {
++    final api=MilestoneRepository(client:MockClient((r) async {
++      if(r.url.path.endsWith('/auth/login')) return http.Response(jsonEncode({'data':{
++        'role':'Patient','accessToken':'old','refreshToken':'refresh'}}),200);
++      throw http.ClientException('offline');
++    }));
++    await api.login('synthetic@example.invalid','synthetic-password');
++    await expectLater(api.logout(),throwsA(isA<ApiFailure>()));
++    expect(api.authenticated,isFalse); api.close();
++  });
++}
+diff --git a/app/src/test/widget_test.dart b/app/src/test/widget_test.dart
+--- a/app/src/test/widget_test.dart
++++ b/app/src/test/widget_test.dart
+@@ -1,30 +1,14 @@
+-// This is a basic Flutter widget test.
+-//
+-// To perform an interaction with a widget in your test, use the WidgetTester
+-// utility in the flutter_test package. For example, you can send tap and scroll
+-// gestures. You can also use WidgetTester to find child widgets in the widget
+-// tree, read text, and verify that the values of widget properties are correct.
+-
+-import 'package:flutter/material.dart';
+ import 'package:flutter_test/flutter_test.dart';
+-
+ import 'package:telemedicina_app/main.dart';
+ 
+ void main() {
+-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
+-    // Build our app and trigger a frame.
++  testWidgets('El arranque muestra acceso de paciente y no el contador', (tester) async {
+     await tester.pumpWidget(const MyApp());
+-
+-    // Verify that our counter starts at 0.
+-    expect(find.text('0'), findsOneWidget);
+-    expect(find.text('1'), findsNothing);
+-
+-    // Tap the '+' icon and trigger a frame.
+-    await tester.tap(find.byIcon(Icons.add));
++    expect(find.text('Entrar'),findsOneWidget);
++    expect(find.text('Crear cuenta'),findsNothing);
++    expect(find.text('Flutter Demo Home Page'),findsNothing);
++    await tester.tap(find.text('Registrarme'));
+     await tester.pump();
+-
+-    // Verify that our counter has incremented.
+-    expect(find.text('0'), findsNothing);
+-    expect(find.text('1'), findsOneWidget);
++    expect(find.text('Crear cuenta'),findsOneWidget);
+   });
+ }
+diff --git a/portalweb/src/next.config.ts b/portalweb/src/next.config.ts
+--- a/portalweb/src/next.config.ts
++++ b/portalweb/src/next.config.ts
+@@ -1,16 +1,9 @@
+-import type { NextConfig } from "next";
+-
+-const nextConfig: NextConfig = {
+-  reactStrictMode: true,
+-  async rewrites() {
+-    return [
+-      {
+-        source: "/api/backend/:path*",
+-        destination: "http://localhost:5000/api/v1/:path*",
+-      },
+-    ];
+-  },
++import type {NextConfig} from "next";
++const nextConfig:NextConfig={
++  reactStrictMode:true,
++  async rewrites(){return [{
++    source:"/api/backend/:path*",
++    destination:(process.env.API_INTERNAL_URL||"http://127.0.0.1:5000/api/v1")+"/:path*"
++  }];}
+ };
+-
+ export default nextConfig;
+-
+diff --git a/portalweb/src/src/app/admin/page.tsx b/portalweb/src/src/app/admin/page.tsx
+--- a/portalweb/src/src/app/admin/page.tsx
++++ b/portalweb/src/src/app/admin/page.tsx
+@@ -1,130 +1,2 @@
+-"use client";
+-
+-import { useState } from "react";
+-
+-interface AuditLog {
+-  id: string;
+-  timestamp: string;
+-  actor: string;
+-  role: string;
+-  action: string;
+-  resource: string;
+-  status: "SUCCESS" | "WARNING" | "DENIED";
+-}
+-
+-const MOCK_AUDIT_LOGS: AuditLog[] = [
+-  {
+-    id: "aud-001",
+-    timestamp: "2026-11-04 19:35:10",
+-    actor: "dra.mendez@hospital.do",
+-    role: "Doctor",
+-    action: "READ_PATIENT_RECORD",
+-    resource: "Patient:pat-001",
+-    status: "SUCCESS"
+-  },
+-  {
+-    id: "aud-002",
+-    timestamp: "2026-11-04 19:30:22",
+-    actor: "admision@hospital.do",
+-    role: "Admission",
+-    action: "UPDATE_COVERAGE_STATUS",
+-    resource: "Appointment:apt-101",
+-    status: "SUCCESS"
+-  },
+-  {
+-    id: "aud-003",
+-    timestamp: "2026-11-04 19:20:15",
+-    actor: "usr-unauthorized",
+-    role: "Unknown",
+-    action: "ACCESS_CLINICAL_NOTE",
+-    resource: "Note:not-501",
+-    status: "DENIED"
+-  }
+-];
+-
+-export default function AdminPage() {
+-  const [logs] = useState<AuditLog[]>(MOCK_AUDIT_LOGS);
+-
+-  return (
+-    <div className="space-y-6">
+-      <div>
+-        <h1 className="text-2xl font-bold text-slate-900">Administración y Trazabilidad Institucional</h1>
+-        <p className="text-sm text-slate-500">
+-          Módulo M12 · Bitácora inalterable de auditoría (sin PHI sensible), gestión de accesos y parámetros de centro
+-        </p>
+-      </div>
+-
+-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+-          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Centro Médico</h2>
+-          <div className="text-lg font-bold text-slate-900 mt-2">Centro Médico Metropolitano</div>
+-          <p className="text-xs text-slate-500 mt-1">ID PSS: DO-PSS-8819 · Santo Domingo</p>
+-        </div>
+-
+-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+-          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Seguridad y Sesiones</h2>
+-          <div className="text-lg font-bold text-slate-900 mt-2">MFA Forzoso (Personal)</div>
+-          <p className="text-xs text-slate-500 mt-1">Expiración de tokens: 15 min / Refresh rotativo</p>
+-        </div>
+-
+-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+-          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Políticas de Privacidad</h2>
+-          <div className="text-lg font-bold text-slate-900 mt-2">Consentimiento v1.2</div>
+-          <p className="text-xs text-slate-500 mt-1">Retención de auditoría: 5 años</p>
+-        </div>
+-      </div>
+-
+-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+-        <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
+-          <div>
+-            <h2 className="text-sm font-bold text-slate-900">Bitácora de Eventos de Auditoría (AuditEvent)</h2>
+-            <p className="text-xs text-slate-500">Eventos de seguridad y acceso a datos clínicos de las últimas 24 horas</p>
+-          </div>
+-          <span className="badge badge-info">Auditoría Inmutable</span>
+-        </div>
+-
+-        <div className="overflow-x-auto">
+-          <table className="min-w-full divide-y divide-slate-200 text-sm">
+-            <thead className="bg-slate-50 text-slate-600 text-xs font-semibold uppercase tracking-wider text-left">
+-              <tr>
+-                <th className="px-6 py-3">Fecha / Hora</th>
+-                <th className="px-6 py-3">Operador / Rol</th>
+-                <th className="px-6 py-3">Acción Registrada</th>
+-                <th className="px-6 py-3">Recurso Afectado</th>
+-                <th className="px-6 py-3">Resultado</th>
+-              </tr>
+-            </thead>
+-            <tbody className="divide-y divide-slate-200">
+-              {logs.map((log) => (
+-                <tr key={log.id} className="hover:bg-slate-50 transition-colors">
+-                  <td className="px-6 py-4 whitespace-nowrap text-xs font-mono text-slate-500">
+-                    {log.timestamp}
+-                  </td>
+-                  <td className="px-6 py-4">
+-                    <div className="font-medium text-slate-900 text-xs">{log.actor}</div>
+-                    <div className="text-[11px] text-slate-500">{log.role}</div>
+-                  </td>
+-                  <td className="px-6 py-4 font-mono text-xs text-slate-700">
+-                    {log.action}
+-                  </td>
+-                  <td className="px-6 py-4 font-mono text-xs text-slate-600">
+-                    {log.resource}
+-                  </td>
+-                  <td className="px-6 py-4 whitespace-nowrap">
+-                    <span className={`badge ${
+-                      log.status === "SUCCESS" ? "badge-success" :
+-                      log.status === "WARNING" ? "badge-warning" : "badge-danger"
+-                    }`}>
+-                      {log.status}
+-                    </span>
+-                  </td>
+-                </tr>
+-              ))}
+-            </tbody>
+-          </table>
+-        </div>
+-      </div>
+-    </div>
+-  );
+-}
+-
++import AdmissionConsole from "@/components/admission-console";
++export default function Page(){return <AdmissionConsole view="audit"/>;}
+diff --git a/portalweb/src/src/app/admision/page.tsx b/portalweb/src/src/app/admision/page.tsx
+--- a/portalweb/src/src/app/admision/page.tsx
++++ b/portalweb/src/src/app/admision/page.tsx
+@@ -1,191 +1,2 @@
+-"use client";
+-
+-import { useState } from "react";
+-import { MOCK_APPOINTMENTS, MOCK_PATIENTS } from "@/lib/mock-data";
+-import { Appointment, CoverageStatus } from "@/lib/types";
+-
+-export default function AdmisionPage() {
+-  const [appointments, setAppointments] = useState<Appointment[]>(MOCK_APPOINTMENTS);
+-  const [selectedAppointment, setSelectedAppointment] = useState<Appointment | null>(MOCK_APPOINTMENTS[1]);
+-  const [authorizationCode, setAuthorizationCode] = useState<string>("");
+-  const [notes, setNotes] = useState<string>("");
+-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+-
+-  const handleUpdateCoverage = (status: CoverageStatus) => {
+-    if (!selectedAppointment) return;
+-
+-    setAppointments((prev) =>
+-      prev.map((a) =>
+-        a.id === selectedAppointment.id
+-          ? {
+-              ...a,
+-              coverageStatus: status,
+-              status: status === "Approved" ? "WaitingRoom" : a.status,
+-            }
+-          : a
+-      )
+-    );
+-
+-    setSelectedAppointment((prev) =>
+-      prev ? { ...prev, coverageStatus: status } : null
+-    );
+-
+-    setSuccessMessage(`Estado de cobertura actualizado a: ${status}. Registro auditado.`);
+-    setTimeout(() => setSuccessMessage(null), 4000);
+-  };
+-
+-  return (
+-    <div className="space-y-6">
+-      <div>
+-        <h1 className="text-2xl font-bold text-slate-900">Módulo de Admisión y Validación de Seguros</h1>
+-        <p className="text-sm text-slate-500">
+-          Personal de Admisión (M02 / M05 / M06) · Verificación de afiliación, copagos y consentimiento informado
+-        </p>
+-      </div>
+-
+-      {successMessage && (
+-        <div className="p-4 bg-green-50 border border-green-200 text-green-800 text-sm rounded-xl">
+-          {successMessage}
+-        </div>
+-      )}
+-
+-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+-        {/* Lista de Solicitudes Pendientes */}
+-        <div className="lg:col-span-1 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+-          <div className="p-4 bg-slate-50 border-b border-slate-200">
+-            <h2 className="text-sm font-bold text-slate-900">Cola de Admisión del Día</h2>
+-            <p className="text-xs text-slate-500">Seleccione un paciente para verificar</p>
+-          </div>
+-          <div className="divide-y divide-slate-200">
+-            {appointments.map((apt) => (
+-              <div
+-                key={apt.id}
+-                onClick={() => setSelectedAppointment(apt)}
+-                className={`p-4 cursor-pointer transition-colors ${
+-                  selectedAppointment?.id === apt.id ? "bg-teal-50 border-l-4 border-teal-600" : "hover:bg-slate-50"
+-                }`}
+-              >
+-                <div className="font-semibold text-slate-900 text-sm">{apt.patientName}</div>
+-                <div className="text-xs text-slate-500 font-mono mt-0.5">Cédula: {apt.patientIdCard}</div>
+-                <div className="mt-2 flex items-center justify-between text-xs">
+-                  <span className="font-medium text-slate-700">Estado cobertura:</span>
+-                  <span className={`font-bold ${
+-                    apt.coverageStatus === "Approved" ? "text-green-600" : "text-amber-600"
+-                  }`}>
+-                    {apt.coverageStatus}
+-                  </span>
+-                </div>
+-              </div>
+-            ))}
+-          </div>
+-        </div>
+-
+-        {/* Detalle de Validación y Operaciones de Seguro */}
+-        <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-6">
+-          {selectedAppointment ? (
+-            <>
+-              <div className="border-b border-slate-200 pb-4">
+-                <div className="flex justify-between items-start">
+-                  <div>
+-                    <h2 className="text-lg font-bold text-slate-900">{selectedAppointment.patientName}</h2>
+-                    <p className="text-xs text-slate-500 mt-1">
+-                      Cita ID: {selectedAppointment.id} · Cédula: {selectedAppointment.patientIdCard} · Médico: {selectedAppointment.doctorName}
+-                    </p>
+-                  </div>
+-                  <span className="badge badge-warning">
+-                    Estado Actual: {selectedAppointment.coverageStatus}
+-                  </span>
+-                </div>
+-              </div>
+-
+-              {/* Información de Seguro y Afiliación */}
+-              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+-                <h3 className="text-xs font-bold text-slate-600 uppercase tracking-wider">
+-                  Datos de Afiliación Declarados
+-                </h3>
+-                <div className="grid grid-cols-2 gap-4 text-sm">
+-                  <div>
+-                    <span className="text-xs text-slate-500 block">Aseguradora / ARS:</span>
+-                    <span className="font-semibold text-slate-800">ARS Humano / Palic</span>
+-                  </div>
+-                  <div>
+-                    <span className="text-xs text-slate-500 block">Número de Póliza:</span>
+-                    <span className="font-mono text-slate-800">POL-9928120-X</span>
+-                  </div>
+-                  <div>
+-                    <span className="text-xs text-slate-500 block">Servicio Solicitado:</span>
+-                    <span className="text-slate-800">{selectedAppointment.specialty} (Remota)</span>
+-                  </div>
+-                  <div>
+-                    <span className="text-xs text-slate-500 block">Consentimiento Informado:</span>
+-                    <span className="text-green-700 font-semibold text-xs bg-green-100 px-2 py-0.5 rounded">
+-                      Firmado Digitalmente (v1.2)
+-                    </span>
+-                  </div>
+-                </div>
+-              </div>
+-
+-              {/* Panel de Aprobación o Revisión Manual */}
+-              <div className="space-y-4">
+-                <h3 className="text-sm font-bold text-slate-900">
+-                  Resolución de Cobertura y Admisión Virtual
+-                </h3>
+-                <div>
+-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+-                    Código de Autorización ARS (si aplica):
+-                  </label>
+-                  <input
+-                    type="text"
+-                    value={authorizationCode}
+-                    onChange={(e) => setAuthorizationCode(e.target.value)}
+-                    placeholder="Ej. AUT-884920"
+-                    className="w-full text-sm px-3.5 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+-                  />
+-                </div>
+-
+-                <div>
+-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+-                    Notas Administrativas de Admisión:
+-                  </label>
+-                  <textarea
+-                    rows={3}
+-                    value={notes}
+-                    onChange={(e) => setNotes(e.target.value)}
+-                    placeholder="Detalles de la comprobación o motivo de atención particular..."
+-                    className="w-full text-sm px-3.5 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+-                  />
+-                </div>
+-
+-                <div className="pt-2 flex flex-wrap gap-3">
+-                  <button
+-                    onClick={() => handleUpdateCoverage("Approved")}
+-                    className="px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold rounded-lg shadow-sm transition-all"
+-                  >
+-                    Aprobar Cobertura y Habilitar Espera
+-                  </button>
+-                  <button
+-                    onClick={() => handleUpdateCoverage("ManualReview")}
+-                    className="px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-lg shadow-sm transition-all"
+-                  >
+-                    Marcar para Revisión Manual
+-                  </button>
+-                  <button
+-                    onClick={() => handleUpdateCoverage("Denied")}
+-                    className="px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-lg shadow-sm transition-all"
+-                  >
+-                    Rechazar Cobertura (Ofrecer Particular)
+-                  </button>
+-                </div>
+-              </div>
+-            </>
+-          ) : (
+-            <div className="p-8 text-center text-slate-500 text-sm">
+-              Seleccione una cita en la columna izquierda para gestionar la admisión.
+-            </div>
+-          )}
+-        </div>
+-      </div>
+-    </div>
+-  );
+-}
+-
++import AdmissionConsole from "@/components/admission-console";
++export default function Page(){return <AdmissionConsole view="queue"/>;}
+diff --git a/portalweb/src/src/app/agenda/page.tsx b/portalweb/src/src/app/agenda/page.tsx
+--- a/portalweb/src/src/app/agenda/page.tsx
++++ b/portalweb/src/src/app/agenda/page.tsx
+@@ -1,136 +1,2 @@
+-"use client";
+-
+-import { useState } from "react";
+-import Link from "next/link";
+-import { MOCK_APPOINTMENTS } from "@/lib/mock-data";
+-import { Appointment, AppointmentStatus } from "@/lib/types";
+-
+-export default function AgendaPage() {
+-  const [appointments, setAppointments] = useState<Appointment[]>(MOCK_APPOINTMENTS);
+-  const [selectedFilter, setSelectedFilter] = useState<string>("ALL");
+-
+-  const filteredAppointments = appointments.filter((apt) => {
+-    if (selectedFilter === "ALL") return true;
+-    if (selectedFilter === "WAITING") return apt.status === "WaitingRoom";
+-    if (selectedFilter === "CONFIRMED") return apt.status === "Confirmed";
+-    if (selectedFilter === "PENDING") return apt.status === "PendingValidation";
+-    return true;
+-  });
+-
+-  const getStatusBadge = (status: AppointmentStatus) => {
+-    switch (status) {
+-      case "WaitingRoom":
+-        return <span className="badge badge-success">En sala de espera</span>;
+-      case "Confirmed":
+-        return <span className="badge badge-info">Confirmada</span>;
+-      case "PendingValidation":
+-        return <span className="badge badge-warning">Validación pendiente</span>;
+-      case "InProgress":
+-        return <span className="badge badge-info">En consulta</span>;
+-      case "Completed":
+-        return <span className="badge badge-neutral">Completada</span>;
+-      case "Cancelled":
+-        return <span className="badge badge-danger">Cancelada</span>;
+-      default:
+-        return <span className="badge badge-neutral">{status}</span>;
+-    }
+-  };
+-
+-  return (
+-    <div className="space-y-6">
+-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+-        <div>
+-          <h1 className="text-2xl font-bold text-slate-900">Agenda Médica y Teleconsultas</h1>
+-          <p className="text-sm text-slate-500">
+-            Profesional: Dra. Carmen Méndez · Especialidad: Medicina Interna (M03 / M04)
+-          </p>
+-        </div>
+-        <div className="flex space-x-2">
+-          <button
+-            onClick={() => setSelectedFilter("ALL")}
+-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${
+-              selectedFilter === "ALL" ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-300"
+-            }`}
+-          >
+-            Todas ({appointments.length})
+-          </button>
+-          <button
+-            onClick={() => setSelectedFilter("WAITING")}
+-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${
+-              selectedFilter === "WAITING" ? "bg-teal-600 text-white" : "bg-white text-slate-700 border border-slate-300"
+-            }`}
+-          >
+-            En Espera
+-          </button>
+-          <button
+-            onClick={() => setSelectedFilter("CONFIRMED")}
+-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${
+-              selectedFilter === "CONFIRMED" ? "bg-blue-600 text-white" : "bg-white text-slate-700 border border-slate-300"
+-            }`}
+-          >
+-            Confirmadas
+-          </button>
+-        </div>
+-      </div>
+-
+-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+-        <div className="overflow-x-auto">
+-          <table className="min-w-full divide-y divide-slate-200 text-sm">
+-            <thead className="bg-slate-50 text-slate-600 text-xs font-semibold uppercase tracking-wider text-left">
+-              <tr>
+-                <th className="px-6 py-3">Horario</th>
+-                <th className="px-6 py-3">Paciente / Documento</th>
+-                <th className="px-6 py-3">Motivo de Consulta</th>
+-                <th className="px-6 py-3">Cobertura ARS</th>
+-                <th className="px-6 py-3">Estado de Cita</th>
+-                <th className="px-6 py-3 text-right">Acción</th>
+-              </tr>
+-            </thead>
+-            <tbody className="divide-y divide-slate-200">
+-              {filteredAppointments.map((apt) => (
+-                <tr key={apt.id} className="hover:bg-slate-50 transition-colors">
+-                  <td className="px-6 py-4 whitespace-nowrap font-medium text-slate-900">
+-                    {new Date(apt.scheduledAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+-                    <div className="text-xs text-slate-500 font-normal">{apt.durationMinutes} minutos</div>
+-                  </td>
+-                  <td className="px-6 py-4">
+-                    <div className="font-semibold text-slate-900">{apt.patientName}</div>
+-                    <div className="text-xs text-slate-500 font-mono">Céd: {apt.patientIdCard}</div>
+-                  </td>
+-                  <td className="px-6 py-4 text-slate-700 max-w-xs truncate">
+-                    {apt.reason}
+-                  </td>
+-                  <td className="px-6 py-4 whitespace-nowrap">
+-                    <span className={`text-xs font-semibold ${
+-                      apt.coverageStatus === "Approved" ? "text-green-700" :
+-                      apt.coverageStatus === "ManualReview" ? "text-amber-700" : "text-slate-600"
+-                    }`}>
+-                      {apt.coverageStatus === "Approved" ? "Verificada" :
+-                       apt.coverageStatus === "ManualReview" ? "Revisión Manual" : apt.coverageStatus}
+-                    </span>
+-                  </td>
+-                  <td className="px-6 py-4 whitespace-nowrap">
+-                    {getStatusBadge(apt.status)}
+-                  </td>
+-                  <td className="px-6 py-4 whitespace-nowrap text-right">
+-                    {apt.status === "WaitingRoom" ? (
+-                      <Link
+-                        href={`/consulta/${apt.id}`}
+-                        className="inline-flex items-center px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold rounded-lg shadow-sm"
+-                      >
+-                        Atender &rarr;
+-                      </Link>
+-                    ) : (
+-                      <span className="text-xs text-slate-400">En espera de check-in</span>
+-                    )}
+-                  </td>
+-                </tr>
+-              ))}
+-            </tbody>
+-          </table>
+-        </div>
+-      </div>
+-    </div>
+-  );
+-}
+-
++import AdmissionConsole from "@/components/admission-console";
++export default function Page(){return <AdmissionConsole view="schedule"/>;}
+diff --git a/portalweb/src/src/app/consulta/[id]/page.tsx b/portalweb/src/src/app/consulta/[id]/page.tsx
+--- a/portalweb/src/src/app/consulta/[id]/page.tsx
++++ b/portalweb/src/src/app/consulta/[id]/page.tsx
+@@ -1,188 +1,2 @@
+-"use client";
+-
+-import { use, useState } from "react";
+-import Link from "next/link";
+-import { MOCK_APPOINTMENTS, MOCK_PATIENTS } from "@/lib/mock-data";
+-
+-export default function ConsultaPage({ params }: { params: Promise<{ id: string }> }) {
+-  const { id } = use(params);
+-  const appointment = MOCK_APPOINTMENTS.find((a) => a.id === id) || MOCK_APPOINTMENTS[0];
+-  const patient = MOCK_PATIENTS.find((p) => p.id === appointment.patientId) || MOCK_PATIENTS[0];
+-
+-  const [subjective, setSubjective] = useState("");
+-  const [objective, setObjective] = useState("");
+-  const [assessment, setAssessment] = useState("");
+-  const [plan, setPlan] = useState("");
+-  const [isSigned, setIsSigned] = useState(false);
+-  const [callStatus, setCallStatus] = useState<"connecting" | "active" | "ended">("active");
+-
+-  const handleSignAndClose = () => {
+-    if (!subjective || !assessment || !plan) {
+-      alert("Por favor complete los campos obligatorios de la nota clínica (Subjetivo, Evaluación y Plan).");
+-      return;
+-    }
+-    setIsSigned(true);
+-    setCallStatus("ended");
+-  };
+-
+-  return (
+-    <div className="space-y-6">
+-      {/* Barra Superior del Encuentro Clínico */}
+-      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+-        <div>
+-          <div className="flex items-center space-x-2">
+-            <span className="badge badge-info">Encuentro Clínico Remoto (M07/M08)</span>
+-            <span className="text-xs text-slate-500 font-mono">Cita #{appointment.id}</span>
+-          </div>
+-          <h1 className="text-xl font-bold text-slate-900 mt-1">
+-            Paciente: {patient.fullName} ({patient.gender === "M" ? "Masculino" : "Femenino"}, 38 años)
+-          </h1>
+-        </div>
+-
+-        <div className="flex items-center space-x-3">
+-          <Link
+-            href="/agenda"
+-            className="px-3.5 py-2 border border-slate-300 text-slate-700 text-xs font-semibold rounded-lg hover:bg-slate-50"
+-          >
+-            &larr; Volver a la agenda
+-          </Link>
+-          <button
+-            disabled={isSigned}
+-            onClick={handleSignAndClose}
+-            className="px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:bg-slate-300 text-white text-xs font-bold rounded-lg shadow-sm transition-all"
+-          >
+-            {isSigned ? "Encuentro Firmado y Cerrado" : "Firmar Nota Médica y Cerrar"}
+-          </button>
+-        </div>
+-      </div>
+-
+-      {/* Alerta de Alergias y Condiciones Crónicas */}
+-      <div className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded-r-xl">
+-        <div className="flex flex-wrap items-center gap-4 text-xs">
+-          <div>
+-            <strong className="text-amber-900 uppercase">Alergias Conocidas:</strong>{" "}
+-            <span className="text-red-700 font-bold bg-red-100 px-2 py-0.5 rounded">
+-              {patient.allergies.join(", ")}
+-            </span>
+-          </div>
+-          <div>
+-            <strong className="text-amber-900 uppercase">Condiciones Crónicas:</strong>{" "}
+-            <span className="text-slate-800">{patient.chronicConditions.join(", ")}</span>
+-          </div>
+-          <div>
+-            <strong className="text-amber-900 uppercase">Grupo Sanguíneo:</strong>{" "}
+-            <span className="font-mono text-slate-800">{patient.bloodType}</span>
+-          </div>
+-        </div>
+-      </div>
+-
+-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+-        {/* Panel Izquierdo: Sala de Videoconsulta */}
+-        <div className="bg-slate-900 rounded-xl border border-slate-800 shadow-sm overflow-hidden flex flex-col h-[520px]">
+-          <div className="p-3 bg-slate-800/80 border-b border-slate-700 flex justify-between items-center text-xs text-white">
+-            <span className="flex items-center space-x-2">
+-              <span className={`w-2.5 h-2.5 rounded-full ${callStatus === "active" ? "bg-red-500 animate-pulse" : "bg-slate-400"}`} />
+-              <strong className="font-mono">{callStatus === "active" ? "EN VIVO · SALA CIFRADA (TLS 1.3)" : "LLAMADA FINALIZADA"}</strong>
+-            </span>
+-            <span className="text-slate-400 font-mono">WebRTC Seguro</span>
+-          </div>
+-
+-          <div className="flex-1 flex flex-col items-center justify-center p-6 text-center text-white space-y-4">
+-            <div className="w-24 h-24 rounded-full bg-slate-800 border-4 border-teal-500 flex items-center justify-center text-3xl font-bold">
+-              {patient.fullName.charAt(0)}
+-            </div>
+-            <div>
+-              <h3 className="font-semibold text-lg">{patient.fullName}</h3>
+-              <p className="text-xs text-slate-400 mt-1">
+-                Conexión establecida con el paciente desde la App Móvil Flutter
+-              </p>
+-            </div>
+-          </div>
+-
+-          {/* Controles de Llamada */}
+-          <div className="p-4 bg-slate-800/80 border-t border-slate-700 flex justify-center space-x-4">
+-            <button className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg">
+-              Micrófono: Activo
+-            </button>
+-            <button className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg">
+-              Cámara: Activa
+-            </button>
+-            <button
+-              onClick={() => setCallStatus("ended")}
+-              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-lg"
+-            >
+-              Terminar Llamada
+-            </button>
+-          </div>
+-        </div>
+-
+-        {/* Panel Derecho: Documentación Clínica SOAP */}
+-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 flex flex-col h-[520px] overflow-y-auto space-y-4">
+-          <div className="border-b border-slate-200 pb-3">
+-            <h2 className="text-base font-bold text-slate-900">Nota de Encuentro Clínico (SOAP)</h2>
+-            <p className="text-xs text-slate-500">Documento clínico obligatorio bajo responsabilidad de la Dra. Carmen Méndez</p>
+-          </div>
+-
+-          <div>
+-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+-              S — Subjetivo (Motivo de consulta y síntomas referidos):
+-            </label>
+-            <textarea
+-              rows={2}
+-              value={subjective}
+-              onChange={(e) => setSubjective(e.target.value)}
+-              placeholder="Ej. Paciente refiere cefalea matutina leve de 3 días de evolución..."
+-              className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+-            />
+-          </div>
+-
+-          <div>
+-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+-              O — Objetivo (Observaciones remotas, signos vitales reportados):
+-            </label>
+-            <textarea
+-              rows={2}
+-              value={objective}
+-              onChange={(e) => setObjective(e.target.value)}
+-              placeholder="Ej. PA: 130/85 mmHg reportada por tensiómetro digital. Afebril, hidratado..."
+-              className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+-            />
+-          </div>
+-
+-          <div>
+-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+-              A — Apreciación Diagnóstica (Impresión clínica y códigos):
+-            </label>
+-            <input
+-              type="text"
+-              value={assessment}
+-              onChange={(e) => setAssessment(e.target.value)}
+-              placeholder="Ej. Hipertensión esencial controlada (CIE-10: I10)"
+-              className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+-            />
+-          </div>
+-
+-          <div>
+-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+-              P — Plan de Tratamiento y Recomendaciones:
+-            </label>
+-            <textarea
+-              rows={3}
+-              value={plan}
+-              onChange={(e) => setPlan(e.target.value)}
+-              placeholder="Ej. Mantener dosis de Losartán 50mg VO diario. Dieta baja en sodio. Seguimiento en 30 días..."
+-              className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+-            />
+-          </div>
+-
+-          {isSigned && (
+-            <div className="p-3 bg-teal-50 border border-teal-200 text-teal-800 text-xs rounded-lg">
+-              Nota firmada digitalmente con sello inmutable. Receta médica y plan de cuidado disponibles en la sección de documentos.
+-            </div>
+-          )}
+-        </div>
+-      </div>
+-    </div>
+-  );
+-}
+-
++import {notFound} from "next/navigation";
++export default function Page(){notFound();}
+diff --git a/portalweb/src/src/app/documentos/page.tsx b/portalweb/src/src/app/documentos/page.tsx
+--- a/portalweb/src/src/app/documentos/page.tsx
++++ b/portalweb/src/src/app/documentos/page.tsx
+@@ -1,124 +1 @@
+-"use client";
+-
+-import { useState } from "react";
+-import { MOCK_PRESCRIPTIONS } from "@/lib/mock-data";
+-import { Prescription } from "@/lib/types";
+-
+-export default function DocumentosPage() {
+-  const [prescriptions] = useState<Prescription[]>(MOCK_PRESCRIPTIONS);
+-  const [selectedRx, setSelectedRx] = useState<Prescription>(MOCK_PRESCRIPTIONS[0]);
+-
+-  return (
+-    <div className="space-y-6">
+-      <div>
+-        <h1 className="text-2xl font-bold text-slate-900">Documentos Clínicos y Recetas Médicas</h1>
+-        <p className="text-sm text-slate-500">
+-          Módulo M09 · Emisión, trazabilidad y verificación de recetas, órdenes de laboratorio y referimientos
+-        </p>
+-      </div>
+-
+-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+-        {/* Lista de Documentos Emitidos */}
+-        <div className="lg:col-span-1 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+-          <div className="p-4 bg-slate-50 border-b border-slate-200">
+-            <h2 className="text-sm font-bold text-slate-900">Documentos Recientes</h2>
+-            <p className="text-xs text-slate-500">Filtrados por profesional responsable</p>
+-          </div>
+-          <div className="divide-y divide-slate-200">
+-            {prescriptions.map((rx) => (
+-              <div
+-                key={rx.id}
+-                onClick={() => setSelectedRx(rx)}
+-                className={`p-4 cursor-pointer transition-colors ${
+-                  selectedRx?.id === rx.id ? "bg-teal-50 border-l-4 border-teal-600" : "hover:bg-slate-50"
+-                }`}
+-              >
+-                <div className="flex justify-between items-start">
+-                  <span className="font-semibold text-slate-900 text-sm">{rx.patientName}</span>
+-                  <span className="badge badge-success text-[10px]">Activa</span>
+-                </div>
+-                <div className="text-xs text-slate-500 mt-1 font-mono">Receta #{rx.id}</div>
+-                <div className="text-xs text-slate-600 mt-2">
+-                  Medicamentos: {rx.items.map((i) => i.medication).join(", ")}
+-                </div>
+-              </div>
+-            ))}
+-          </div>
+-        </div>
+-
+-        {/* Vista Previa del Documento Oficial */}
+-        <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-sm p-8 space-y-6">
+-          {selectedRx ? (
+-            <div className="border border-slate-300 rounded-lg p-6 bg-slate-50/50 space-y-6 shadow-sm">
+-              {/* Encabezado Institucional */}
+-              <div className="flex justify-between items-start border-b border-slate-300 pb-4">
+-                <div>
+-                  <h3 className="font-bold text-base text-slate-900">Centro Médico Metropolitano</h3>
+-                  <p className="text-xs text-slate-500">Servicio de Telemedicina y Consulta Externa</p>
+-                  <p className="text-xs text-slate-500">Santo Domingo, República Dominicana</p>
+-                </div>
+-                <div className="text-right">
+-                  <div className="text-xs font-mono font-bold text-slate-700">RECETA MÉDICA #{selectedRx.id}</div>
+-                  <div className="text-xs text-slate-500">Fecha de Emisión: {new Date(selectedRx.issuedAt).toLocaleDateString()}</div>
+-                  <div className="text-xs text-slate-500">Válida hasta: {new Date(selectedRx.expiresAt).toLocaleDateString()}</div>
+-                </div>
+-              </div>
+-
+-              {/* Datos del Paciente */}
+-              <div className="grid grid-cols-2 gap-4 text-xs bg-white p-3 rounded border border-slate-200">
+-                <div>
+-                  <span className="text-slate-500 block">Paciente:</span>
+-                  <strong className="text-slate-900 text-sm">{selectedRx.patientName}</strong>
+-                </div>
+-                <div>
+-                  <span className="text-slate-500 block">Médico Prescriptor:</span>
+-                  <strong className="text-slate-900 text-sm">{selectedRx.doctorName}</strong>
+-                  <span className="text-slate-500 block font-mono text-[10px]">Exequátur: {selectedRx.doctorLicense}</span>
+-                </div>
+-              </div>
+-
+-              {/* Fármacos Prescritos */}
+-              <div className="space-y-4">
+-                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+-                  Medicamentos e Indicaciones Posológicas
+-                </h4>
+-                <div className="space-y-3">
+-                  {selectedRx.items.map((item, idx) => (
+-                    <div key={idx} className="bg-white p-4 rounded-lg border border-slate-200 space-y-1">
+-                      <div className="flex justify-between items-baseline">
+-                        <span className="font-bold text-sm text-slate-900">{item.medication}</span>
+-                        <span className="text-xs text-slate-600 font-medium">Dosis: {item.dosage}</span>
+-                      </div>
+-                      <div className="text-xs text-slate-600">
+-                        <strong>Frecuencia:</strong> {item.frequency} · <strong>Duración:</strong> {item.duration}
+-                      </div>
+-                      <div className="text-xs text-slate-500 italic">
+-                        Instrucciones: {item.instructions}
+-                      </div>
+-                    </div>
+-                  ))}
+-                </div>
+-              </div>
+-
+-              {/* Firma y Validación Legal */}
+-              <div className="border-t border-slate-300 pt-6 flex flex-col sm:flex-row justify-between items-center gap-4">
+-                <div className="text-xs text-slate-500 max-w-sm">
+-                  Documento médico emitido en plataforma de telemedicina autorizada. Verificable mediante código QR y firma digital del profesional.
+-                </div>
+-                <div className="text-center">
+-                  <div className="w-48 border-b-2 border-slate-400 pb-1 font-serif text-sm font-semibold text-slate-800">
+-                    {selectedRx.doctorName}
+-                  </div>
+-                  <div className="text-[11px] text-slate-500 mt-1 font-mono">
+-                    Colegiatura: {selectedRx.doctorLicense}
+-                  </div>
+-                </div>
+-              </div>
+-            </div>
+-          ) : null}
+-        </div>
+-      </div>
+-    </div>
+-  );
+-}
+-
++export default function Page(){return <p>Documentos clínicos pendientes de implementación. No se emiten recetas en este hito.</p>;}
+diff --git a/portalweb/src/src/app/layout.tsx b/portalweb/src/src/app/layout.tsx
+--- a/portalweb/src/src/app/layout.tsx
++++ b/portalweb/src/src/app/layout.tsx
+@@ -1,103 +1,17 @@
+-import type { Metadata } from "next";
++import type {Metadata} from "next";
+ import Link from "next/link";
+ import "./globals.css";
+-
+-export const metadata: Metadata = {
+-  title: "Portal Clínico y Administrativo — Telemedicina",
+-  description: "Plataforma Integral de Telemedicina para profesionales de salud y personal administrativo",
+-};
+-
+-export default function RootLayout({
+-  children,
+-}: Readonly<{
+-  children: React.ReactNode;
+-}>) {
+-  return (
+-    <html lang="es">
+-      <body className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
+-        {/* Header Institucional */}
+-        <header className="bg-slate-900 text-white shadow-md sticky top-0 z-50">
+-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+-            <div className="flex items-center justify-between h-16">
+-              <div className="flex items-center space-x-4">
+-                <Link href="/" className="flex items-center space-x-2">
+-                  <div className="w-9 h-9 rounded-lg bg-teal-500 flex items-center justify-center font-bold text-lg text-white">
+-                    +T
+-                  </div>
+-                  <span className="font-semibold text-lg tracking-tight">Telemedicina Portal</span>
+-                </Link>
+-                <span className="text-xs bg-slate-800 text-teal-300 px-2.5 py-1 rounded-md font-mono border border-slate-700">
+-                  PSS / República Dominicana
+-                </span>
+-              </div>
+-
+-              {/* Navegación Principal */}
+-              <nav className="hidden md:flex space-x-1">
+-                <Link
+-                  href="/"
+-                  className="text-slate-300 hover:text-white hover:bg-slate-800 px-3 py-2 rounded-md text-sm font-medium"
+-                >
+-                  Dashboard
+-                </Link>
+-                <Link
+-                  href="/agenda"
+-                  className="text-slate-300 hover:text-white hover:bg-slate-800 px-3 py-2 rounded-md text-sm font-medium"
+-                >
+-                  Agenda Clínica
+-                </Link>
+-                <Link
+-                  href="/admision"
+-                  className="text-slate-300 hover:text-white hover:bg-slate-800 px-3 py-2 rounded-md text-sm font-medium"
+-                >
+-                  Admisión & Cobertura
+-                </Link>
+-                <Link
+-                  href="/documentos"
+-                  className="text-slate-300 hover:text-white hover:bg-slate-800 px-3 py-2 rounded-md text-sm font-medium"
+-                >
+-                  Recetas & Órdenes
+-                </Link>
+-                <Link
+-                  href="/admin"
+-                  className="text-slate-300 hover:text-white hover:bg-slate-800 px-3 py-2 rounded-md text-sm font-medium"
+-                >
+-                  Auditoría & Parámetros
+-                </Link>
+-              </nav>
+-
+-              {/* Perfil del Operador */}
+-              <div className="flex items-center space-x-3">
+-                <div className="text-right hidden sm:block">
+-                  <div className="text-sm font-medium text-slate-100">Dra. Carmen Méndez</div>
+-                  <div className="text-xs text-teal-400 font-medium">Médico Especialista (M03/M08)</div>
+-                </div>
+-                <div className="w-9 h-9 rounded-full bg-slate-700 border-2 border-teal-400 flex items-center justify-center text-sm font-bold text-white">
+-                  CM
+-                </div>
+-              </div>
+-            </div>
+-          </div>
+-        </header>
+-
+-        {/* Contenedor Principal */}
+-        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+-          {children}
+-        </main>
+-
+-        {/* Footer de Trazabilidad */}
+-        <footer className="bg-white border-t border-slate-200 py-4 text-xs text-slate-500">
+-          <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row justify-between items-center gap-2">
+-            <div>
+-              Plataforma de Telemedicina · Módulo Web Profesional v0.1.0 · Conectado a ASP.NET Core API (/api/v1)
+-            </div>
+-            <div className="flex items-center space-x-2">
+-              <span className="w-2 h-2 rounded-full bg-green-500 inline-block"></span>
+-              <span>Ambiente: Local / Seguro Sintético</span>
+-            </div>
+-          </div>
+-        </footer>
+-      </body>
+-    </html>
+-  );
++export const metadata:Metadata={title:"Telemedicina · Admisión",description:"Primer hito con datos sintéticos"};
++export default function RootLayout({children}:Readonly<{children:React.ReactNode}>){
++  return <html lang="es"><body className="min-h-screen bg-slate-50 text-slate-900">
++    <header className="bg-slate-900 p-4 text-white">
++      <nav className="mx-auto flex max-w-7xl flex-wrap gap-5" aria-label="Navegación principal">
++        <Link href="/">Telemedicina · Primer hito</Link>
++        <Link href="/admision">Admisión</Link><Link href="/agenda">Horarios</Link><Link href="/admin">Auditoría</Link>
++        <Link href="/login">Acceso</Link>
++      </nav>
++    </header>
++    <main className="mx-auto max-w-7xl p-5">{children}</main>
++    <footer className="p-5 text-center text-sm">Entorno sintético. Video, atención clínica y documentos no habilitados.</footer>
++  </body></html>;
+ }
+-
+diff --git a/portalweb/src/src/app/login/page.tsx b/portalweb/src/src/app/login/page.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/app/login/page.tsx
+@@ -0,0 +1,37 @@
++"use client";
++import {useState} from "react";
++import {useRouter} from "next/navigation";
++import {api} from "@/lib/milestone-api";
++
++export default function LoginPage() {
++  const router=useRouter();
++  const [email,setEmail]=useState(""),[password,setPassword]=useState(""),[otp,setOtp]=useState("");
++  const [busy,setBusy]=useState(false),[error,setError]=useState("");
++  return <section className="mx-auto max-w-md space-y-4 rounded-xl border bg-white p-6">
++    <h1 className="text-xl font-bold">Acceso de admisión</h1>
++    <p>Entorno sintético. Use la cuenta de admisión configurada por el responsable y su autenticador TOTP.</p>
++    <form className="space-y-4" onSubmit={async event=>{
++      event.preventDefault(); setBusy(true); setError("");
++      try {
++        const user=await api<{role:string}>("/auth/login","POST",{email,password,otp});
++        if(user.role!=="Admission") {
++          await api("/auth/logout","POST",{});
++          throw new Error("Esta cuenta no tiene acceso al portal de admisión.");
++        }
++        setPassword(""); setOtp(""); router.replace("/admision");
++      } catch(e) {setError(e instanceof Error ? e.message : "Error de acceso");}
++      finally {setBusy(false);}
++    }}>
++      <label className="block">Correo<input className="block w-full rounded border p-2"
++        type="email" autoComplete="username" required value={email} onChange={e=>setEmail(e.target.value)}/></label>
++      <label className="block">Contraseña<input className="block w-full rounded border p-2"
++        type="password" autoComplete="current-password" required value={password} onChange={e=>setPassword(e.target.value)}/></label>
++      <label className="block">Código del autenticador<input className="block w-full rounded border p-2"
++        inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" required
++        value={otp} onChange={e=>setOtp(e.target.value)}/></label>
++      <button disabled={busy} className="rounded bg-teal-700 px-4 py-2 text-white disabled:opacity-50">
++        {busy?"Verificando…":"Entrar"}</button>
++      <p role="alert">{error}</p>
++    </form>
++  </section>;
++}
+diff --git a/portalweb/src/src/app/page.tsx b/portalweb/src/src/app/page.tsx
+--- a/portalweb/src/src/app/page.tsx
++++ b/portalweb/src/src/app/page.tsx
+@@ -1,152 +1,2 @@
+-"use client";
+-
+-import { useEffect, useState } from "react";
+-import Link from "next/link";
+-import { MOCK_APPOINTMENTS, MOCK_USERS } from "@/lib/mock-data";
+-import { Appointment } from "@/lib/types";
+-
+-export default function DashboardPage() {
+-  const [appointments, setAppointments] = useState<Appointment[]>(MOCK_APPOINTMENTS);
+-  const [backendStatus, setBackendStatus] = useState<string>("Verificando...");
+-  const [isBackendHealthy, setIsBackendHealthy] = useState<boolean | null>(null);
+-
+-  useEffect(() => {
+-    // Verificar conexión real con el backend ASP.NET Core
+-    fetch("http://localhost:5000/api/v1/health")
+-      .then((res) => res.json())
+-      .then((data) => {
+-        if (data.success) {
+-          setBackendStatus(`Conectado (${data.data?.service} v${data.data?.version})`);
+-          setIsBackendHealthy(true);
+-        } else {
+-          setBackendStatus("API respondió con advertencia");
+-          setIsBackendHealthy(false);
+-        }
+-      })
+-      .catch(() => {
+-        setBackendStatus("Modo desconectado (API en localhost:5000 inactiva)");
+-        setIsBackendHealthy(false);
+-      });
+-  }, []);
+-
+-  const waitingPatients = appointments.filter((a) => a.status === "WaitingRoom");
+-  const pendingValidation = appointments.filter((a) => a.coverageStatus === "ManualReview" || a.coverageStatus === "Pending");
+-
+-  return (
+-    <div className="space-y-6">
+-      {/* Banner de Bienvenida y Estado del Backend */}
+-      <div className="bg-gradient-to-r from-slate-900 to-slate-800 rounded-xl p-6 text-white shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+-        <div>
+-          <h1 className="text-2xl font-bold tracking-tight">Panel de Control Clínico y Asistencial</h1>
+-          <p className="text-slate-300 text-sm mt-1">
+-            Centro Médico Metropolitano · Sesión activa: <span className="text-teal-300 font-medium">Dra. Carmen Méndez</span>
+-          </p>
+-        </div>
+-        <div className="flex items-center bg-slate-800/80 border border-slate-700 px-4 py-2 rounded-lg text-xs space-x-2">
+-          <span
+-            className={`w-2.5 h-2.5 rounded-full ${
+-              isBackendHealthy === true
+-                ? "bg-green-400"
+-                : isBackendHealthy === false
+-                ? "bg-amber-400"
+-                : "bg-slate-400 animate-pulse"
+-            }`}
+-          />
+-          <span className="text-slate-300 font-mono">Backend API: {backendStatus}</span>
+-        </div>
+-      </div>
+-
+-      {/* Indicadores Clave del Día */}
+-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Sala de Espera Virtual</div>
+-          <div className="mt-2 flex items-baseline justify-between">
+-            <span className="text-3xl font-extrabold text-teal-600">{waitingPatients.length}</span>
+-            <span className="badge badge-success">Listos para atención</span>
+-          </div>
+-          <p className="text-xs text-slate-500 mt-2">Pacientes con triaje y consentimiento aceptado</p>
+-        </div>
+-
+-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Citas Programadas Hoy</div>
+-          <div className="mt-2 flex items-baseline justify-between">
+-            <span className="text-3xl font-extrabold text-slate-900">{appointments.length}</span>
+-            <span className="badge badge-info">Agenda activa</span>
+-          </div>
+-          <p className="text-xs text-slate-500 mt-2">Horarios bloqueados en Santo Domingo (UTC-4)</p>
+-        </div>
+-
+-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Validaciones ARS / Seguro</div>
+-          <div className="mt-2 flex items-baseline justify-between">
+-            <span className="text-3xl font-extrabold text-amber-600">{pendingValidation.length}</span>
+-            <span className="badge badge-warning">Revisión manual</span>
+-          </div>
+-          <p className="text-xs text-slate-500 mt-2">Elegibilidad o copago pendiente de confirmar</p>
+-        </div>
+-
+-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Documentos Emitidos</div>
+-          <div className="mt-2 flex items-baseline justify-between">
+-            <span className="text-3xl font-extrabold text-slate-800">1</span>
+-            <span className="badge badge-neutral">Firmados digitalmente</span>
+-          </div>
+-          <p className="text-xs text-slate-500 mt-2">Recetas y órdenes con hash verificable</p>
+-        </div>
+-      </div>
+-
+-      {/* Cola de Pacientes en Sala de Espera */}
+-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+-        <div className="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50/50">
+-          <div>
+-            <h2 className="text-base font-bold text-slate-900">Cola de Teleconsulta Inmediata</h2>
+-            <p className="text-xs text-slate-500">Pacientes que completaron admisión y esperan conexión del médico</p>
+-          </div>
+-          <Link
+-            href="/agenda"
+-            className="text-xs font-medium text-teal-600 hover:text-teal-800 hover:underline"
+-          >
+-            Ver agenda completa &rarr;
+-          </Link>
+-        </div>
+-
+-        <div className="divide-y divide-slate-200">
+-          {waitingPatients.length === 0 ? (
+-            <div className="p-8 text-center text-sm text-slate-500">
+-              No hay pacientes esperando en la sala virtual en este momento.
+-            </div>
+-          ) : (
+-            waitingPatients.map((apt) => (
+-              <div key={apt.id} className="p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 hover:bg-slate-50 transition-colors">
+-                <div className="space-y-1">
+-                  <div className="flex items-center space-x-3">
+-                    <span className="font-bold text-slate-900 text-base">{apt.patientName}</span>
+-                    <span className="badge badge-success">En sala de espera</span>
+-                    <span className="text-xs font-mono text-slate-500">Cédula: {apt.patientIdCard}</span>
+-                  </div>
+-                  <div className="text-sm text-slate-600">
+-                    <span className="font-medium text-slate-700">Motivo:</span> {apt.reason}
+-                  </div>
+-                  <div className="text-xs text-slate-500 flex items-center space-x-4">
+-                    <span>Cobertura: <strong className="text-teal-700 font-semibold">{apt.coverageStatus}</strong></span>
+-                    <span>Hora agendada: {new Date(apt.scheduledAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+-                  </div>
+-                </div>
+-
+-                <div className="flex items-center space-x-3 w-full md:w-auto">
+-                  <Link
+-                    href={`/consulta/${apt.id}`}
+-                    className="inline-flex items-center justify-center px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-lg shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 w-full md:w-auto"
+-                  >
+-                    Iniciar Teleconsulta &rarr;
+-                  </Link>
+-                </div>
+-              </div>
+-            ))
+-          )}
+-        </div>
+-      </div>
+-    </div>
+-  );
+-}
+-
++import AdmissionConsole from "@/components/admission-console";
++export default function Page(){return <AdmissionConsole view="queue"/>;}
+diff --git a/portalweb/src/src/components/admission-console.tsx b/portalweb/src/src/components/admission-console.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/components/admission-console.tsx
+@@ -0,0 +1,129 @@
++"use client";
++import {useCallback,useEffect,useState} from "react";
++import {useRouter} from "next/navigation";
++import {api,ApiError,Item,localTime} from "@/lib/milestone-api";
++
++export default function AdmissionConsole({view="queue"}:{view?:"queue"|"audit"|"schedule"}) {
++  const router=useRouter();
++  const [user,setUser]=useState<{email:string;role:string}|null>(null);
++  const [items,setItems]=useState<Item[]>([]),[busy,setBusy]=useState(true),[error,setError]=useState("");
++  const [selected,setSelected]=useState<Item|null>(null),[evidence,setEvidence]=useState(""),[until,setUntil]=useState("");
++  const [services,setServices]=useState<Item[]>([]),[practitioners,setPractitioners]=useState<Item[]>([]);
++  const [service,setService]=useState(""),[practitioner,setPractitioner]=useState(""),[start,setStart]=useState("");
++  const [slots,setSlots]=useState<Item[]>([]);
++
++  const load=useCallback(async()=>{
++    const me=await api<{email:string;role:string}>("/auth/me");
++    if(me.role!=="Admission") throw new ApiError(403,"Se requiere el rol de admisión.");
++    setUser(me);
++    if(view==="audit") setItems(await api<Item[]>("/admin/audit-events"));
++    else if(view==="queue") setItems(await api<Item[]>("/admin/work-queue"));
++    else {
++      const [s,p]=await Promise.all([api<Item[]>("/services"),api<Item[]>("/practitioners")]);
++      setServices(s); setPractitioners(p);
++      setService(current=>current||String(s[0]?.id??""));
++      setPractitioner(current=>current||String(p[0]?.id??""));
++    }
++  },[view]);
++  const failure=useCallback((e:unknown)=>{
++    if(e instanceof ApiError && (e.status===401 || e.status===403)) {
++      setUser(null); setItems([]); router.replace("/login");
++    } else setError(e instanceof Error?e.message:"Error de conexión");
++  },[router]);
++  useEffect(()=>{
++    let mounted=true;
++    load().catch(e=>{if(mounted) failure(e);}).finally(()=>{if(mounted) setBusy(false);});
++    return ()=>{mounted=false;};
++  },[load,failure]);
++  async function run(action:()=>Promise<void>) {
++    if(busy) return;
++    setBusy(true); setError("");
++    try {await action();}
++    catch(e) {failure(e);}
++    finally {setBusy(false);}
++  }
++  if(!user) return <p role="status">{busy?"Verificando sesión…":error||"Se requiere iniciar sesión."}</p>;
++  return <section className="space-y-5">
++    <div className="flex flex-wrap justify-between gap-3">
++      <h1 className="text-2xl font-bold">{view==="queue"?"Admisión y cobertura":view==="audit"?"Auditoría":"Horarios"}</h1>
++      <div>{user.email} · Admisión <button className="ml-4 underline" disabled={busy}
++        onClick={()=>run(async()=>{await api("/auth/logout","POST",{});setUser(null);router.replace("/login");})}>Salir</button></div>
++    </div>
++    <p>Datos sintéticos · Estados persistentes · Zona horaria: America/Santo_Domingo</p>
++    <p role="alert" className="text-red-700">{error}</p>
++    <button disabled={busy} className="rounded border p-2" onClick={()=>run(load)}>
++      {busy?"Procesando…":"Actualizar"}</button>
++
++    {view==="queue" && <>
++      {items.length===0 && <p>No hay citas registradas.</p>}
++      <div className="overflow-x-auto"><table className="w-full text-left">
++        <thead><tr>{["Paciente","Servicio / profesional","Fecha","Cita","Cobertura","Acción"].map(t=><th key={t} className="p-2">{t}</th>)}</tr></thead>
++        <tbody>{items.map(a=><tr key={String(a.id)} className="border-t">
++          <td className="p-2">{String(a.patientEmail)}</td><td>{String(a.serviceName)} / {String(a.practitionerName)}</td>
++          <td>{localTime(a.startAt)}</td><td>{String(a.status)}</td><td>{String(a.coverageStatus)}</td>
++          <td><button className="underline" disabled={busy || !["PendingValidation","Confirmed"].includes(String(a.status))}
++            onClick={()=>{setSelected(a);setEvidence("");setUntil("");}}>Revisar</button></td>
++        </tr>)}</tbody>
++      </table></div>
++      {selected && <form className="space-y-3 rounded-xl border bg-white p-5" onSubmit={e=>e.preventDefault()}>
++        <h2 className="font-bold">Revisión manual · {String(selected.patientEmail)}</h2>
++        <p>Aseguradora: {String(selected.insurer)} · Afiliación: ****{String(selected.memberLast4)}</p>
++        <label className="block">Referencia de evidencia (sin texto clínico)
++          <input className="block w-full rounded border p-2" required maxLength={250} value={evidence}
++            onChange={e=>setEvidence(e.target.value)}/></label>
++        <label className="block">Vigencia hasta (hora de Santo Domingo)
++          <input className="block rounded border p-2" type="datetime-local" value={until}
++            onChange={e=>setUntil(e.target.value)}/></label>
++        <p>Una aprobación requiere evidencia y vigencia que cubra la cita. Una denegación no autoriza atención particular.</p>
++        <div className="flex flex-wrap gap-3">{[
++          ["ManualReview","Mantener en revisión"],["Approved","Aprobar cobertura y confirmar"],["Denied","Denegar cobertura"]
++        ].map(([status,label])=><button key={status} disabled={busy||!evidence.trim()||(status==="Approved"&&!until)}
++          className="rounded bg-teal-700 p-2 text-white disabled:opacity-50"
++          onClick={()=>run(async()=>{
++            await api("/admin/appointments/"+selected.id+"/validation","PATCH",{
++              status,evidence,version:selected.version,validUntil:until?new Date(until+"-04:00").toISOString():null
++            });
++            setSelected(null); await load();
++          })}>{label}</button>)}</div>
++        <button onClick={()=>setSelected(null)} className="underline">Cerrar</button>
++      </form>}
++    </>}
++
++    {view==="audit" && <>
++      <p>Primeros 100 eventos. No se muestran contraseñas, tokens ni contenido clínico.</p>
++      <ol className="space-y-2">{items.map(a=><li key={String(a.id)} className="rounded border bg-white p-3">
++        {localTime(a.occurredAt)} · {String(a.action)} · Actor {String(a.actorId)} · Recurso {String(a.resourceId)}
++      </li>)}</ol>
++      {items.length>0 && <button disabled={busy} className="underline" onClick={()=>run(async()=>{
++        const next=await api<Item[]>("/admin/audit-events?after="+items[items.length-1].sequence);
++        setItems(next);
++      })}>Siguiente página</button>}
++    </>}
++
++    {view==="schedule" && <div className="space-y-3 rounded-xl border bg-white p-5">
++      <label className="block">Servicio<select className="ml-2 rounded border p-2" value={service}
++        onChange={e=>{setService(e.target.value);setSlots([]);}}>
++        {services.map(s=><option key={String(s.id)} value={String(s.id)}>{String(s.name)}</option>)}</select></label>
++      <label className="block">Profesional<select className="ml-2 rounded border p-2" value={practitioner}
++        onChange={e=>{setPractitioner(e.target.value);setSlots([]);}}>
++        {practitioners.map(p=><option key={String(p.id)} value={String(p.id)}>{String(p.name)}</option>)}</select></label>
++      <label className="block">Inicio (hora de Santo Domingo)<input className="ml-2 rounded border p-2"
++        type="datetime-local" value={start} onChange={e=>setStart(e.target.value)}/></label>
++      <button disabled={busy||!start||!service||!practitioner} className="rounded border p-2"
++        onClick={()=>run(async()=>{
++          await api("/admin/slots","POST",{serviceId:service,practitionerId:practitioner,
++            startAt:new Date(start+"-04:00").toISOString()}); setStart("");setError("Horario creado.");
++        })}>Crear horario</button>
++      <button disabled={busy||!service||!practitioner} className="ml-2 rounded border p-2"
++        onClick={()=>run(async()=>setSlots(await api<Item[]>(
++          "/availability?serviceId="+service+"&practitionerId="+practitioner)))}>Consultar horarios libres</button>
++      {slots.map(s=><div key={String(s.id)} className="flex justify-between rounded border p-2">
++        {localTime(s.startAt)}
++        <button disabled={busy} className="underline" onClick={()=>run(async()=>{
++          await api("/admin/slots/"+s.id+"/block","PATCH",{blocked:true});
++          setSlots(current=>current.filter(slot=>slot.id!==s.id));
++        })}>Bloquear</button>
++      </div>)}
++    </div>}
++  </section>;
++}
+diff --git a/portalweb/src/src/lib/milestone-api.ts b/portalweb/src/src/lib/milestone-api.ts
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/lib/milestone-api.ts
+@@ -0,0 +1,30 @@
++export type Item = Record<string, unknown>;
++export class ApiError extends Error {
++  constructor(public status: number, message: string) { super(message); }
++}
++let refreshing: Promise<unknown> | null = null;
++export async function api<T>(path: string, method = "GET", body?: unknown, retry = true): Promise<T> {
++  let response: Response;
++  try {
++    response = await fetch("/api/backend" + path, {
++      method, credentials: "same-origin", cache: "no-store", signal: AbortSignal.timeout(15000),
++      headers: {"Content-Type":"application/json","X-Telemedicina-Client":"milestone","X-Session-Mode":"cookie"},
++      body: body === undefined ? undefined : JSON.stringify(body),
++    });
++  } catch { throw new ApiError(503,"No se pudo conectar con la API."); }
++  if (response.status === 401 && retry && !path.startsWith("/auth/")) {
++    refreshing ??= api("/auth/refresh","POST",{},false).finally(() => {refreshing=null;});
++    await refreshing;
++    return api<T>(path,method,body,false);
++  }
++  let parsed: {data?: T; title?: string; detail?: string};
++  try { parsed=await response.json(); }
++  catch { throw new ApiError(response.status,"Respuesta del servidor no válida."); }
++  if (!response.ok) throw new ApiError(response.status,parsed.title ?? parsed.detail ?? "Solicitud rechazada.");
++  return parsed.data as T;
++}
++export function localTime(value: unknown) {
++  return new Intl.DateTimeFormat("es-DO", {
++    timeZone:"America/Santo_Domingo",dateStyle:"short",timeStyle:"short"
++  }).format(new Date(String(value)));
++}

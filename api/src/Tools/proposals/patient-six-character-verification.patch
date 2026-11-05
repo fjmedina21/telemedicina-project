@@ -1,0 +1,518 @@
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Authentication/Security.cs b/api/src/Telemedicina.Api/Infrastructure/Authentication/Security.cs
+--- a/api/src/Telemedicina.Api/Infrastructure/Authentication/Security.cs
++++ b/api/src/Telemedicina.Api/Infrastructure/Authentication/Security.cs
+@@ -10,6 +10,14 @@
+     public const string Scheme = "MilestoneSession";
+     public static long Now => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+     public static string NewToken() => Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
++    public static string NewVerificationCode()
++    {
++        const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
++        return new string(Enumerable.Range(0, 6)
++            .Select(_ => alphabet[RandomNumberGenerator.GetInt32(alphabet.Length)]).ToArray());
++    }
++    public static string VerificationHash(string user, long expires, string code) =>
++        Hash($"verify:{user}:{expires.ToString(System.Globalization.CultureInfo.InvariantCulture)}:{code.Trim().ToUpperInvariant()}");
+     public static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+     public static string Password(string value) => new PasswordHasher<string>().HashPassword("account", value);
+     public static bool CheckPassword(string hash, string value) =>
+diff --git a/api/src/Telemedicina.Api/Features/Identity/IdentityContracts.cs b/api/src/Telemedicina.Api/Features/Identity/IdentityContracts.cs
+--- a/api/src/Telemedicina.Api/Features/Identity/IdentityContracts.cs
++++ b/api/src/Telemedicina.Api/Features/Identity/IdentityContracts.cs
+@@ -9,7 +9,9 @@
+     [Required, EmailAddress, MaxLength(254)] string Email,
+     [Required, MaxLength(128)] string Password,
+     [MaxLength(6)] string? Otp = null);
+-public sealed record TokenRequest([Required, MaxLength(128)] string Token);
++public sealed record VerificationRequest(
++    [Required, EmailAddress, MaxLength(254)] string Email,
++    [Required, RegularExpression("^[A-Za-z0-9]{6}$")] string Token);
+ public sealed record RefreshRequest([MaxLength(128)] string? RefreshToken = null);
+ public sealed record ForgotRequest([Required, EmailAddress, MaxLength(254)] string Email);
+ public sealed record ResetRequest(
+diff --git a/api/src/Telemedicina.Api/Features/Identity/AuthController.cs b/api/src/Telemedicina.Api/Features/Identity/AuthController.cs
+--- a/api/src/Telemedicina.Api/Features/Identity/AuthController.cs
++++ b/api/src/Telemedicina.Api/Features/Identity/AuthController.cs
+@@ -1,4 +1,5 @@
+ using System.Text.Json;
++using Telemedicina.Common.Models.ApiResponses;
+ using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Mvc;
+ using Telemedicina.Api.Infrastructure.Persistence;
+@@ -17,13 +18,8 @@
+ [ApiController, Route("api/v1/auth"), EnableRateLimiting("auth")]
+ public sealed class AuthController(Database database, IConfiguration configuration, NotificationService notifications, MailSettings mail) : ApiControllerBase(database)
+ {
+-    private IActionResult Failure(int status, string code) => StatusCode(status, new
+-    {
+-        status,
+-        title = "No se pudo completar la operación",
+-        code,
+-        traceId = HttpContext.TraceIdentifier
+-    });
++    private IActionResult Failure(int status, string code) =>
++        Fail(status, code, "No se pudo completar la operación");
+     private static readonly string DummyHash = Password(NewToken());
+ 
+     [HttpPost("register")]
+@@ -40,18 +36,19 @@
+             Challenge(c, t, id, "verify"); Record(c, t, id, "account.registered", id, HttpContext.TraceIdentifier);
+         }
+         t.Commit();
+-        return Accepted(new { success = true, status = 202, detail = "Si corresponde, revise el mensaje de verificación." });
++        return Accepted(new ApiResponse<object?>(StatusCodes.Status202Accepted, "Si corresponde, revise el mensaje de verificación.", null));
+     }
+     private void Challenge(NpgsqlConnection c, NpgsqlTransaction t, string user, string purpose)
+     {
+-        var token = NewToken(); var expires = Now + 900;
++        var token = purpose == "verify" ? NewVerificationCode() : NewToken(); var expires = Now + 900;
++        var hash = purpose == "verify" ? VerificationHash(user, expires, token) : Hash(token);
+         Execute(c, t, "UPDATE challenges SET used=true WHERE user_id=@u AND purpose=@p",
+             ("u", user), ("p", purpose));
+         Execute(c, t, "INSERT INTO challenges(token_hash,user_id,purpose,expires) VALUES(@h,@u,@p,@e)",
+-            ("h", Hash(token)), ("u", user), ("p", purpose), ("e", expires));
++            ("h", hash), ("u", user), ("p", purpose), ("e", expires));
+         Execute(c, t, "UPDATE email_outbox SET state='Superseded',payload_cipher='' WHERE user_id=@u AND kind=@kind AND state='Queued'",
+             ("u", user), ("kind", "auth:" + purpose));
+-        notifications.Queue(c, t, user, "auth:" + purpose, "auth:" + Hash(token),
++        notifications.Queue(c, t, user, "auth:" + purpose, "auth:" + hash,
+             purpose == "verify" ? "Verifica tu cuenta" : "Recuperación de acceso",
+             "Tu código de " + (purpose == "verify" ? "verificación" : "recuperación") + " es: " + token +
+             "\nCaduca en 15 minutos. Si no lo solicitaste, puedes ignorar este mensaje.",
+@@ -74,17 +71,36 @@
+             if (!recent) Challenge(c, t, user, "verify");
+         }
+         t.Commit();
+-        return Accepted(new { success = true, status = 202, detail = "Si corresponde, revisa tu correo." });
++        return Accepted(new ApiResponse<object?>(StatusCodes.Status202Accepted, "Si corresponde, revisa tu correo.", null));
+     }
+     [HttpPost("verify")]
+-    public IActionResult Verify(TokenRequest request)
+-    {
+-        using var c = Database.Open(); using var t = c.BeginTransaction();
++    public IActionResult Verify(VerificationRequest request)
++    {
++        using var c = Database.Open(); using var t = c.BeginTransaction();
++        // Serialize verification and resend per account; attempts survive process restarts.
+         var user = Scalar(c, t, """
+-            UPDATE challenges SET used=true WHERE token_hash=@h AND purpose='verify'
+-            AND NOT used AND expires>@now RETURNING user_id
+-            """, ("h", Hash(request.Token)), ("now", Now)) as string;
++            SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND NOT verified FOR UPDATE
++            """, ("e", request.Email.Trim())) as string;
+         if (user is null) return Failure(400, "INVALID_CHALLENGE");
++        var challenge = Rows(c, t, """
++            SELECT token_hash,expires,attempts FROM challenges
++            WHERE user_id=@u AND purpose='verify' AND NOT used AND expires>@now
++            ORDER BY expires DESC LIMIT 1 FOR UPDATE
++            """, ("u", user), ("now", Now)).FirstOrDefault();
++        if (challenge is null) return Failure(400, "INVALID_CHALLENGE");
++        var stored = (string)challenge["token_hash"]!;
++        var supplied = VerificationHash(user, (long)challenge["expires"]!, request.Token);
++        var matches = System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
++            System.Text.Encoding.ASCII.GetBytes(stored), System.Text.Encoding.ASCII.GetBytes(supplied));
++        if ((int)challenge["attempts"]! >= 5 || !matches)
++        {
++            Execute(c, t, """
++                UPDATE challenges SET attempts=attempts+1,used=(attempts+1>=5) WHERE token_hash=@h
++                """, ("h", stored));
++            t.Commit();
++            return Failure(400, "INVALID_CHALLENGE");
++        }
++        Execute(c, t, "UPDATE challenges SET used=true WHERE token_hash=@h", ("h", stored));
+         Execute(c, t, "UPDATE users SET verified=true WHERE id=@u", ("u", user));
+         Execute(c, t, "DELETE FROM dev_mailbox WHERE user_id=@u AND purpose='verify'", ("u", user));
+         Record(c, t, user, "account.verified", user, HttpContext.TraceIdentifier); t.Commit();
+@@ -104,7 +120,7 @@
+             if (!recent) Challenge(c, t, user, "reset");
+         }
+         t.Commit();
+-        return Accepted(new { success = true, status = 202, detail = "Si corresponde, revise el mensaje de recuperación." });
++        return Accepted(new ApiResponse<object?>(StatusCodes.Status202Accepted, "Si corresponde, revise el mensaje de recuperación.", null));
+     }
+     [HttpPost("password/reset")]
+     public IActionResult Reset(ResetRequest request)
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/004_verification_codes.sql b/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/004_verification_codes.sql
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/004_verification_codes.sql
+@@ -0,0 +1,13 @@
++SET LOCAL search_path TO telemedicina_m1, public;
++DO $migration$
++BEGIN
++IF NOT EXISTS(SELECT 1 FROM schema_versions WHERE version=4) THEN
++    ALTER TABLE challenges ADD COLUMN attempts integer NOT NULL DEFAULT 0 CHECK(attempts>=0);
++    -- Old long verification tokens must be resent using the new six-character format.
++    UPDATE challenges SET used=true WHERE purpose='verify' AND NOT used;
++    DELETE FROM dev_mailbox WHERE purpose='verify';
++    UPDATE email_outbox SET state='Superseded',payload_cipher=''
++        WHERE kind='auth:verify' AND state='Queued';
++    INSERT INTO schema_versions(version) VALUES(4);
++END IF;
++END $migration$;
+diff --git a/app/src/lib/features/auth/data/auth_repository.dart b/app/src/lib/features/auth/data/auth_repository.dart
+--- a/app/src/lib/features/auth/data/auth_repository.dart
++++ b/app/src/lib/features/auth/data/auth_repository.dart
+@@ -14,8 +14,10 @@
+     );
+   }
+ 
+-  Future<void> verify(String token) async {
+-    await api.request('POST', '/auth/verify', body: {'token': token});
++  Future<void> verify(String email, String token) async {
++    await api.request('POST', '/auth/verify', body: {
++      'email': email, 'token': token.trim().toUpperCase(),
++    });
+   }
+ 
+   Future<void> resend(String email) async {
+diff --git a/app/src/lib/features/auth/presentation/auth_form.dart b/app/src/lib/features/auth/presentation/auth_form.dart
+--- a/app/src/lib/features/auth/presentation/auth_form.dart
++++ b/app/src/lib/features/auth/presentation/auth_form.dart
+@@ -45,7 +45,12 @@
+         widget.onMessage('Revisa tu correo para verificar la cuenta.');
+       }
+     } else if (mode == 'verify') {
+-      await widget.auth.verify(token.text.trim());
++      final code = token.text.trim().toUpperCase();
++      if (!RegExp(r'^[A-Z0-9]{6}$').hasMatch(code)) {
++        widget.onMessage('Introduce el código de 6 letras o números recibido por correo.');
++        return;
++      }
++      await widget.auth.verify(email.text.trim(), code);
+       token.clear();
+       if (mounted) {
+         setState(() => mode = 'login');
+@@ -95,7 +100,9 @@
+       if (['verify', 'reset'].contains(mode))
+         LabeledTextField(
+           controller: token,
+-          label: 'Código recibido por correo',
++          label: mode == 'verify'
++              ? 'Código de verificación (6 letras o números)'
++              : 'Código recibido por correo',
+           enabled: !widget.busy,
+         ),
+       if (mode == 'verify')
+diff --git a/api/src/Telemedicina.Tests/Contracts/Program.cs b/api/src/Telemedicina.Tests/Contracts/Program.cs
+--- a/api/src/Telemedicina.Tests/Contracts/Program.cs
++++ b/api/src/Telemedicina.Tests/Contracts/Program.cs
+@@ -1,6 +1,7 @@
+ using Microsoft.AspNetCore.Builder;
+ using Microsoft.Extensions.Configuration;
+ using Telemedicina.Api.Infrastructure.Email;
++using static Telemedicina.Api.Infrastructure.Authentication.Security;
+ using System;
+ using System.Collections.Generic;
+ using Telemedicina.Common.Contracts.Health;
+@@ -98,6 +99,43 @@
+             Assert(health.TimestampUtc == now, "TimestampUtc must match");
+         });
+ 
++        Test("ErrorApiResponse_SerializedContract_PreservesClientFields", () =>
++        {
++            var response = new ErrorApiResponse(400, "Solicitud inválida", "/api/v1/auth/verify")
++            {
++                Code = "INVALID_CHALLENGE", TraceId = "synthetic-trace"
++            };
++            var json = System.Text.Json.JsonSerializer.Serialize(response,
++                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
++            using var parsed = System.Text.Json.JsonDocument.Parse(json);
++            var root = parsed.RootElement;
++            Assert(!root.GetProperty("success").GetBoolean(), "Errors must set success=false.");
++            Assert(root.GetProperty("status").GetInt32() == 400, "Body and HTTP status must match.");
++            Assert(root.GetProperty("code").GetString() == "INVALID_CHALLENGE", "Application codes must remain stable.");
++            Assert(root.GetProperty("traceId").GetString() == "synthetic-trace", "Trace metadata must remain available.");
++            Assert(root.GetProperty("errors").GetArrayLength() == 0, "No submitted secrets may be echoed.");
++        });
++
++        Test("VerificationCode_SixAsciiAlphanumericCharacters", () =>
++        {
++            for (var i = 0; i < 1000; i++)
++            {
++                var code = NewVerificationCode();
++                Assert(code.Length == 6 && System.Text.RegularExpressions.Regex.IsMatch(code, "^[A-Z0-9]{6}$"),
++                    "Registration verification must contain exactly six ASCII letters or digits.");
++            }
++            Assert(NewToken().Length == 64, "Session and password-reset tokens must retain their length.");
++        });
++        Test("VerificationHash_ScopedAndCaseInsensitive", () =>
++        {
++            Assert(VerificationHash("one", 123, "Ab12Cd") == VerificationHash("one", 123, "AB12CD"),
++                "Code matching must accept lowercase.");
++            Assert(VerificationHash("one", 123, "AB12CD") != VerificationHash("two", 123, "AB12CD"),
++                "The same code must not cross account boundaries.");
++            Assert(VerificationHash("one", 123, "AB12CD") != VerificationHash("one", 124, "AB12CD"),
++                "Different challenges must have separate hashes.");
++        });
++
+         foreach (var (environment, configured, expected) in new[]
+         {
+             ("Development", (string?)null, true),
+diff --git a/api/src/Telemedicina.Tests/Integration/milestone_e2e.py b/api/src/Telemedicina.Tests/Integration/milestone_e2e.py
+--- a/api/src/Telemedicina.Tests/Integration/milestone_e2e.py
++++ b/api/src/Telemedicina.Tests/Integration/milestone_e2e.py
+@@ -20,7 +20,7 @@
+ BASE = os.environ.get("MILESTONE_TEST_URL", "http://127.0.0.1:5000/api/v1")
+ ALLOWED = {"localhost", "127.0.0.1", "::1"}
+ 
+-def request(path, method="GET", body=None, token=None, extra=None):
++def request(path, method="GET", body=None, token=None, extra=None, raw=False):
+     headers = {"Content-Type": "application/json", "X-Telemedicina-Client": "milestone"}
+     if token:
+         headers["Authorization"] = "Bearer " + token
+@@ -29,10 +29,11 @@
+     req = urllib.request.Request(BASE + path, data=payload, headers=headers, method=method)
+     try:
+         with urllib.request.urlopen(req, timeout=20) as response:
+-            return response.status, json.load(response).get("data")
++            parsed = json.load(response)
++            return response.status, parsed if raw else parsed.get("data")
+     except urllib.error.HTTPError as error:
+         # Do not print bodies: credentials and patient data never belong in test output.
+-        return error.code, None
++        return error.code, json.load(error) if raw else None
+ 
+ def otp(secret):
+     key = base64.b32decode(secret.upper() + "=" * ((8 - len(secret) % 8) % 8))
+@@ -43,6 +44,48 @@
+ @unittest.skipUnless(os.environ.get("MILESTONE_TEST_SYNTHETIC") == "1",
+     "Requires explicit synthetic test environment")
+ class MilestoneE2E(unittest.TestCase):
++    def test_auth_response_models(self):
++        email = "synthetic-contract-" + uuid.uuid4().hex + "@example.invalid"
++        status, body = request("/auth/register", "POST", {"email": email, "password": uuid.uuid4().hex}, raw=True)
++        self.assertEqual(status, 202)
++        self.assertTrue(body["success"])
++        self.assertEqual(body["status"], status)
++        for payload, expected_code in [
++            ({"email": email, "token": "!"}, "VALIDATION_FAILED"),
++            ({"email": "unknown@example.invalid", "token": "ABC123"}, "INVALID_CHALLENGE")
++        ]:
++            status, body = request("/auth/verify", "POST", payload, raw=True)
++            self.assertEqual(status, 400)
++            self.assertFalse(body["success"])
++            self.assertEqual(body["status"], status)
++            self.assertEqual(body["code"], expected_code)
++            self.assertTrue(body["traceId"])
++            self.assertEqual(body["instance"], "/api/v1/auth/verify")
++            self.assertIn("errors", body)
++
++    def test_registration_code_scope_attempt_limit_and_single_use(self):
++        mailbox = os.environ["Milestone__MailboxKey"]
++        accounts = []
++        for _ in range(2):
++            email = "synthetic-code-" + uuid.uuid4().hex + "@example.invalid"
++            self.assertEqual(request("/auth/register", "POST", {"email": email, "password": uuid.uuid4().hex})[0], 202)
++            _, challenge = request("/auth/dev-mailbox?" + urllib.parse.urlencode({"email": email, "purpose": "verify"}),
++                extra={"X-Dev-Mailbox-Key": mailbox})
++            code = challenge["token"]
++            self.assertRegex(code, r"^[A-Z0-9]{6}$")
++            accounts.append((email, code))
++        email, code = accounts[0]
++        # A distinct account cannot consume this account's challenge.
++        other_email, other_code = accounts[1]
++        if code != other_code:
++            self.assertEqual(request("/auth/verify", "POST", {"email": other_email, "token": code})[0], 400)
++        self.assertEqual(request("/auth/verify", "POST", {"email": email.upper(), "token": code.lower()})[0], 200)
++        self.assertEqual(request("/auth/verify", "POST", {"email": email, "token": code})[0], 400)
++        wrong = ("A" if other_code[0] != "A" else "B") + other_code[1:]
++        for _ in range(5):
++            self.assertEqual(request("/auth/verify", "POST", {"email": other_email, "token": wrong})[0], 400)
++        self.assertEqual(request("/auth/verify", "POST", {"email": other_email, "token": other_code})[0], 400)
++
+     @classmethod
+     def setUpClass(cls):
+         if urllib.parse.urlparse(BASE).hostname not in ALLOWED:
+@@ -57,7 +100,7 @@
+             query = urllib.parse.urlencode({"email": email, "purpose": "verify"})
+             status, challenge = request("/auth/dev-mailbox?" + query, extra={"X-Dev-Mailbox-Key": mailbox})
+             assert status == 200
+-            assert request("/auth/verify", "POST", {"token": challenge["token"]})[0] == 200
++            assert request("/auth/verify", "POST", {"email": email, "token": challenge["token"]})[0] == 200
+             status, session = request("/auth/login", "POST", {"email": email, "password": password})
+             assert status == 200
+             profile = {"firstName": "Paciente", "lastName": "Sintético", "birthDate": "1990-01-01",
+diff --git a/api/src/Telemedicina.Tests/Integration/milestone_restart.py b/api/src/Telemedicina.Tests/Integration/milestone_restart.py
+--- a/api/src/Telemedicina.Tests/Integration/milestone_restart.py
++++ b/api/src/Telemedicina.Tests/Integration/milestone_restart.py
+@@ -68,7 +68,7 @@
+         assert call("/auth/register", "POST", {"email": email, "password": password})[0] == 202
+         _, challenge = call("/auth/dev-mailbox?" + urllib.parse.urlencode({"email": email, "purpose": "verify"}),
+             headers={"X-Dev-Mailbox-Key": os.environ["Milestone__MailboxKey"]})
+-        call("/auth/verify", "POST", {"token": challenge["token"]})
++        call("/auth/verify", "POST", {"email": email, "token": challenge["token"]})
+         _, session = call("/auth/login", "POST", {"email": email, "password": password})
+         token = session["accessToken"]
+         profile = {"firstName": "Paciente", "lastName": "Reinicio sintético", "birthDate": "1990-01-01",
+diff --git a/api/src/Telemedicina.Tests/Integration/smtp_fixture_test.py b/api/src/Telemedicina.Tests/Integration/smtp_fixture_test.py
+--- a/api/src/Telemedicina.Tests/Integration/smtp_fixture_test.py
++++ b/api/src/Telemedicina.Tests/Integration/smtp_fixture_test.py
+@@ -61,10 +61,10 @@
+         assert receiver.calls==2 and len(accepted)==1
+         message=BytesParser(policy=policy.default).parsebytes(accepted[0][1])
+         body=message.get_content()
+-        tokens=re.findall(r"\b[A-F0-9]{64}\b",body)
++        tokens=re.findall(r"es: ([A-Z0-9]{6})\b",body)
+         assert len(tokens)==1
+-        assert request("/auth/verify","POST",{"token":tokens[0]})[0]==200
+-        assert request("/auth/verify","POST",{"token":tokens[0]})[0]==400
++        assert request("/auth/verify","POST",{"email":email,"token":tokens[0]})[0]==200
++        assert request("/auth/verify","POST",{"email":email,"token":tokens[0]})[0]==400
+         # Duplicate registration keeps a generic response and does not enqueue another verification.
+         assert request("/auth/register","POST",{"email":email,"password":password})[0]==202
+         time.sleep(2)
+diff --git a/portalweb/src/tests/browser/first-milestone/flow.spec.ts b/portalweb/src/tests/browser/first-milestone/flow.spec.ts
+--- a/portalweb/src/tests/browser/first-milestone/flow.spec.ts
++++ b/portalweb/src/tests/browser/first-milestone/flow.spec.ts
+@@ -57,7 +57,7 @@
+     params:{email:patientEmail,purpose:"verify"},headers:{"X-Dev-Mailbox-Key":process.env.Milestone__MailboxKey!}});
+   expect(challenge.status()).toBe(200);
+   const token=(await challenge.json()).data.token;
+-  expect((await setup.post("/api/backend/auth/verify",{data:{token}})).status()).toBe(200);
++  expect((await setup.post("/api/backend/auth/verify",{data:{email:patientEmail,token}})).status()).toBe(200);
+   const login=await setup.post("/api/backend/auth/login",{data:{email:patientEmail,password}});
+   expect(login.status()).toBe(200);
+   const access=(await login.json()).data.accessToken;
+diff --git a/api/src/Telemedicina.Common/Models/ApiResponses/ErrorApiResponse.cs b/api/src/Telemedicina.Common/Models/ApiResponses/ErrorApiResponse.cs
+--- a/api/src/Telemedicina.Common/Models/ApiResponses/ErrorApiResponse.cs
++++ b/api/src/Telemedicina.Common/Models/ApiResponses/ErrorApiResponse.cs
+@@ -2,6 +2,9 @@
+ 
+ public class ErrorApiResponse : BaseApiResponse
+ {
++    // Stable application metadata, shared by controllers and framework errors.
++    public string? Code { get; init; }
++    public string? TraceId { get; init; }
+     public string Type { get; init; }
+     public string Title { get; init; }
+     public string Instance { get; init; }
+diff --git a/api/src/Telemedicina.Api/Shared/ApiErrors.cs b/api/src/Telemedicina.Api/Shared/ApiErrors.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Shared/ApiErrors.cs
+@@ -0,0 +1,13 @@
++using Telemedicina.Common.Models.ApiResponses;
++
++namespace Telemedicina.Api.Shared;
++
++public static class ApiErrors
++{
++    public static ErrorApiResponse Create(HttpContext context, int status, string code, string title) =>
++        new(status, title, context.Request.Path.Value ?? "/")
++        {
++            Code = code,
++            TraceId = context.TraceIdentifier
++        };
++}
+diff --git a/api/src/Telemedicina.Api/Shared/ApiControllerBase.cs b/api/src/Telemedicina.Api/Shared/ApiControllerBase.cs
+--- a/api/src/Telemedicina.Api/Shared/ApiControllerBase.cs
++++ b/api/src/Telemedicina.Api/Shared/ApiControllerBase.cs
+@@ -1,4 +1,5 @@
+ using System.Text.Json;
++using Telemedicina.Common.Models.ApiResponses;
+ using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Mvc;
+ using Telemedicina.Api.Infrastructure.Persistence;
+@@ -13,14 +14,10 @@
+ {
+     protected Database Database { get; } = database;
+     protected static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+-    protected IActionResult Data(object? data, int status = 200) => StatusCode(status, new { success = true, status, detail = "OK", data });
+-    protected IActionResult Fail(int status, string code, string message) => StatusCode(status, new
+-    {
+-        status,
+-        title = message,
+-        code,
+-        traceId = HttpContext.TraceIdentifier
+-    });
++    protected IActionResult Data(object? data, int status = 200) =>
++        StatusCode(status, new ApiResponse<object?>(status, "OK", data));
++    protected IActionResult Fail(int status, string code, string message) =>
++        StatusCode(status, ApiErrors.Create(HttpContext, status, code, message));
+     protected Npgsql.NpgsqlTransaction Begin(Npgsql.NpgsqlConnection c)
+     {
+         var t = c.BeginTransaction();
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Authentication/SessionHandler.cs b/api/src/Telemedicina.Api/Infrastructure/Authentication/SessionHandler.cs
+--- a/api/src/Telemedicina.Api/Infrastructure/Authentication/SessionHandler.cs
++++ b/api/src/Telemedicina.Api/Infrastructure/Authentication/SessionHandler.cs
+@@ -1,4 +1,5 @@
+ using System.Security.Claims;
++using Telemedicina.Api.Shared;
+ using System.Text.Encodings.Web;
+ using Microsoft.AspNetCore.Authentication;
+ using Microsoft.Extensions.Options;
+@@ -39,7 +40,7 @@
+     {
+         Response.StatusCode = status;
+         Response.ContentType = "application/problem+json";
+-        return Response.WriteAsJsonAsync(new { status, title = "Acceso no autorizado", code, traceId = Context.TraceIdentifier },
++        return Response.WriteAsJsonAsync(ApiErrors.Create(Context, status, code, "Acceso no autorizado"),
+             options: new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web),
+             contentType: "application/problem+json");
+     }
+diff --git a/api/src/Telemedicina.Api/Program.cs b/api/src/Telemedicina.Api/Program.cs
+--- a/api/src/Telemedicina.Api/Program.cs
++++ b/api/src/Telemedicina.Api/Program.cs
+@@ -1,4 +1,6 @@
+ using Microsoft.AspNetCore.Diagnostics;
++using Microsoft.AspNetCore.Mvc;
++using Telemedicina.Api.Shared;
+ using Telemedicina.Api.Configuration;
+ using Telemedicina.Api.Infrastructure.Persistence;
+ using Telemedicina.Api.Infrastructure.Persistence.Seeding;
+@@ -9,7 +11,12 @@
+ builder.AddTelemedicina();
+ 
+ // Add services to the container
+-builder.Services.AddControllers();
++builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
++{
++    options.InvalidModelStateResponseFactory = context =>
++        new BadRequestObjectResult(ApiErrors.Create(context.HttpContext, 400, "VALIDATION_FAILED",
++            "Los datos enviados no son válidos."));
++});
+ builder.Services.AddEndpointsApiExplorer();
+ builder.Services.AddOpenApi();
+ builder.Services.AddProblemDetails();
+@@ -93,15 +100,9 @@
+         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+         context.Response.ContentType = "application/problem+json";
+ 
+-        var exceptionHandlerPathFeature = context.Features.Get<IExceptionHandlerPathFeature>();
+-        var error = exceptionHandlerPathFeature?.Error;
+-
+-        var errorResponse = new ErrorApiResponse(
+-            status: StatusCodes.Status500InternalServerError,
+-            title: "An unexpected error occurred while processing the request.",
+-            instance: context.Request.Path,
+-            errors: null // Database/credentials must never appear in HTTP errors.
+-        );
++        // Never include exception messages, submitted values or credentials in HTTP errors.
++        var errorResponse = ApiErrors.Create(context, 500, "UNEXPECTED_ERROR",
++            "No se pudo completar la solicitud.");
+ 
+         await context.Response.WriteAsJsonAsync(errorResponse);
+     });
+@@ -112,6 +113,21 @@
+ // Liveness probe for infra / orchestrator
+ app.MapHealthChecks("/health");
+ 
++// Supply the shared error model for bodyless framework, rate-limit and gate rejections.
++app.UseStatusCodePages(async statusContext =>
++{
++    var context = statusContext.HttpContext;
++    if (!context.Request.Path.StartsWithSegments("/api/v1")) return;
++    var status = context.Response.StatusCode;
++    var code = status switch
++    {
++        400 => "VALIDATION_FAILED", 401 => "SESSION_REQUIRED", 403 => "ACCESS_DENIED",
++        404 => "NOT_FOUND", 405 => "METHOD_NOT_ALLOWED", 429 => "RATE_LIMITED", _ => "REQUEST_REJECTED"
++    };
++    await context.Response.WriteAsJsonAsync(
++        ApiErrors.Create(context, status, code, "No se pudo completar la solicitud."),
++        contentType: "application/problem+json");
++});
+ app.UseTelemedicina();
+ app.UseAuthorization();
+ app.MapControllers();

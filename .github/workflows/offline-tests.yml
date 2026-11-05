@@ -1,69 +1,84 @@
-name: Harness offline tests
-
+name: Telemedicina checks
 on:
   push:
   pull_request:
 
 jobs:
-  unit-tests:
+  harness:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run offline unit tests
-        run: PYTHONPATH=.ai/src python -m unittest discover -s .ai/tests -v
-      - name: Smoke test agent team (mock)
-        run: PYTHONPATH=.ai/src python -m teleharness team --provider mock --actor mobile --area frontend --module M04 --task "Smoke test de roles" --workspace .
+      - run: PYTHONPATH=.ai/src python -m unittest discover -s .ai/tests -v
+      - run: PYTHONPATH=.ai/src python -m teleharness team --provider mock --actor mobile --area frontend --module M04 --task "Smoke test de roles" --workspace .
 
   flutter:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/src
     steps:
       - uses: actions/checkout@v4
-      - name: Detect Flutter app
-        id: detect
-        run: |
-          if [ -f app/src/pubspec.yaml ]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Flutter aún sin scaffold: checks omitidos"
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          fi
       - uses: subosito/flutter-action@v2
-        if: steps.detect.outputs.ready == 'true'
         with:
           channel: stable
-      - name: Install dependencies
-        if: steps.detect.outputs.ready == 'true'
-        working-directory: app/src
-        run: flutter pub get
-      - name: Static analysis
-        if: steps.detect.outputs.ready == 'true'
-        working-directory: app/src
-        run: flutter analyze
-      - name: Widget and unit tests
-        if: steps.detect.outputs.ready == 'true'
-        working-directory: app/src
-        run: flutter test
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
 
-  backend:
+  milestone:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: telemedicina_test
+          POSTGRES_USER: synthetic_test
+          POSTGRES_PASSWORD: ephemeral_ci_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U synthetic_test -d telemedicina_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      ConnectionStrings__Telemedicina: Host=127.0.0.1;Port=5432;Database=telemedicina_test;Username=synthetic_test;Password=ephemeral_ci_only;SSL Mode=Disable
+      Mail__Mode: development
+      MILESTONE_TEST_SYNTHETIC: "1"
     steps:
       - uses: actions/checkout@v4
-      - name: Detect .NET project
-        id: detect
-        run: |
-          if find api/src -name '*.csproj' -print -quit | grep -q .; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo ".NET aún sin scaffold: checks omitidos"
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/setup-dotnet@v6
-        if: steps.detect.outputs.ready == 'true'
+      - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
-      - name: Restore and test
-        if: steps.detect.outputs.ready == 'true'
-        run: dotnet test api/src --configuration Release
+          dotnet-version: "10.0.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: portalweb/src/package-lock.json
+      - name: Build API and contract checks
+        run: dotnet build api/src/Telemedicina.sln --configuration Release
+      - name: Execute .NET contract assertions
+        run: dotnet run --no-build --configuration Release --project api/src/Telemedicina.Tests/Telemedicina.Tests.csproj
+      - name: Install portal dependencies
+        working-directory: portalweb/src
+        run: npm ci --ignore-scripts
+      - name: Build portal
+        working-directory: portalweb/src
+        run: npm run build
+      - name: Install Playwright Chromium
+        working-directory: portalweb/src
+        run: npx playwright install --with-deps chromium
+      - name: API, SMTP and browser integration
+        run: python3 api/src/Telemedicina.Tests/Tools/run_milestone_checks.py --configuration Release
+      - name: Upload safe browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: primer-hito-playwright
+          path: hitos/portalweb/primer-hito-portalweb/evidencias/
+          retention-days: 7

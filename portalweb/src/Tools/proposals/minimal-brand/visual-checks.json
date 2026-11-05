@@ -1,0 +1,10 @@
+{
+  "desktop": 1440,
+  "mobile": 390,
+  "queueSearch": true,
+  "queueFilter": true,
+  "portalHorizontalOverflow": false,
+  "syntheticDataOnly": true,
+  "appNavigation": true,
+  "appAppointmentState": true
+}

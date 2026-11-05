@@ -15,7 +15,6 @@ Permitir acceso seguro y diferenciado a la aplicación y al portal según identi
 Bienvenida/onboarding; registro; verificar contacto; iniciar sesión; recuperar contraseña; seguridad de cuenta; sesión expirada.
 
 ## Reglas y seguridad
-- Identidad fuerte del personal y MFA obligatoria para personal privilegiado (en MVP puede resolverse mediante proveedor externo).
 - El rol no llega confiable desde Flutter; permisos validados por API en cada lectura/escritura.
 - Tokens en almacenamiento seguro del SO, rotación de refresh tokens, revocación al cerrar sesión/cambiar credenciales.
 - Rate limiting y protección contra fuerza bruta; errores genéricos para evitar enumerar cuentas.

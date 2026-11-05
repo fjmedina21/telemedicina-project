@@ -1,0 +1,1570 @@
+diff --git a/.github/workflows/offline-tests.yml b/.github/workflows/offline-tests.yml
+--- a/.github/workflows/offline-tests.yml
++++ b/.github/workflows/offline-tests.yml
+@@ -1,69 +1,84 @@
+-name: Harness offline tests
+-
++name: Telemedicina checks
+ on:
+   push:
+   pull_request:
+ 
+ jobs:
+-  unit-tests:
++  harness:
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+       - uses: actions/setup-python@v5
+         with:
+           python-version: "3.11"
+-      - name: Run offline unit tests
+-        run: PYTHONPATH=.ai/src python -m unittest discover -s .ai/tests -v
+-      - name: Smoke test agent team (mock)
+-        run: PYTHONPATH=.ai/src python -m teleharness team --provider mock --actor mobile --area frontend --module M04 --task "Smoke test de roles" --workspace .
++      - run: PYTHONPATH=.ai/src python -m unittest discover -s .ai/tests -v
++      - run: PYTHONPATH=.ai/src python -m teleharness team --provider mock --actor mobile --area frontend --module M04 --task "Smoke test de roles" --workspace .
+ 
+   flutter:
+     runs-on: ubuntu-latest
++    defaults:
++      run:
++        working-directory: app/src
+     steps:
+       - uses: actions/checkout@v4
+-      - name: Detect Flutter app
+-        id: detect
+-        run: |
+-          if [ -f app/src/pubspec.yaml ]; then
+-            echo "ready=true" >> "$GITHUB_OUTPUT"
+-          else
+-            echo "Flutter aún sin scaffold: checks omitidos"
+-            echo "ready=false" >> "$GITHUB_OUTPUT"
+-          fi
+       - uses: subosito/flutter-action@v2
+-        if: steps.detect.outputs.ready == 'true'
+         with:
+           channel: stable
+-      - name: Install dependencies
+-        if: steps.detect.outputs.ready == 'true'
+-        working-directory: app/src
+-        run: flutter pub get
+-      - name: Static analysis
+-        if: steps.detect.outputs.ready == 'true'
+-        working-directory: app/src
+-        run: flutter analyze
+-      - name: Widget and unit tests
+-        if: steps.detect.outputs.ready == 'true'
+-        working-directory: app/src
+-        run: flutter test
++      - run: flutter pub get
++      - run: flutter analyze
++      - run: flutter test
+ 
+-  backend:
++  milestone:
+     runs-on: ubuntu-latest
++    timeout-minutes: 20
++    services:
++      postgres:
++        image: postgres:17
++        env:
++          POSTGRES_DB: telemedicina_test
++          POSTGRES_USER: synthetic_test
++          POSTGRES_PASSWORD: ephemeral_ci_only
++        ports:
++          - 5432:5432
++        options: >-
++          --health-cmd "pg_isready -U synthetic_test -d telemedicina_test"
++          --health-interval 5s --health-timeout 5s --health-retries 10
++    env:
++      ConnectionStrings__Telemedicina: Host=127.0.0.1;Port=5432;Database=telemedicina_test;Username=synthetic_test;Password=ephemeral_ci_only;SSL Mode=Disable
++      Mail__Mode: development
++      MILESTONE_TEST_SYNTHETIC: "1"
+     steps:
+       - uses: actions/checkout@v4
+-      - name: Detect .NET project
+-        id: detect
+-        run: |
+-          if find api/src -name '*.csproj' -print -quit | grep -q .; then
+-            echo "ready=true" >> "$GITHUB_OUTPUT"
+-          else
+-            echo ".NET aún sin scaffold: checks omitidos"
+-            echo "ready=false" >> "$GITHUB_OUTPUT"
+-          fi
+-      - uses: actions/setup-dotnet@v6
+-        if: steps.detect.outputs.ready == 'true'
++      - uses: actions/setup-dotnet@v4
+         with:
+-          dotnet-version: '10.0.x'
+-      - name: Restore and test
+-        if: steps.detect.outputs.ready == 'true'
+-        run: dotnet test api/src --configuration Release
++          dotnet-version: "9.0.x"
++      - uses: actions/setup-python@v5
++        with:
++          python-version: "3.11"
++      - uses: actions/setup-node@v4
++        with:
++          node-version: "22"
++          cache: npm
++          cache-dependency-path: portalweb/src/package-lock.json
++      - name: Build API and contract checks
++        run: dotnet build api/src/Telemedicina.sln --configuration Release
++      - name: Execute .NET contract assertions
++        run: dotnet run --no-build --configuration Release --project api/src/Telemedicina.Tests/Telemedicina.Tests.csproj
++      - name: Install portal dependencies
++        working-directory: portalweb/src
++        run: npm ci --ignore-scripts
++      - name: Build portal
++        working-directory: portalweb/src
++        run: npm run build
++      - name: Install Playwright Chromium
++        working-directory: portalweb/src
++        run: npx playwright install --with-deps chromium
++      - name: API, SMTP and browser integration
++        run: python3 api/src/Telemedicina.Tests/run_milestone_checks.py --configuration Release
++      - name: Upload safe browser evidence
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: primer-hito-playwright
++          path: hitos/portalweb/primer-hito-portalweb/evidencias/
++          retention-days: 7
+diff --git a/api/src/Telemedicina.Api/Milestone/003_catalog_notifications.sql b/api/src/Telemedicina.Api/Milestone/003_catalog_notifications.sql
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/003_catalog_notifications.sql
+@@ -0,0 +1,43 @@
++SET LOCAL search_path TO telemedicina_m1, public;
++DO $migration$
++BEGIN
++IF NOT EXISTS(SELECT 1 FROM schema_versions WHERE version=3) THEN
++    ALTER TABLE services ADD COLUMN version integer NOT NULL DEFAULT 1;
++    ALTER TABLE services ADD COLUMN is_synthetic boolean NOT NULL DEFAULT false;
++    ALTER TABLE services ADD COLUMN approval_reference text;
++    UPDATE services SET is_synthetic=true
++        WHERE id='10000000-0000-4000-8000-000000000001';
++    -- Existing rows are preserved; new or edited publications require explicit evidence.
++    ALTER TABLE services ADD CONSTRAINT service_publication
++        CHECK(NOT active OR is_synthetic OR coalesce(length(trim(approval_reference)),0)>0) NOT VALID;
++    ALTER TABLE practitioners ADD COLUMN version integer NOT NULL DEFAULT 1;
++    ALTER TABLE practitioners ADD COLUMN license_ref text;
++    CREATE TABLE practitioner_services(
++        practitioner_id text NOT NULL REFERENCES practitioners(id),
++        service_id text NOT NULL REFERENCES services(id),
++        active boolean NOT NULL DEFAULT true,
++        PRIMARY KEY(practitioner_id,service_id));
++    INSERT INTO practitioner_services(practitioner_id,service_id)
++        SELECT DISTINCT practitioner_id,service_id FROM slots ON CONFLICT DO NOTHING;
++    CREATE TABLE notification_preferences(
++        user_id text PRIMARY KEY REFERENCES users(id),email_enabled boolean NOT NULL DEFAULT false,
++        version integer NOT NULL DEFAULT 1);
++    CREATE TABLE notifications(
++        id text PRIMARY KEY,user_id text NOT NULL REFERENCES users(id),event_key text NOT NULL UNIQUE,
++        kind text NOT NULL,body text NOT NULL,resource_id text,resource_version integer,
++        created_at timestamptz NOT NULL DEFAULT now(),read_at timestamptz);
++    CREATE INDEX notification_user ON notifications(user_id,created_at DESC);
++    CREATE TABLE email_outbox(
++        id text PRIMARY KEY,event_key text NOT NULL UNIQUE,
++        notification_id text REFERENCES notifications(id),user_id text NOT NULL REFERENCES users(id),
++        recipient text NOT NULL,kind text NOT NULL,resource_id text,resource_version integer,
++        subject text NOT NULL,payload_cipher text NOT NULL,channel text NOT NULL,
++        state text NOT NULL DEFAULT 'Queued' CHECK(state IN
++            ('Queued','Sending','Sent','Captured','Superseded','Expired','Failed','Unknown')),
++        attempts integer NOT NULL DEFAULT 0,available_at timestamptz NOT NULL DEFAULT now(),
++        expires_at timestamptz,lease_token text,locked_until timestamptz,sent_at timestamptz,
++        last_error_code text,created_at timestamptz NOT NULL DEFAULT now());
++    CREATE INDEX outbox_pending ON email_outbox(channel,available_at) WHERE state='Queued';
++    INSERT INTO schema_versions(version) VALUES(3);
++END IF;
++END $migration$;
+diff --git a/api/src/Telemedicina.Api/Milestone/AuthController.cs b/api/src/Telemedicina.Api/Milestone/AuthController.cs
+--- a/api/src/Telemedicina.Api/Milestone/AuthController.cs
++++ b/api/src/Telemedicina.Api/Milestone/AuthController.cs
+@@ -8,7 +8,7 @@
+ namespace Telemedicina.Api.Milestone;
+ 
+ [ApiController, Route("api/v1/auth"), EnableRateLimiting("auth")]
+-public sealed class AuthController(Database database, IConfiguration configuration) : ControllerBase
++public sealed class AuthController(Database database, IConfiguration configuration, Notifications notifications, MailSettings mail) : ControllerBase
+ {
+     private IActionResult OkData(object data) => Ok(new {success=true,status=200,detail="OK",data});
+     private IActionResult Failure(int status,string code) => StatusCode(status,new {
+@@ -37,10 +37,32 @@
+             ("u",user),("p",purpose));
+         Execute(c,t,"INSERT INTO challenges(token_hash,user_id,purpose,expires) VALUES(@h,@u,@p,@e)",
+             ("h",Hash(token)),("u",user),("p",purpose),("e",expires));
+-        Execute(c,t,"""
++        Execute(c,t,"UPDATE email_outbox SET state='Superseded',payload_cipher='' WHERE user_id=@u AND kind=@kind AND state='Queued'",
++            ("u",user),("kind","auth:"+purpose));
++        notifications.Queue(c,t,user,"auth:"+purpose,"auth:"+Hash(token),
++            purpose=="verify"?"Verifica tu cuenta":"Recuperación de acceso",
++            "Tu código de "+(purpose=="verify"?"verificación":"recuperación")+" es: "+token+
++            "\nCaduca en 15 minutos. Si no lo solicitaste, puedes ignorar este mensaje.",
++            expires:DateTime.UtcNow.AddMinutes(15));
++        if(mail.Mode=="development") Execute(c,t,"""
+             INSERT INTO dev_mailbox(user_id,purpose,token,expires) VALUES(@u,@p,@token,@e)
+             ON CONFLICT(user_id,purpose) DO UPDATE SET token=excluded.token,expires=excluded.expires
+             """,("u",user),("p",purpose),("token",token),("e",expires));
++    }
++    [HttpPost("verification/resend")]
++    public IActionResult Resend(ForgotRequest request)
++    {
++        using var c=database.Open();using var t=c.BeginTransaction();
++        var user=Scalar(c,t,"SELECT id FROM users WHERE lower(email)=lower(@e) AND active AND NOT verified FOR UPDATE",
++            ("e",request.Email.Trim())) as string;
++        if(user is not null)
++        {
++            var recent=Convert.ToInt64(Scalar(c,t,"SELECT count(*) FROM challenges WHERE user_id=@u AND purpose='verify' AND expires>@recent",
++                ("u",user),("recent",Now+840)))>0;
++            if(!recent) Challenge(c,t,user,"verify");
++        }
++        t.Commit();
++        return Accepted(new {success=true,status=202,detail="Si corresponde, revisa tu correo."});
+     }
+     [HttpPost("verify")]
+     public IActionResult Verify(TokenRequest request)
+@@ -62,7 +84,13 @@
+         using var c=database.Open(); using var t=c.BeginTransaction();
+         var user=Scalar(c,t,"SELECT id FROM users WHERE lower(email)=lower(@e) AND active",
+             ("e",request.Email.Trim())) as string;
+-        if(user is not null) Challenge(c,t,user,"reset");
++        if(user is not null)
++        {
++            Execute(c,t,"SELECT pg_advisory_xact_lock(hashtextextended(@key,0))",("key","reset:"+user));
++            var recent=Convert.ToInt64(Scalar(c,t,"SELECT count(*) FROM challenges WHERE user_id=@u AND purpose='reset' AND expires>@recent",
++                ("u",user),("recent",Now+840)))>0;
++            if(!recent) Challenge(c,t,user,"reset");
++        }
+         t.Commit();
+         return Accepted(new {success=true,status=202,detail="Si corresponde, revise el mensaje de recuperación."});
+     }
+@@ -85,6 +113,7 @@
+     [HttpGet("dev-mailbox")]
+     public IActionResult Mailbox([FromQuery] string email,[FromQuery] string purpose)
+     {
++        if(mail.Mode!="development") return NotFound();
+         var expected=configuration["Milestone:MailboxKey"];
+         var supplied=Request.Headers["X-Dev-Mailbox-Key"].ToString();
+         if(string.IsNullOrEmpty(expected) || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+diff --git a/api/src/Telemedicina.Api/Milestone/Bootstrap.cs b/api/src/Telemedicina.Api/Milestone/Bootstrap.cs
+--- a/api/src/Telemedicina.Api/Milestone/Bootstrap.cs
++++ b/api/src/Telemedicina.Api/Milestone/Bootstrap.cs
+@@ -10,6 +10,10 @@
+     public static void AddMilestone(this WebApplicationBuilder builder)
+     {
+         builder.Services.AddSingleton<Database>();
++        builder.Services.AddSingleton<MailSettings>();
++        builder.Services.AddSingleton<MailTransport>();
++        builder.Services.AddSingleton<Notifications>();
++        builder.Services.AddHostedService<MailWorker>();
+         builder.Services.AddAuthentication(Security.Scheme)
+             .AddScheme<AuthenticationSchemeOptions,SessionHandler>(Security.Scheme,_=>{});
+         builder.Services.AddAuthorization();
+@@ -53,12 +57,14 @@
+         const string service="10000000-0000-4000-8000-000000000001";
+         const string practitioner="20000000-0000-4000-8000-000000000001";
+         Execute(c,t,"""
+-            INSERT INTO services(id,specialty,name,duration)
+-            VALUES(@id,'Demostración','Servicio sintético: no habilitado para atención clínica',30)
++            INSERT INTO services(id,specialty,name,duration,is_synthetic)
++            VALUES(@id,'Demostración','Servicio sintético: no habilitado para atención clínica',30,true)
+             ON CONFLICT DO NOTHING
+             """,("id",service));
+         Execute(c,t,"INSERT INTO practitioners(id,name) VALUES(@id,'Profesional de demostración') ON CONFLICT DO NOTHING",
+             ("id",practitioner));
++        Execute(c,t,"INSERT INTO practitioner_services(practitioner_id,service_id) VALUES(@p,@s) ON CONFLICT DO NOTHING",
++            ("p",practitioner),("s",service));
+         for(var day=1;day<=14;day++)
+         for(var hour=9;hour<=16;hour++) {
+             var date=DateTime.UtcNow.Date.AddDays(day);
+diff --git a/api/src/Telemedicina.Api/Milestone/CareController.cs b/api/src/Telemedicina.Api/Milestone/CareController.cs
+--- a/api/src/Telemedicina.Api/Milestone/CareController.cs
++++ b/api/src/Telemedicina.Api/Milestone/CareController.cs
+@@ -7,7 +7,7 @@
+ namespace Telemedicina.Api.Milestone;
+ 
+ [ApiController,Authorize,Route("api/v1")]
+-public sealed class CareController(Database database) : ControllerBase
++public sealed class CareController(Database database, Notifications notifications) : ControllerBase
+ {
+     private static readonly JsonSerializerOptions Json=new(JsonSerializerDefaults.Web);
+     private IActionResult Data(object? data,int status=200) => StatusCode(status,new {success=true,status,detail="OK",data});
+@@ -85,6 +85,7 @@
+                 s.start_utc AS "startAt",s.end_utc AS "endAt",v.name AS "serviceName",v.specialty
+             FROM slots s JOIN services v ON v.id=s.service_id JOIN practitioners p ON p.id=s.practitioner_id
+             WHERE s.service_id=@sid AND v.active AND p.active AND NOT s.blocked
++            AND EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.practitioner_id=p.id AND ps.service_id=v.id AND ps.active)
+             AND s.start_utc>now() AND s.start_utc>=@from AND s.end_utc<=@to
+             AND (@pid='' OR p.id=@pid)
+             AND NOT EXISTS(SELECT 1 FROM appointments a WHERE a.slot_id=s.id AND a.status IN ('PendingValidation','Confirmed'))
+@@ -92,7 +93,7 @@
+             """,("sid",serviceId.ToString()),("from",start),("to",end),("pid",practitionerId ?? "")));
+     }
+     private const string AppointmentSelect="""
+-        SELECT a.id,a.user_id AS "patientId",u.email AS "patientEmail",a.slot_id AS "slotId",
++        SELECT a.id,a.user_id AS "patientId",u.email AS "patientEmail",a.slot_id AS "slotId",s.service_id AS "serviceId",
+             p.name AS "practitionerName",v.name AS "serviceName",v.specialty,
+             a.start_utc AS "startAt",a.end_utc AS "endAt",a.status,
+             CASE WHEN a.coverage='Approved' AND a.coverage_valid_until<now() THEN 'Expired' ELSE a.coverage END AS "coverageStatus",
+@@ -136,7 +137,9 @@
+         var slots=Rows(c,t,"""
+             SELECT s.* FROM slots s JOIN services v ON v.id=s.service_id
+             JOIN practitioners p ON p.id=s.practitioner_id
+-            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>now() AND p.active AND v.active FOR UPDATE OF s
++            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>now() AND p.active AND v.active
++            AND EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.practitioner_id=p.id AND ps.service_id=v.id AND ps.active)
++            FOR UPDATE OF s FOR SHARE OF p,v
+             """,("id",request.SlotId.ToString()));
+         if(slots.Count==0) return Fail(409,"SLOT_UNAVAILABLE","Horario no disponible.");
+         var slot=slots[0]; var id=Guid.NewGuid().ToString();
+@@ -152,6 +155,7 @@
+         var result=new {id,status="PendingValidation",coverageStatus="ManualReview",version=1};
+         Execute(c,t,"INSERT INTO idempotency(user_id,key,request_hash,response) VALUES(@u,@k,@h,@r)",
+             ("u",UserId(User)),("k",key),("h",payload),("r",JsonSerializer.Serialize(result,Json)));
++        notifications.AppointmentEvent(c,t,id,"requested");
+         Log(c,t,"appointment.requested",id); t.Commit(); return Data(result,201);
+     }
+     [HttpGet("appointments/{id:guid}/history")]
+@@ -179,6 +183,7 @@
+             || (DateTime)row["start_utc"]!<=DateTime.UtcNow)
+             return Fail(409,"INVALID_TRANSITION","La cita cambió o ya no permite cancelación.");
+         Execute(c,t,"UPDATE appointments SET status='Cancelled',version=version+1 WHERE id=@id",("id",id.ToString()));
++        notifications.AppointmentEvent(c,t,id.ToString(),"cancelled");
+         Log(c,t,"appointment.cancelled",id.ToString()); t.Commit(); return Data(new {cancelled=true});
+     }
+     [Authorize(Roles="Patient"),HttpPost("appointments/{id:guid}/reschedule")]
+@@ -193,7 +198,9 @@
+             return Fail(409,"INVALID_TRANSITION","La cita cambió o ya no permite reprogramación.");
+         var s=Rows(c,t,"""
+             SELECT s.* FROM slots s JOIN services v ON v.id=s.service_id JOIN practitioners p ON p.id=s.practitioner_id
+-            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>now() AND v.active AND p.active FOR UPDATE OF s
++            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>now() AND v.active AND p.active
++            AND EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.practitioner_id=p.id AND ps.service_id=v.id AND ps.active)
++            FOR UPDATE OF s FOR SHARE OF p,v
+             """,("id",request.SlotId.ToString())).FirstOrDefault();
+         if(s is null) return Fail(409,"SLOT_UNAVAILABLE","Horario no disponible.");
+         try {
+@@ -206,6 +213,7 @@
+         } catch(Npgsql.PostgresException e) when(e.SqlState is "23505" or "23P01") {
+             return Fail(409,"SLOT_UNAVAILABLE","El horario ya fue solicitado.");
+         }
++        notifications.AppointmentEvent(c,t,id.ToString(),"rescheduled");
+         Log(c,t,"appointment.rescheduled",id.ToString()); t.Commit(); return Data(new {rescheduled=true});
+     }
+     [Authorize(Roles="Admission"),HttpGet("admin/work-queue")]
+@@ -232,6 +240,7 @@
+             reviewed_by=@actor,reviewed_at=now(),version=version+1 WHERE id=@id
+             """,("coverage",request.Status),("status",next),("e",request.Evidence.Trim()),
+             ("until",request.ValidUntil?.UtcDateTime),("actor",UserId(User)),("id",id.ToString()));
++        notifications.AppointmentEvent(c,t,id.ToString(),"reviewed");
+         Log(c,t,"coverage."+request.Status.ToLowerInvariant(),id.ToString()); t.Commit();
+         return Data(new {status=next,coverageStatus=request.Status,version=request.Version+1});
+     }
+@@ -250,9 +259,12 @@
+     {
+         if(request.StartAt<=DateTimeOffset.UtcNow) return Fail(400,"INVALID_DATE","Seleccione una fecha futura.");
+         using var c=database.Open(); using var t=Begin(c);
+-        var duration=Scalar(c,t,"SELECT duration FROM services WHERE id=@id AND active",("id",request.ServiceId.ToString()));
+-        if(duration is null || Scalar(c,t,"SELECT id FROM practitioners WHERE id=@id AND active",
++        var duration=Scalar(c,t,"SELECT duration FROM services WHERE id=@id AND active FOR SHARE",("id",request.ServiceId.ToString()));
++        if(duration is null || Scalar(c,t,"SELECT id FROM practitioners WHERE id=@id AND active FOR SHARE",
+             ("id",request.PractitionerId.ToString())) is null) return NotFound();
++        if(Scalar(c,t,"SELECT practitioner_id FROM practitioner_services WHERE practitioner_id=@p AND service_id=@s AND active FOR SHARE",
++            ("p",request.PractitionerId.ToString()),("s",request.ServiceId.ToString())) is null)
++            return Fail(400,"PRACTITIONER_SERVICE_REQUIRED","El profesional no está asignado al servicio.");
+         var id=Guid.NewGuid().ToString();
+         try {
+             Execute(c,t,"INSERT INTO slots(id,service_id,practitioner_id,start_utc,end_utc) VALUES(@id,@s,@p,@start,@end)",
+diff --git a/api/src/Telemedicina.Api/Milestone/CatalogController.cs b/api/src/Telemedicina.Api/Milestone/CatalogController.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/CatalogController.cs
+@@ -0,0 +1,113 @@
++using System.ComponentModel.DataAnnotations;
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Mvc;
++using Npgsql;
++using static Telemedicina.Api.Milestone.Database;
++using static Telemedicina.Api.Milestone.Security;
++
++namespace Telemedicina.Api.Milestone;
++
++public sealed record CatalogServiceRequest(
++    [Required,MaxLength(120)] string Name,[Required,MaxLength(100)] string Specialty,
++    [Range(5,240)] int DurationMinutes,bool Active,bool IsSynthetic,
++    [MaxLength(250)] string? ApprovalReference,[Range(0,int.MaxValue)] int Version=0);
++public sealed record CatalogPractitionerRequest(
++    [Required,MaxLength(120)] string Name,[MaxLength(100)] string? LicenseRef,
++    bool Active,[Required,MaxLength(100)] string[] ServiceIds,[Range(0,int.MaxValue)] int Version=0);
++
++[ApiController,Authorize(Roles="Admission"),Route("api/v1/admin/catalog")]
++public sealed class CatalogController(Database database):ControllerBase
++{
++    private IActionResult Data(object data,int status=200)=>StatusCode(status,new {success=true,status,detail="OK",data});
++    private IActionResult Fail(int status,string code,string title)=>StatusCode(status,new {status,code,title,traceId=HttpContext.TraceIdentifier});
++
++    [HttpGet("services")]
++    public IActionResult Services()
++    {
++        using var c=database.Open();
++        return Data(Rows(c,null,"""
++            SELECT id,name,specialty,duration AS "durationMinutes",active,is_synthetic AS "isSynthetic",
++            approval_reference AS "approvalReference",version FROM services ORDER BY name
++            """));
++    }
++    [HttpPost("services")]
++    public IActionResult CreateService(CatalogServiceRequest request)=>SaveService(null,request);
++    [HttpPatch("services/{id:guid}")]
++    public IActionResult UpdateService(Guid id,CatalogServiceRequest request)=>SaveService(id.ToString(),request);
++    private IActionResult SaveService(string? id,CatalogServiceRequest request)
++    {
++        if(string.IsNullOrWhiteSpace(request.Name)||string.IsNullOrWhiteSpace(request.Specialty)||
++            (request.Active&&!request.IsSynthetic&&string.IsNullOrWhiteSpace(request.ApprovalReference)))
++            return Fail(400,"CATALOG_VALIDATION","Complete nombre, especialidad y referencia de habilitación si el servicio no es sintético.");
++        using var c=database.Open(); using var t=c.BeginTransaction();
++        var created=id is null; id ??= Guid.NewGuid().ToString();var version=1;
++        if(!created)
++        {
++            var row=Rows(c,t,"SELECT version,duration FROM services WHERE id=@id FOR UPDATE",("id",id)).FirstOrDefault();
++            if(row is null) return NotFound();
++            if((int)row["version"]! != request.Version) return Fail(409,"VERSION_CONFLICT","El servicio cambió. Actualice la lista.");
++            if((int)row["duration"]! != request.DurationMinutes &&
++                Convert.ToInt64(Scalar(c,t,"SELECT count(*) FROM slots WHERE service_id=@id AND start_utc>now()",("id",id)))>0)
++                return Fail(409,"EXISTING_SCHEDULE","El servicio tiene horarios futuros con otra duración; cree una versión nueva del servicio.");
++            version=request.Version+1;
++            Execute(c,t,"""
++                UPDATE services SET name=@name,specialty=@specialty,duration=@duration,active=@active,
++                is_synthetic=@synthetic,approval_reference=@reference,version=@version WHERE id=@id
++                """,("name",request.Name.Trim()),("specialty",request.Specialty.Trim()),("duration",request.DurationMinutes),
++                ("active",request.Active),("synthetic",request.IsSynthetic),("reference",request.ApprovalReference?.Trim()),
++                ("version",version),("id",id));
++        }
++        else Execute(c,t,"""
++            INSERT INTO services(id,name,specialty,duration,active,is_synthetic,approval_reference)
++            VALUES(@id,@name,@specialty,@duration,@active,@synthetic,@reference)
++            """,("id",id),("name",request.Name.Trim()),("specialty",request.Specialty.Trim()),("duration",request.DurationMinutes),
++            ("active",request.Active),("synthetic",request.IsSynthetic),("reference",request.ApprovalReference?.Trim()));
++        Audit(c,t,UserId(User),created?"catalog.service_created":"catalog.service_updated",id,HttpContext.TraceIdentifier);
++        t.Commit();return Data(new {id,version},created?201:200);
++    }
++
++    [HttpGet("practitioners")]
++    public IActionResult Practitioners()
++    {
++        using var c=database.Open();
++        return Data(Rows(c,null,"""
++            SELECT p.id,p.name,p.active,p.version,p.license_ref AS "licenseRef",
++                ARRAY(SELECT service_id FROM practitioner_services ps
++                    WHERE ps.practitioner_id=p.id AND ps.active ORDER BY service_id) AS "serviceIds"
++            FROM practitioners p ORDER BY p.name
++            """));
++    }
++    [HttpPost("practitioners")]
++    public IActionResult CreatePractitioner(CatalogPractitionerRequest request)=>SavePractitioner(null,request);
++    [HttpPatch("practitioners/{id:guid}")]
++    public IActionResult UpdatePractitioner(Guid id,CatalogPractitionerRequest request)=>SavePractitioner(id.ToString(),request);
++    private IActionResult SavePractitioner(string? id,CatalogPractitionerRequest request)
++    {
++        if(string.IsNullOrWhiteSpace(request.Name)||request.ServiceIds is null||request.ServiceIds.Any(x=>!Guid.TryParse(x,out _)))
++            return Fail(400,"CATALOG_VALIDATION","Revise nombre y servicios asignados.");
++        var ids=request.ServiceIds.Select(x=>Guid.Parse(x).ToString()).Distinct().ToArray();
++        using var c=database.Open();using var t=c.BeginTransaction();
++        if(Convert.ToInt64(Scalar(c,t,"SELECT count(*) FROM services WHERE id=ANY(@ids)",("ids",ids)))!=ids.Length)
++            return Fail(400,"UNKNOWN_SERVICE","Uno de los servicios no existe.");
++        var created=id is null;id ??= Guid.NewGuid().ToString();var version=1;
++        if(!created)
++        {
++            var old=Scalar(c,t,"SELECT version FROM practitioners WHERE id=@id FOR UPDATE",("id",id));
++            if(old is null) return NotFound();
++            if((int)old!=request.Version) return Fail(409,"VERSION_CONFLICT","El profesional cambió. Actualice la lista.");
++            version=request.Version+1;
++            Execute(c,t,"UPDATE practitioners SET name=@name,license_ref=@license,active=@active,version=@version WHERE id=@id",
++                ("name",request.Name.Trim()),("license",request.LicenseRef?.Trim()),("active",request.Active),("version",version),("id",id));
++        }
++        else Execute(c,t,"INSERT INTO practitioners(id,name,license_ref,active) VALUES(@id,@name,@license,@active)",
++            ("id",id),("name",request.Name.Trim()),("license",request.LicenseRef?.Trim()),("active",request.Active));
++        Execute(c,t,"UPDATE practitioner_services SET active=false WHERE practitioner_id=@id",("id",id));
++        foreach(var service in ids)
++            Execute(c,t,"""
++                INSERT INTO practitioner_services(practitioner_id,service_id) VALUES(@p,@s)
++                ON CONFLICT(practitioner_id,service_id) DO UPDATE SET active=true
++                """,("p",id),("s",service));
++        Audit(c,t,UserId(User),created?"catalog.practitioner_created":"catalog.practitioner_updated",id,HttpContext.TraceIdentifier);
++        t.Commit();return Data(new {id,version},created?201:200);
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Milestone/MailDelivery.cs b/api/src/Telemedicina.Api/Milestone/MailDelivery.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/MailDelivery.cs
+@@ -0,0 +1,192 @@
++using MailKit.Net.Smtp;
++using MailKit.Security;
++using MimeKit;
++using System.Security.Cryptography;
++using System.Text;
++using static Telemedicina.Api.Milestone.Database;
++
++namespace Telemedicina.Api.Milestone;
++
++public sealed class MailSettings(IConfiguration configuration, IWebHostEnvironment environment)
++{
++    public string Mode => configuration["Mail:Mode"] ?? "development";
++    public string Host => configuration["Mail:Host"] ?? "smtp.gmail.com";
++    public int Port => configuration.GetValue("Mail:Port",587);
++    public string Username => configuration["Mail:Username"] ?? "";
++    public string Password => (configuration["Mail:Password"] ?? "").Replace(" ","");
++    public string Sender => configuration["Mail:Sender"] ?? Username;
++    public bool IsLocalTest => environment.IsDevelopment() && configuration.GetValue<bool>("Mail:AllowLocalTest")
++        && Host is "127.0.0.1" or "::1" or "localhost";
++    public string Channel => Mode=="development" ? "development" : IsLocalTest ? "smtp-test" : "smtp";
++    public int RetrySeconds => Math.Clamp(configuration.GetValue("Mail:RetrySeconds",30),1,300);
++    public byte[] PayloadKey => Convert.FromBase64String(configuration["Mail:PayloadKey"]
++        ?? throw new InvalidOperationException("Configure Mail__PayloadKey outside source control."));
++    public void Validate()
++    {
++        if(Mode is not ("development" or "smtp")) throw new InvalidOperationException("Unsupported mail mode.");
++        if(Mode=="smtp")
++        {
++            if(!MailboxAddress.TryParse(Sender,out _) || (!IsLocalTest && (string.IsNullOrEmpty(Username)||string.IsNullOrEmpty(Password))))
++                throw new InvalidOperationException("SMTP configuration is incomplete.");
++            if(PayloadKey.Length!=32) throw new InvalidOperationException("Mail__PayloadKey must encode 32 random bytes.");
++            if(!IsLocalTest && Port is not (465 or 587)) throw new InvalidOperationException("SMTP requires TLS on port 465 or 587.");
++        }
++    }
++    public string Protect(string body)
++    {
++        if(Mode=="development") return "";
++        var nonce=RandomNumberGenerator.GetBytes(12);var tag=new byte[16];
++        var plain=Encoding.UTF8.GetBytes(body);var cipher=new byte[plain.Length];
++        using var aes=new AesGcm(PayloadKey,16);
++        aes.Encrypt(nonce,plain,cipher,tag);
++        return string.Join(".",Convert.ToBase64String(nonce),Convert.ToBase64String(tag),Convert.ToBase64String(cipher));
++    }
++    public string Unprotect(string value)
++    {
++        var parts=value.Split('.');
++        var cipher=Convert.FromBase64String(parts[2]);var plain=new byte[cipher.Length];
++        using var aes=new AesGcm(PayloadKey,16);
++        aes.Decrypt(Convert.FromBase64String(parts[0]),cipher,Convert.FromBase64String(parts[1]),plain);
++        return Encoding.UTF8.GetString(plain);
++    }
++}
++
++public sealed class MailTransport(MailSettings settings)
++{
++    private async Task Connect(SmtpClient client,CancellationToken cancellation)
++    {
++        client.Timeout=15000;
++        await client.ConnectAsync(settings.Host,settings.Port,settings.IsLocalTest ? SecureSocketOptions.None :
++            settings.Port==465 ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTls,cancellation);
++        if(!settings.IsLocalTest || !string.IsNullOrEmpty(settings.Username))
++            await client.AuthenticateAsync(settings.Username,settings.Password,cancellation);
++    }
++    // Authentication check only: never issues SMTP MAIL FROM, RCPT TO or DATA.
++    public async Task<bool> CheckAsync(CancellationToken cancellation)
++    {
++        try
++        {
++            settings.Validate();
++            using var client=new SmtpClient();
++            await Connect(client,cancellation);
++            await client.NoOpAsync(cancellation);
++            await client.DisconnectAsync(true,cancellation);
++            return true;
++        }
++        catch(Exception) when(!cancellation.IsCancellationRequested) { return false; }
++    }
++    public async Task<(string State,string? Code)> SendAsync(Dictionary<string,object?> item,CancellationToken cancellation)
++    {
++        if(settings.Mode=="development") return ("Captured",null);
++        if(!settings.IsLocalTest && ((string)item["recipient"]!).EndsWith(".invalid",StringComparison.OrdinalIgnoreCase))
++            return ("Failed","RESERVED_TEST_DOMAIN");
++        var sendStarted=false;
++        try
++        {
++            var message=new MimeMessage();
++            message.From.Add(MailboxAddress.Parse(settings.Sender));
++            message.To.Add(MailboxAddress.Parse((string)item["recipient"]!));
++            message.Subject=(string)item["subject"]!;
++            message.MessageId=(string)item["id"]!+"@"+settings.Sender.Split('@')[1];
++            message.Body=new TextPart("plain"){Text=settings.Unprotect((string)item["payload_cipher"]!)};
++            using var client=new SmtpClient();
++            await Connect(client,cancellation);
++            sendStarted=true;
++            await client.SendAsync(message,cancellation);
++            // DATA was acknowledged. A disconnect failure must not retry an accepted message.
++            try { await client.DisconnectAsync(true,cancellation); } catch { }
++            return ("Sent",null);
++        }
++        catch(MailKit.Net.Smtp.SmtpCommandException e)
++        {
++            return ((int)e.StatusCode>=500 ? "Failed" : "Queued","SMTP_"+(int)e.StatusCode);
++        }
++        catch(MailKit.Security.AuthenticationException) { return ("Failed","SMTP_AUTH_FAILED"); }
++        catch(CryptographicException) { return ("Failed","PAYLOAD_KEY_MISMATCH"); }
++        catch(Exception) { return (sendStarted ? "Unknown" : "Queued",sendStarted ? "SMTP_ACK_UNKNOWN" : "SMTP_CONNECT_FAILED"); }
++    }
++}
++
++public sealed class MailWorker(IServiceProvider services,IConfiguration configuration,IWebHostEnvironment environment,
++    ILogger<MailWorker> logger) : BackgroundService
++{
++    protected override async Task ExecuteAsync(CancellationToken cancellation)
++    {
++        if(!environment.IsDevelopment()||!configuration.GetValue<bool>("Milestone:Enabled")) return;
++        var settings=services.GetRequiredService<MailSettings>(); settings.Validate();
++        while(!cancellation.IsCancellationRequested)
++        {
++            try { await DeliverOne(settings,cancellation); }
++            catch(OperationCanceledException) when(cancellation.IsCancellationRequested) { break; }
++            catch(Exception) { logger.LogWarning("Email worker unavailable; retrying without logging message content or credentials."); }
++            try { await Task.Delay(TimeSpan.FromSeconds(1),cancellation); }
++            catch(OperationCanceledException) { break; }
++        }
++    }
++    private async Task DeliverOne(MailSettings settings,CancellationToken cancellation)
++    {
++        var database=services.GetRequiredService<Database>();
++        using var c=database.Open();
++        using(var t=c.BeginTransaction())
++        {
++            // A crashed send might have been accepted. Never blindly re-send its lease.
++            Execute(c,t,"""
++                UPDATE email_outbox SET state='Unknown',last_error_code='LEASE_ACK_UNKNOWN',locked_until=NULL
++                WHERE channel=@channel AND state='Sending' AND locked_until<now()
++                """,("channel",settings.Channel));
++            t.Commit();
++        }
++        Dictionary<string,object?>? row;
++        var lease=Guid.NewGuid().ToString();
++        using(var t=c.BeginTransaction())
++        {
++            row=Rows(c,t,"""
++                SELECT * FROM email_outbox WHERE channel=@channel AND state='Queued' AND available_at<=now()
++                ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
++                """,("channel",settings.Channel)).FirstOrDefault();
++            if(row is null) return;
++            Execute(c,t,"""
++                UPDATE email_outbox SET state='Sending',attempts=attempts+1,lease_token=@lease,
++                locked_until=now()+interval '2 minutes' WHERE id=@id
++                """,("lease",lease),("id",row["id"]));
++            t.Commit();
++        }
++        var resource=row["resource_id"] as string;
++        var userKey="mailuser:"+(string)row["user_id"]!;
++        Execute(c,null,"SELECT pg_advisory_lock(hashtextextended(@key,0))",("key",userKey));
++        if(resource is not null) Execute(c,null,"SELECT pg_advisory_lock(hashtextextended(@key,0))",("key","delivery:"+resource));
++        try
++        {
++            (string State,string? Code) result;
++            if(row["expires_at"] is DateTime expiry && expiry<=DateTime.UtcNow) result=("Expired",null);
++            else if(row["resource_version"] is int version && resource is not null &&
++                Convert.ToInt32(Scalar(c,null,"SELECT version FROM appointments WHERE id=@id",("id",resource)))!=version)
++                result=("Superseded",null);
++            else if(row["notification_id"] is not null && Scalar(c,null,"SELECT email_enabled FROM notification_preferences WHERE user_id=@u",("u",row["user_id"])) is not true)
++                result=("Superseded",null);
++            else if(!Convert.ToBoolean(Scalar(c,null,"SELECT active FROM users WHERE id=@id",("id",row["user_id"]))))
++                result=("Superseded",null);
++            else
++            {
++                using var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancellation);
++                deadline.CancelAfter(TimeSpan.FromSeconds(25));
++                result=await services.GetRequiredService<MailTransport>().SendAsync(row,deadline.Token);
++            }
++            var attempts=(int)row["attempts"]!+1;
++            if(result.State=="Queued"&&attempts>=6) result=("Failed","RETRY_LIMIT");
++            var delay=Math.Min(3600,settings.RetrySeconds*(1<<Math.Min(attempts-1,6)));
++            Execute(c,null,"""
++                UPDATE email_outbox SET state=@state,last_error_code=@code,locked_until=NULL,
++                available_at=now()+make_interval(secs=>@delay),
++                sent_at=CASE WHEN @state IN ('Sent','Captured') THEN now() ELSE sent_at END,
++                payload_cipher=CASE WHEN @state IN ('Sent','Captured','Superseded','Expired','Failed') THEN '' ELSE payload_cipher END
++                WHERE id=@id AND lease_token=@lease
++                """,("state",result.State),("code",result.Code),("delay",delay),("id",row["id"]),("lease",lease));
++        }
++        finally
++        {
++            if(resource is not null) Execute(c,null,"SELECT pg_advisory_unlock(hashtextextended(@key,0))",("key","delivery:"+resource));
++            Execute(c,null,"SELECT pg_advisory_unlock(hashtextextended(@key,0))",("key",userKey));
++        }
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Milestone/Notifications.cs b/api/src/Telemedicina.Api/Milestone/Notifications.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/Notifications.cs
+@@ -0,0 +1,47 @@
++using Npgsql;
++using static Telemedicina.Api.Milestone.Database;
++
++namespace Telemedicina.Api.Milestone;
++
++public sealed class Notifications(MailSettings mail)
++{
++    public void Queue(NpgsqlConnection c,NpgsqlTransaction t,string user,string kind,string eventKey,string subject,string body,
++        string? resource=null,int? version=null,DateTime? expires=null,string? notification=null)
++    {
++        var recipient=Scalar(c,t,"SELECT email FROM users WHERE id=@id",("id",user)) as string;
++        if(recipient is null) return;
++        Execute(c,t,"""
++            INSERT INTO email_outbox(id,event_key,notification_id,user_id,recipient,kind,subject,payload_cipher,
++                resource_id,resource_version,expires_at,channel)
++            VALUES(@id,@key,@notification,@u,@recipient,@kind,@subject,@body,@resource,@version,@expires,@channel)
++            ON CONFLICT(event_key) DO NOTHING
++            """,("id",Guid.NewGuid().ToString()),("key",eventKey),("notification",notification),("u",user),
++            ("recipient",recipient),("kind",kind),("subject",subject),("body",mail.Protect(body)),
++            ("resource",resource),("version",version),("expires",expires),("channel",mail.Channel));
++    }
++
++    public void AppointmentEvent(NpgsqlConnection c,NpgsqlTransaction t,string id,string kind)
++    {
++        Execute(c,t,"SELECT pg_advisory_xact_lock(hashtextextended(@key,0))",("key","delivery:"+id));
++        var row=Rows(c,t,"SELECT user_id,version FROM appointments WHERE id=@id",("id",id)).Single();
++        var user=(string)row["user_id"]!; var version=(int)row["version"]!;
++        var text=kind switch {
++            "requested"=>"Tu solicitud fue registrada. Inicia sesión para consultar su estado.",
++            "cancelled"=>"Tu cita fue cancelada. Inicia sesión para consultar los detalles.",
++            "rescheduled"=>"Tu cita cambió de horario y requiere revisión. Inicia sesión para consultar su estado.",
++            _=>"El estado de tu cita cambió. Inicia sesión para consultar los detalles."
++        };
++        var key="appointment:"+id+":"+version+":"+kind;
++        var notification=Guid.NewGuid().ToString();
++        var inserted=Execute(c,t,"""
++            INSERT INTO notifications(id,user_id,event_key,kind,body,resource_id,resource_version)
++            VALUES(@id,@u,@key,@kind,@body,@resource,@version) ON CONFLICT(event_key) DO NOTHING
++            """,("id",notification),("u",user),("key",key),("kind",kind),("body",text),("resource",id),("version",version));
++        if(inserted==0) return;
++        Execute(c,t,"""
++            UPDATE email_outbox SET state='Superseded',payload_cipher='' WHERE resource_id=@id AND state='Queued'
++            """,("id",id));
++        var optedIn=Scalar(c,t,"SELECT email_enabled FROM notification_preferences WHERE user_id=@u",("u",user));
++        if(optedIn is true) Queue(c,t,user,kind,key,"Actualización de tu cita",text,id,version,notification:notification);
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Milestone/NotificationsController.cs b/api/src/Telemedicina.Api/Milestone/NotificationsController.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Milestone/NotificationsController.cs
+@@ -0,0 +1,70 @@
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Mvc;
++using System.ComponentModel.DataAnnotations;
++using static Telemedicina.Api.Milestone.Database;
++using static Telemedicina.Api.Milestone.Security;
++
++namespace Telemedicina.Api.Milestone;
++public sealed record NotificationPreferencesRequest(bool EmailEnabled,[Range(0,int.MaxValue)] int Version);
++
++[ApiController,Authorize,Route("api/v1")]
++public sealed class NotificationsController(Database database):ControllerBase
++{
++    private IActionResult Data(object data)=>Ok(new {success=true,status=200,detail="OK",data});
++
++    [Authorize(Roles="Patient"),HttpGet("notifications/me")]
++    public IActionResult Mine([FromQuery]int offset=0)
++    {
++        using var c=database.Open();
++        return Data(Rows(c,null,"""
++            SELECT id,kind,body,resource_id AS "resourceId",created_at AS "createdAt",read_at AS "readAt"
++            FROM notifications WHERE user_id=@u ORDER BY created_at DESC,id LIMIT 100 OFFSET @offset
++            """,("u",UserId(User)),("offset",Math.Clamp(offset,0,10000))));
++    }
++    [Authorize(Roles="Patient"),HttpPost("notifications/{id:guid}/read")]
++    public IActionResult Read(Guid id)
++    {
++        using var c=database.Open();
++        var count=Execute(c,null,"UPDATE notifications SET read_at=coalesce(read_at,now()) WHERE id=@id AND user_id=@u",
++            ("id",id.ToString()),("u",UserId(User)));
++        return count==0?NotFound():Data(new {read=true});
++    }
++    [Authorize(Roles="Patient"),HttpGet("notifications/preferences")]
++    public IActionResult Preferences()
++    {
++        using var c=database.Open();
++        var row=Rows(c,null,"SELECT email_enabled AS \"emailEnabled\",version FROM notification_preferences WHERE user_id=@u",
++            ("u",UserId(User))).FirstOrDefault();
++        return Data(row is null ? new {emailEnabled=false,version=0} : (object)row);
++    }
++    [Authorize(Roles="Patient"),HttpPatch("notifications/preferences")]
++    public IActionResult SavePreferences(NotificationPreferencesRequest request)
++    {
++        using var c=database.Open();using var t=c.BeginTransaction();
++        Execute(c,t,"SELECT pg_advisory_xact_lock(hashtextextended(@key,0))",("key","mailuser:"+UserId(User)));
++        var old=Scalar(c,t,"SELECT version FROM notification_preferences WHERE user_id=@u FOR UPDATE",("u",UserId(User)));
++        if((old is null?0:(int)old)!=request.Version)
++            return Conflict(new {status=409,title="Las preferencias cambiaron. Actualice antes de guardar.",code="VERSION_CONFLICT"});
++        Execute(c,t,"""
++            INSERT INTO notification_preferences(user_id,email_enabled) VALUES(@u,@enabled)
++            ON CONFLICT(user_id) DO UPDATE SET email_enabled=excluded.email_enabled,version=notification_preferences.version+1
++            """,("u",UserId(User)),("enabled",request.EmailEnabled));
++        if(!request.EmailEnabled)
++            Execute(c,t,"""
++                UPDATE email_outbox SET state='Superseded',payload_cipher=''
++                WHERE user_id=@u AND notification_id IS NOT NULL AND state='Queued'
++                """,("u",UserId(User)));
++        Audit(c,t,UserId(User),"notifications.preferences_changed",UserId(User),HttpContext.TraceIdentifier);
++        t.Commit();return Data(new {emailEnabled=request.EmailEnabled,version=request.Version+1});
++    }
++    [Authorize(Roles="Admission"),HttpGet("admin/email-delivery")]
++    public IActionResult Delivery()
++    {
++        using var c=database.Open();
++        return Data(Rows(c,null,"""
++            SELECT id,kind,state,attempts,available_at AS "availableAt",sent_at AS "sentAt",
++            last_error_code AS "lastErrorCode",resource_id AS "resourceId"
++            FROM email_outbox ORDER BY created_at DESC LIMIT 100
++            """));
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Program.cs b/api/src/Telemedicina.Api/Program.cs
+--- a/api/src/Telemedicina.Api/Program.cs
++++ b/api/src/Telemedicina.Api/Program.cs
+@@ -57,6 +57,16 @@
+     return;
+ }
+ 
++if (args.Contains("--check-smtp"))
++{
++    if (!app.Environment.IsDevelopment())
++        throw new InvalidOperationException("SMTP diagnostics are local-development only.");
++    var connected = await app.Services.GetRequiredService<MailTransport>().CheckAsync(CancellationToken.None);
++    Console.WriteLine(connected ? "SMTP_AUTH_OK" : "SMTP_AUTH_FAILED");
++    Environment.ExitCode = connected ? 0 : 1;
++    return;
++}
++
+ // Configure the HTTP request pipeline
+ if (app.Environment.IsDevelopment())
+ {
+diff --git a/api/src/Telemedicina.Api/Telemedicina.Api.csproj b/api/src/Telemedicina.Api/Telemedicina.Api.csproj
+--- a/api/src/Telemedicina.Api/Telemedicina.Api.csproj
++++ b/api/src/Telemedicina.Api/Telemedicina.Api.csproj
+@@ -10,6 +10,7 @@
+     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.3" />
+     <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" Version="9.0.6" />
+     <PackageReference Include="Npgsql" Version="9.0.3" />
++    <PackageReference Include="MailKit" Version="4.17.0" />
+   </ItemGroup>
+ 
+   <ItemGroup>
+diff --git a/api/src/Telemedicina.Tests/milestone_e2e.py b/api/src/Telemedicina.Tests/milestone_e2e.py
+--- a/api/src/Telemedicina.Tests/milestone_e2e.py
++++ b/api/src/Telemedicina.Tests/milestone_e2e.py
+@@ -188,6 +188,65 @@
+         from milestone_restart import check_restart
+         check_restart()
+ 
++    def test_10_catalog_membership_and_versions(self):
++        suffix = uuid.uuid4().hex[:10]
++        service = {"name": "Servicio sintético " + suffix, "specialty": "Pruebas",
++            "durationMinutes": 30, "active": False, "isSynthetic": True, "approvalReference": "", "version": 0}
++        status, saved = request("/admin/catalog/services", "POST", service, self.staff["accessToken"])
++        self.assertEqual(status, 201)
++        sid = saved["id"]
++        self.assertEqual(request("/admin/catalog/services", token=self.patients[0]["accessToken"])[0], 403)
++        public = request("/services", token=self.patients[0]["accessToken"])[1]
++        self.assertNotIn(sid, [item["id"] for item in public])
++        service.update({"active": True, "version": 1})
++        self.assertEqual(request("/admin/catalog/services/" + sid, "PATCH", service, self.staff["accessToken"])[0], 200)
++        self.assertEqual(request("/admin/catalog/services/" + sid, "PATCH", service, self.staff["accessToken"])[0], 409)
++        person = {"name": "Profesional sintético " + suffix, "licenseRef": "SYNTHETIC",
++            "active": True, "serviceIds": [sid], "version": 0}
++        status, saved = request("/admin/catalog/practitioners", "POST", person, self.staff["accessToken"])
++        self.assertEqual(status, 201)
++        pid = saved["id"]
++        start = datetime.now(timezone.utc).replace(second=0, microsecond=0) + timedelta(days=40, minutes=uuid.uuid4().int % 100000)
++        status, slot = request("/admin/slots", "POST", {"serviceId": sid,
++            "practitionerId": pid, "startAt": start.isoformat()}, self.staff["accessToken"])
++        self.assertEqual(status, 201)
++        person.update({"serviceIds": [], "version": 1})
++        self.assertEqual(request("/admin/catalog/practitioners/" + pid, "PATCH", person, self.staff["accessToken"])[0], 200)
++        self.assertEqual(request("/admin/slots", "POST", {"serviceId": sid,
++            "practitionerId": pid, "startAt": (start + timedelta(hours=1)).isoformat()}, self.staff["accessToken"])[0], 400)
++        self.assertEqual(self.book(slot["id"])[0], 409)
++        service.update({"active": False, "version": 2})
++        self.assertEqual(request("/admin/catalog/services/" + sid, "PATCH", service, self.staff["accessToken"])[0], 200)
++
++    def test_11_notifications_preferences_and_deduplication(self):
++        user = self.patients[0]["accessToken"]
++        preferences = request("/notifications/preferences", token=user)[1]
++        status, preferences = request("/notifications/preferences", "PATCH",
++            {"emailEnabled": True, "version": preferences["version"]}, user)
++        self.assertEqual(status, 200)
++        slot, _ = self.new_slot()
++        key = str(uuid.uuid4())
++        status, appointment = self.book(slot, key=key)
++        self.assertEqual(status, 201)
++        self.assertEqual(self.book(slot, key=key)[0], 200)
++        notices = request("/notifications/me", token=user)[1]
++        matching = [item for item in notices if item["resourceId"] == appointment["id"]]
++        self.assertEqual(len(matching), 1)
++        notice = matching[0]
++        self.assertNotIn("Aseguradora", notice["body"])
++        self.assertEqual(request("/notifications/" + notice["id"] + "/read", "POST", {},
++            self.patients[1]["accessToken"])[0], 404)
++        self.assertEqual(request("/notifications/" + notice["id"] + "/read", "POST", {}, user)[0], 200)
++        self.assertEqual(request("/appointments/" + appointment["id"] + "/cancel", "POST", {"version": 1}, user)[0], 200)
++        status, result = request("/notifications/preferences", "PATCH",
++            {"emailEnabled": False, "version": preferences["version"]}, user)
++        self.assertEqual(status, 200)
++        self.assertFalse(result["emailEnabled"])
++        delivery = request("/admin/email-delivery", token=self.staff["accessToken"])[1]
++        self.assertTrue(all("recipient" not in item and "payload_cipher" not in item for item in delivery))
++        self.assertFalse(any(item["resourceId"] == appointment["id"] and item["kind"] == "requested" and
++            item["state"] == "Queued" for item in delivery))
++
+     def test_99_logout_revokes_access_and_refresh(self):
+         for patient in self.patients:
+             self.assertEqual(request("/auth/logout", "POST", {}, patient["accessToken"])[0], 200)
+diff --git a/api/src/Telemedicina.Tests/milestone_restart.py b/api/src/Telemedicina.Tests/milestone_restart.py
+--- a/api/src/Telemedicina.Tests/milestone_restart.py
++++ b/api/src/Telemedicina.Tests/milestone_restart.py
+@@ -37,6 +37,7 @@
+ 
+     def start():
+         process = subprocess.Popen(["dotnet", "run", "--no-build", "--no-launch-profile",
++            "--configuration",os.environ.get("MILESTONE_CONFIGURATION","Debug"),
+             "--project", str(project), "--", "--urls", "http://127.0.0.1:5092"],
+             cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+         try:
+diff --git a/api/src/Telemedicina.Tests/run_milestone_checks.py b/api/src/Telemedicina.Tests/run_milestone_checks.py
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/run_milestone_checks.py
+@@ -0,0 +1,78 @@
++"""Reproducible synthetic API, SMTP and Playwright checks; credentials stay in child environments."""
++import argparse
++import base64
++import os
++from pathlib import Path
++import secrets
++import socket
++import subprocess
++import sys
++import time
++import urllib.request
++
++ROOT=Path(__file__).resolve().parents[3]
++PROJECT=ROOT/"api/src/Telemedicina.Api/Telemedicina.Api.csproj"
++
++def wait_ready(process,url):
++    for _ in range(120):
++        if process.poll() is not None:
++            raise RuntimeError("Test service stopped before readiness.")
++        try:
++            with urllib.request.urlopen(url,timeout=2) as response:
++                if response.status==200: return
++        except OSError: pass
++        time.sleep(0.25)
++    raise RuntimeError("Test service readiness timed out.")
++
++def stop(process):
++    if process is None: return
++    process.terminate()
++    try: process.wait(timeout=10)
++    except subprocess.TimeoutExpired: process.kill();process.wait()
++
++def main():
++    parser=argparse.ArgumentParser()
++    parser.add_argument("--configuration",choices=["Debug","Release"],default="Debug")
++    parser.add_argument("--skip-browser",action="store_true")
++    args=parser.parse_args()
++    if not os.environ.get("ConnectionStrings__Telemedicina"):
++        raise RuntimeError("Configure the private connection to a synthetic test database.")
++    for port in [5091,5092,5094,8025]+([] if args.skip_browser else [3000]):
++        try: connection=socket.create_connection(("127.0.0.1",port),timeout=0.3)
++        except OSError: continue
++        connection.close();raise RuntimeError("Test port is already occupied: "+str(port))
++    env=os.environ.copy()
++    for name in list(env):
++        if name.startswith("Mail__"): del env[name]
++    env.update({"ASPNETCORE_ENVIRONMENT":"Development","Milestone__Enabled":"true",
++        "Milestone__MailboxKey":secrets.token_hex(32),
++        "Milestone__AdmissionEmail":"synthetic-ci-"+secrets.token_hex(8)+"@example.invalid",
++        "Milestone__AdmissionPassword":secrets.token_urlsafe(32),
++        "Milestone__AdmissionTotpSecret":base64.b32encode(secrets.token_bytes(20)).decode(),
++        "Mail__Mode":"development","Mail__PayloadKey":base64.b64encode(secrets.token_bytes(32)).decode(),
++        "MILESTONE_TEST_SYNTHETIC":"1","MILESTONE_TEST_URL":"http://127.0.0.1:5091/api/v1",
++        "MILESTONE_CONFIGURATION":args.configuration,"MILESTONE_PORTAL_TEST_URL":"http://localhost:3000",
++        "API_INTERNAL_URL":"http://127.0.0.1:5091/api/v1"})
++    base=["dotnet","run","--no-build","--no-launch-profile","--configuration",args.configuration,"--project",str(PROJECT)]
++    for action in ["--migrate","--seed-synthetic"]:
++        subprocess.run(base+["--",action],cwd=ROOT,env=env,check=True)
++    api=None;portal=None
++    try:
++        api=subprocess.Popen(base+["--","--urls","http://127.0.0.1:5091"],cwd=ROOT,env=env,
++            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
++        wait_ready(api,"http://127.0.0.1:5091/api/v1/health")
++        subprocess.run([sys.executable,str(ROOT/"api/src/Telemedicina.Tests/milestone_e2e.py")],
++            cwd=ROOT,env=env,check=True)
++        subprocess.run([sys.executable,str(ROOT/"api/src/Telemedicina.Tests/smtp_fixture_test.py")],
++            cwd=ROOT,env=env,check=True)
++        if not args.skip_browser:
++            portal=subprocess.Popen(["npm","run","dev"],cwd=ROOT/"portalweb/src",env=env,
++                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
++            wait_ready(portal,"http://localhost:3000/login")
++            subprocess.run(["npm","run","test:e2e"],cwd=ROOT/"portalweb/src",env=env,check=True)
++        print("Synthetic milestone checks: PASS")
++    finally:
++        stop(portal);stop(api)
++
++if __name__=="__main__":
++    main()
+diff --git a/api/src/Telemedicina.Tests/smtp_fixture_test.py b/api/src/Telemedicina.Tests/smtp_fixture_test.py
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/smtp_fixture_test.py
+@@ -0,0 +1,80 @@
++"""Loopback-only SMTP integration; no real email or credentials are used."""
++import asyncore
++from email import policy
++from email.parser import BytesParser
++import os
++from pathlib import Path
++import re
++import smtpd
++import subprocess
++import threading
++import time
++import urllib.parse
++import uuid
++
++def check_smtp():
++    assert os.environ.get("MILESTONE_TEST_SYNTHETIC")=="1"
++    from milestone_e2e import request
++    import milestone_e2e as api
++    original=api.BASE
++    api.BASE="http://127.0.0.1:5094/api/v1"
++    accepted=[]
++    class Receiver(smtpd.SMTPServer):
++        calls=0
++        def process_message(self,peer,mailfrom,rcpttos,data,**kwargs):
++            self.calls+=1
++            if self.calls==1:
++                return "451 synthetic temporary failure"
++            accepted.append((rcpttos,data))
++    receiver=Receiver(("127.0.0.1",8025),None,decode_data=False)
++    running=True
++    def loop():
++        while running:
++            asyncore.loop(timeout=0.1,count=1)
++    thread=threading.Thread(target=loop,daemon=True);thread.start()
++    root=Path(__file__).resolve().parents[3]
++    env=os.environ.copy()
++    env.update({"Mail__Mode":"smtp","Mail__Host":"127.0.0.1","Mail__Port":"8025",
++        "Mail__AllowLocalTest":"true","Mail__Username":"","Mail__Password":"",
++        "Mail__Sender":"sender@example.invalid","Mail__RetrySeconds":"1"})
++    configuration=os.environ.get("MILESTONE_CONFIGURATION","Debug")
++    server=subprocess.Popen(["dotnet","run","--no-build","--no-launch-profile","--configuration",configuration,
++        "--project",str(root/"api/src/Telemedicina.Api/Telemedicina.Api.csproj"),"--","--urls","http://127.0.0.1:5094"],
++        cwd=root,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
++    try:
++        for _ in range(80):
++            try:
++                if request("/health")[0]==200: break
++            except OSError: pass
++            if server.poll() is not None: raise RuntimeError("Synthetic SMTP API stopped.")
++            time.sleep(0.25)
++        else: raise RuntimeError("Synthetic SMTP API readiness timed out.")
++        email="synthetic-smtp-"+uuid.uuid4().hex+"@example.invalid"
++        password=uuid.uuid4().hex+"!a9"
++        assert request("/auth/register","POST",{"email":email,"password":password})[0]==202
++        assert request("/auth/dev-mailbox?"+urllib.parse.urlencode({"email":email,"purpose":"verify"}),
++            extra={"X-Dev-Mailbox-Key":env["Milestone__MailboxKey"]})[0]==404
++        for _ in range(160):
++            if accepted: break
++            time.sleep(0.25)
++        else: raise RuntimeError("SMTP retry did not deliver the synthetic message.")
++        assert receiver.calls==2 and len(accepted)==1
++        message=BytesParser(policy=policy.default).parsebytes(accepted[0][1])
++        body=message.get_content()
++        tokens=re.findall(r"\b[A-F0-9]{64}\b",body)
++        assert len(tokens)==1
++        assert request("/auth/verify","POST",{"token":tokens[0]})[0]==200
++        assert request("/auth/verify","POST",{"token":tokens[0]})[0]==400
++        # Duplicate registration keeps a generic response and does not enqueue another verification.
++        assert request("/auth/register","POST",{"email":email,"password":password})[0]==202
++        time.sleep(2)
++        assert len(accepted)==1
++    finally:
++        server.terminate()
++        try: server.wait(timeout=10)
++        except subprocess.TimeoutExpired: server.kill();server.wait()
++        running=False;receiver.close();thread.join(timeout=2);api.BASE=original
++
++if __name__=="__main__":
++    check_smtp()
++    print("SMTP loopback retry, deduplication, private verification and single-use token: PASS")
+diff --git a/api/src/run_local.py b/api/src/run_local.py
+new file mode 100644
+--- /dev/null
++++ b/api/src/run_local.py
+@@ -0,0 +1,36 @@
++"""Load private local configuration without shell expansion or printing values."""
++import argparse
++import os
++from pathlib import Path
++import subprocess
++
++ROOT=Path(__file__).resolve().parent
++ALLOWED_PREFIXES=("ConnectionStrings__","Milestone__","Mail__")
++ALLOWED_NAMES={"ASPNETCORE_ENVIRONMENT","ASPNETCORE_URLS","DOTNET_ROLL_FORWARD"}
++
++def environment():
++    env=os.environ.copy()
++    local=ROOT/".env"
++    if local.exists():
++        for line in local.read_text().splitlines():
++            if not line.strip() or line.lstrip().startswith("#"):
++                continue
++            key,separator,value=line.partition("=")
++            key=key.strip()
++            if not separator or not (key.startswith(ALLOWED_PREFIXES) or key in ALLOWED_NAMES):
++                raise RuntimeError("Unsupported local configuration key.")
++            env.setdefault(key,value.strip())
++    return env
++
++if __name__=="__main__":
++    parser=argparse.ArgumentParser()
++    parser.add_argument("--configuration",choices=["Debug","Release"],default="Debug")
++    parser.add_argument("--no-build",action="store_true")
++    parser.add_argument("arguments",nargs=argparse.REMAINDER)
++    args=parser.parse_args()
++    command=["dotnet","run","--no-launch-profile","--project",str(ROOT/"Telemedicina.Api/Telemedicina.Api.csproj"),
++        "--configuration",args.configuration]
++    if args.no_build:
++        command.append("--no-build")
++    command+=["--"]+(args.arguments[1:] if args.arguments[:1]==["--"] else args.arguments)
++    raise SystemExit(subprocess.call(command,env=environment()))
+diff --git a/app/src/lib/features/milestone/milestone_screen.dart b/app/src/lib/features/milestone/milestone_screen.dart
+--- a/app/src/lib/features/milestone/milestone_screen.dart
++++ b/app/src/lib/features/milestone/milestone_screen.dart
+@@ -25,7 +25,9 @@
+   bool busy=false, signedIn=false;
+   String mode='login', message='';
+   int tab=0, version=0;
+-  List<dynamic> services=[],slots=[],appointments=[];
++  List<dynamic> services=[],slots=[],appointments=[],notifications=[];
++  bool emailEnabled=false;
++  int preferencesVersion=0;
+   String? serviceId;
+   final keys=<String,String>{};
+ 
+@@ -44,7 +46,7 @@
+         setState(() {
+         busy=false; signedIn=api.authenticated;
+         if(!signedIn) {
+-          appointments=[]; slots=[]; version=0;
++          appointments=[]; slots=[]; notifications=[]; version=0; preferencesVersion=0; emailEnabled=false;
+           for(final c in profileFields.values) { c.clear(); }
+         }
+       });
+@@ -53,7 +55,8 @@
+   }
+   Future<void> load() async {
+     final results=await Future.wait([
+-      api.request('GET','/patients/me'),api.request('GET','/services'),api.request('GET','/appointments/me')
++      api.request('GET','/patients/me'),api.request('GET','/services'),api.request('GET','/appointments/me'),
++      api.request('GET','/notifications/me'),api.request('GET','/notifications/preferences')
+     ]);
+     if(!mounted) return;
+     setState(() {
+@@ -64,7 +67,9 @@
+         final value=profile[entry.key];
+         entry.value.text=value is List ? value.join(', ') : (value ?? '').toString();
+       }
+-      services=results[1] as List; appointments=results[2] as List;
++      services=results[1] as List; appointments=results[2] as List; notifications=results[3] as List;
++      final preferences=results[4] as Map;
++      emailEnabled=preferences['emailEnabled'] as bool; preferencesVersion=preferences['version'] as int;
+       serviceId=services.any((s)=>s['id']==serviceId) ? serviceId : services.firstOrNull?['id'] as String?;
+     });
+   }
+@@ -72,13 +77,13 @@
+     if(mode=='login') { await api.login(email.text.trim(),password.text); await load(); }
+     else if(mode=='register') {
+       await api.request('POST','/auth/register',body:{'email':email.text.trim(),'password':password.text});
+-      setState((){mode='verify';message='Revise la verificación en el buzón de desarrollo. No use datos reales.';});
++      setState((){mode='verify';message='Revisa tu correo para verificar la cuenta.';});
+     } else if(mode=='verify') {
+       await api.request('POST','/auth/verify',body:{'token':token.text.trim()});
+       token.clear(); setState((){mode='login';message='Cuenta verificada. Inicie sesión.';});
+     } else if(mode=='forgot') {
+       await api.request('POST','/auth/password/forgot',body:{'email':email.text.trim()});
+-      setState((){mode='reset';message='Si corresponde, revise el buzón de desarrollo.';});
++      setState((){mode='reset';message='Si corresponde, revisa tu correo.';});
+     } else {
+       await api.request('POST','/auth/password/reset',body:{'token':token.text.trim(),'password':password.text});
+       token.clear(); password.clear(); setState((){mode='login';message='Contraseña actualizada.';});
+@@ -110,22 +115,27 @@
+         child:Semantics(liveRegion:true,child:Text(message))),
+       Expanded(child:SingleChildScrollView(padding:const EdgeInsets.all(20),
+         child:Center(child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:700),
+-          child:!signedIn ? authForm() : tab==0 ? profileForm() : tab==1 ? catalog() : appointmentList()))))
++          child:!signedIn ? authForm() : tab==0 ? profileForm() : tab==1 ? catalog() : tab==2 ? appointmentList() : notificationList()))))
+     ]),
+     bottomNavigationBar:!signedIn ? null : NavigationBar(selectedIndex:tab,
+       onDestinationSelected:busy?null:(value)=>setState(()=>tab=value),
+       destinations:const [
+         NavigationDestination(icon:Icon(Icons.person),label:'Mi perfil'),
+         NavigationDestination(icon:Icon(Icons.calendar_month),label:'Solicitar cita'),
+-        NavigationDestination(icon:Icon(Icons.event_note),label:'Mis citas')
++        NavigationDestination(icon:Icon(Icons.event_note),label:'Mis citas'),
++        NavigationDestination(icon:Icon(Icons.notifications),label:'Avisos')
+       ]),
+   );
+   Widget authForm()=>Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+     const Text('Primer hito · Entorno de demostración',style:TextStyle(fontSize:22,fontWeight:FontWeight.bold)),
+     const Text('Las citas y coberturas requieren revisión manual. Este entorno no presta atención clínica.'),
+-    if(['login','register','forgot'].contains(mode)) field(email,'Correo electrónico'),
++    if(['login','register','forgot','verify'].contains(mode)) field(email,'Correo electrónico'),
+     if(['login','register','reset'].contains(mode)) field(password,'Contraseña (mínimo 12 caracteres)',secret:true),
+-    if(['verify','reset'].contains(mode)) field(token,'Código del mensaje de desarrollo'),
++    if(['verify','reset'].contains(mode)) field(token,'Código recibido por correo'),
++    if(mode=='verify') action('Reenviar código',() async {
++      await api.request('POST','/auth/verification/resend',body:{'email':email.text.trim()});
++      if(mounted) setState(()=>message='Si corresponde, revisa tu correo.');
++    }),
+     action({'login':'Entrar','register':'Crear cuenta','verify':'Verificar cuenta',
+       'forgot':'Solicitar recuperación','reset':'Cambiar contraseña'}[mode]!,authenticate),
+     Wrap(spacing:8,children: [
+@@ -208,9 +218,28 @@
+           ])
+       ])))
+   ]);
++  Widget notificationList()=>Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
++    const Text('Avisos',style:TextStyle(fontSize:22,fontWeight:FontWeight.bold)),
++    SwitchListTile(title:const Text('Recibir avisos de citas por correo'),value:emailEnabled,
++      subtitle:const Text('La verificación y recuperación de la cuenta se envían cuando las solicitas.'),
++      onChanged:busy?null:(value)=>run(() async {
++        await api.request('PATCH','/notifications/preferences',
++          body:{'emailEnabled':value,'version':preferencesVersion});
++        await load();
++      })),
++    if(notifications.isEmpty) const Text('No tienes avisos.'),
++    for(final notification in notifications) Card(child:ListTile(
++      title:Text(notification['body'] as String),
++      subtitle:Text(localTime(notification['createdAt'] as String)),
++      trailing:notification['readAt']==null?TextButton(
++        onPressed:busy?null:()=>run(() async {
++          await api.request('POST','/notifications/${notification['id']}/read',body:{});
++          await load();
++        }),child:const Text('Marcar leído')):const Icon(Icons.done)))
++  ]);
+   Future<void> reschedule(dynamic appointment) async {
+     final current=await api.request('GET','/appointments/${appointment['id']}');
+-    final servicesForSpecialty=services.where((s)=>s['name']==current['serviceName']);
++    final servicesForSpecialty=services.where((s)=>s['id']==current['serviceId']);
+     if(servicesForSpecialty.isEmpty) throw ApiFailure(409,'Servicio no disponible para reprogramar.');
+     final candidates=await api.request('GET','/availability?serviceId=${servicesForSpecialty.first['id']}') as List;
+     if(!mounted) return;
+diff --git a/app/src/test/notifications_widget_test.dart b/app/src/test/notifications_widget_test.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/test/notifications_widget_test.dart
+@@ -0,0 +1,53 @@
++import 'dart:convert';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:http/testing.dart';
++import 'package:telemedicina_app/core/network/milestone_repository.dart';
++import 'package:telemedicina_app/features/milestone/milestone_screen.dart';
++
++void main() {
++  testWidgets('El paciente cambia preferencias y marca un aviso leído', (tester) async {
++    var enabled=false;
++    var version=0;
++    var read=false;
++    final client=MockClient((request) async {
++      final path=request.url.path;
++      dynamic data;
++      if(path.endsWith('/auth/login')) {
++        data={'role':'Patient','accessToken':'synthetic','refreshToken':'synthetic-refresh'};
++      } else if(path.endsWith('/notifications/preferences')) {
++        if(request.method=='PATCH') {
++          enabled=jsonDecode(request.body)['emailEnabled'] as bool;
++          version++;
++        }
++        data={'emailEnabled':enabled,'version':version};
++      } else if(path.endsWith('/notifications/test/read')) {
++        read=true;data={'read':true};
++      } else if(path.endsWith('/notifications/me')) {
++        data=[{'id':'test','body':'Tu solicitud fue registrada.','createdAt':'2026-11-05T12:00:00Z','readAt':read?'2026-11-05T12:05:00Z':null}];
++      } else if(path.endsWith('/patients/me')) {
++        data=null;
++      } else {
++        data=[];
++      }
++      return http.Response(jsonEncode({'data':data}),200);
++    });
++    await tester.pumpWidget(MaterialApp(home:MilestoneScreen(repository:MilestoneRepository(client:client))));
++    final inputs=find.byType(TextField);
++    await tester.enterText(inputs.at(0),'synthetic@example.invalid');
++    await tester.enterText(inputs.at(1),'synthetic-password');
++    await tester.tap(find.text('Entrar'));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Avisos'));
++    await tester.pumpAndSettle();
++    expect(find.text('Tu solicitud fue registrada.'),findsOneWidget);
++    await tester.tap(find.byType(SwitchListTile));
++    await tester.pumpAndSettle();
++    expect(enabled,isTrue);
++    await tester.tap(find.text('Marcar leído'));
++    await tester.pumpAndSettle();
++    expect(read,isTrue);
++    expect(find.text('Marcar leído'),findsNothing);
++  });
++}
+diff --git a/portalweb/src/src/app/catalogo/page.tsx b/portalweb/src/src/app/catalogo/page.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/app/catalogo/page.tsx
+@@ -0,0 +1,2 @@
++import AdmissionConsole from "@/components/admission-console";
++export default function Page(){return <AdmissionConsole view="catalog"/>;}
+diff --git a/portalweb/src/src/app/entregas/page.tsx b/portalweb/src/src/app/entregas/page.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/app/entregas/page.tsx
+@@ -0,0 +1,2 @@
++import AdmissionConsole from "@/components/admission-console";
++export default function Page(){return <AdmissionConsole view="delivery"/>;}
+diff --git a/portalweb/src/src/app/layout.tsx b/portalweb/src/src/app/layout.tsx
+--- a/portalweb/src/src/app/layout.tsx
++++ b/portalweb/src/src/app/layout.tsx
+@@ -8,6 +8,7 @@
+       <nav className="mx-auto flex max-w-7xl flex-wrap gap-5" aria-label="Navegación principal">
+         <Link href="/">Telemedicina · Primer hito</Link>
+         <Link href="/admision">Admisión</Link><Link href="/agenda">Horarios</Link><Link href="/admin">Auditoría</Link>
++        <Link href="/catalogo">Catálogo</Link><Link href="/entregas">Entregas de correo</Link>
+         <Link href="/login">Acceso</Link>
+       </nav>
+     </header>
+diff --git a/portalweb/src/src/components/admission-console.tsx b/portalweb/src/src/components/admission-console.tsx
+--- a/portalweb/src/src/components/admission-console.tsx
++++ b/portalweb/src/src/components/admission-console.tsx
+@@ -2,8 +2,9 @@
+ import {useCallback,useEffect,useState} from "react";
+ import {useRouter} from "next/navigation";
+ import {api,ApiError,Item,localTime} from "@/lib/milestone-api";
++import CatalogPanel from "./catalog-panel";
+ 
+-export default function AdmissionConsole({view="queue"}:{view?:"queue"|"audit"|"schedule"}) {
++export default function AdmissionConsole({view="queue"}:{view?:"queue"|"audit"|"schedule"|"catalog"|"delivery"}) {
+   const router=useRouter();
+   const [user,setUser]=useState<{email:string;role:string}|null>(null);
+   const [items,setItems]=useState<Item[]>([]),[busy,setBusy]=useState(true),[error,setError]=useState("");
+@@ -18,6 +19,11 @@
+     setUser(me);
+     if(view==="audit") setItems(await api<Item[]>("/admin/audit-events"));
+     else if(view==="queue") setItems(await api<Item[]>("/admin/work-queue"));
++    else if(view==="delivery") setItems(await api<Item[]>("/admin/email-delivery"));
++    else if(view==="catalog"){
++      const [s,p]=await Promise.all([api<Item[]>("/admin/catalog/services"),api<Item[]>("/admin/catalog/practitioners")]);
++      setServices(s);setPractitioners(p);
++    }
+     else {
+       const [s,p]=await Promise.all([api<Item[]>("/services"),api<Item[]>("/practitioners")]);
+       setServices(s); setPractitioners(p);
+@@ -36,16 +42,16 @@
+     return ()=>{mounted=false;};
+   },[load,failure]);
+   async function run(action:()=>Promise<void>) {
+-    if(busy) return;
++    if(busy) return false;
+     setBusy(true); setError("");
+-    try {await action();}
+-    catch(e) {failure(e);}
++    try {await action();return true;}
++    catch(e) {failure(e);return false;}
+     finally {setBusy(false);}
+   }
+   if(!user) return <p role="status">{busy?"Verificando sesión…":error||"Se requiere iniciar sesión."}</p>;
+   return <section className="space-y-5">
+     <div className="flex flex-wrap justify-between gap-3">
+-      <h1 className="text-2xl font-bold">{view==="queue"?"Admisión y cobertura":view==="audit"?"Auditoría":"Horarios"}</h1>
++      <h1 className="text-2xl font-bold">{view==="queue"?"Admisión y cobertura":view==="audit"?"Auditoría":view==="catalog"?"Catálogo":view==="delivery"?"Entregas de correo":"Horarios"}</h1>
+       <div>{user.email} · Admisión <button className="ml-4 underline" disabled={busy}
+         onClick={()=>run(async()=>{await api("/auth/logout","POST",{});setUser(null);router.replace("/login");})}>Salir</button></div>
+     </div>
+@@ -54,6 +60,15 @@
+     <button disabled={busy} className="rounded border p-2" onClick={()=>run(load)}>
+       {busy?"Procesando…":"Actualizar"}</button>
+ 
++    {view==="catalog" && <CatalogPanel services={services} practitioners={practitioners} busy={busy}
++      onSave={async(path,method,body)=>run(async()=>{await api(path,method,body);await load();})}/>}
++    {view==="delivery" && <div className="overflow-x-auto"><table className="w-full text-left">
++      <thead><tr>{["Evento","Estado","Intentos","Último código"].map(name=><th key={name} className="p-2">{name}</th>)}</tr></thead>
++      <tbody>{items.map(item=><tr key={String(item.id)} className="border-t">
++        <td className="p-2">{String(item.kind)}</td><td className="p-2">{String(item.state)}</td>
++        <td className="p-2">{String(item.attempts)}</td><td className="p-2">{String(item.lastErrorCode??"—")}</td>
++      </tr>)}</tbody>
++    </table><p>Unknown indica confirmación SMTP incierta: no se reenvía automáticamente.</p></div>}
+     {view==="queue" && <>
+       {items.length===0 && <p>No hay citas registradas.</p>}
+       <div className="overflow-x-auto"><table className="w-full text-left">
+diff --git a/portalweb/src/src/components/catalog-panel.tsx b/portalweb/src/src/components/catalog-panel.tsx
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/components/catalog-panel.tsx
+@@ -0,0 +1,94 @@
++"use client";
++import {useState} from "react";
++import {Item} from "@/lib/milestone-api";
++
++type Props={services:Item[];practitioners:Item[];busy:boolean;
++  onSave:(path:string,method:string,body:unknown)=>Promise<boolean>};
++const blankService={id:"",name:"",specialty:"",durationMinutes:30,active:false,isSynthetic:true,approvalReference:"",version:0};
++const blankPractitioner={id:"",name:"",licenseRef:"",active:false,serviceIds:[] as string[],version:0};
++
++export default function CatalogPanel({services,practitioners,busy,onSave}:Props){
++  const [service,setService]=useState(blankService);
++  const [person,setPerson]=useState(blankPractitioner);
++  return <div className="grid gap-6 xl:grid-cols-2">
++    <section className="space-y-4 rounded-xl border bg-white p-5">
++      <h2 className="text-lg font-bold">Servicios</h2>
++      <p>Active solo servicios habilitados por el centro. La marca sintética identifica datos de demostración.</p>
++      <form className="space-y-3" onSubmit={async event=>{
++        event.preventDefault();
++        if(await onSave("/admin/catalog/services"+(service.id?"/"+service.id:""),
++          service.id?"PATCH":"POST",service)) setService(blankService);
++      }}>
++        <label className="block" htmlFor="service-name">Nombre del servicio</label>
++        <input id="service-name" className="w-full rounded border p-2" required maxLength={120} value={service.name}
++          onChange={e=>setService({...service,name:e.target.value})}/>
++        <label className="block" htmlFor="specialty">Especialidad</label>
++        <input id="specialty" className="w-full rounded border p-2" required maxLength={100} value={service.specialty}
++          onChange={e=>setService({...service,specialty:e.target.value})}/>
++        <label className="block" htmlFor="duration">Duración en minutos</label>
++        <input id="duration" className="rounded border p-2" type="number" min={5} max={240} required
++          value={service.durationMinutes} onChange={e=>setService({...service,durationMinutes:Number(e.target.value)})}/>
++        <label className="block"><input type="checkbox" checked={service.isSynthetic}
++          onChange={e=>setService({...service,isSynthetic:e.target.checked})}/> Servicio sintético</label>
++        <label className="block"><input type="checkbox" checked={service.active}
++          onChange={e=>setService({...service,active:e.target.checked})}/> Servicio activo</label>
++        <label className="block" htmlFor="approval">Referencia de habilitación del centro</label>
++        <input id="approval" className="w-full rounded border p-2" maxLength={250}
++          required={service.active&&!service.isSynthetic} value={service.approvalReference}
++          onChange={e=>setService({...service,approvalReference:e.target.value})}/>
++        <div className="flex gap-3">
++          <button disabled={busy} className="rounded bg-teal-700 p-2 text-white">Guardar servicio</button>
++          <button disabled={busy} type="button" onClick={()=>setService(blankService)} className="rounded border p-2">Nuevo servicio</button>
++        </div>
++      </form>
++      <ul className="space-y-2">{services.map(item=><li key={String(item.id)} className="flex flex-wrap justify-between gap-2 rounded border p-3">
++        <span>{String(item.name)} · {item.active?"Activo":"Inactivo"} · {String(item.durationMinutes)} min</span>
++        <button disabled={busy} className="underline" onClick={()=>setService({
++          id:String(item.id),name:String(item.name),specialty:String(item.specialty),
++          durationMinutes:Number(item.durationMinutes),active:Boolean(item.active),isSynthetic:Boolean(item.isSynthetic),
++          approvalReference:String(item.approvalReference??""),version:Number(item.version)
++        })}>Editar servicio</button>
++      </li>)}</ul>
++    </section>
++    <section className="space-y-4 rounded-xl border bg-white p-5">
++      <h2 className="text-lg font-bold">Profesionales</h2>
++      <p>La referencia profesional es un dato administrativo; su registro no constituye validación automática de credenciales.</p>
++      <form className="space-y-3" onSubmit={async event=>{
++        event.preventDefault();
++        if(await onSave("/admin/catalog/practitioners"+(person.id?"/"+person.id:""),
++          person.id?"PATCH":"POST",person)) setPerson(blankPractitioner);
++      }}>
++        <label className="block" htmlFor="person-name">Nombre del profesional</label>
++        <input id="person-name" className="w-full rounded border p-2" required maxLength={120} value={person.name}
++          onChange={e=>setPerson({...person,name:e.target.value})}/>
++        <label className="block" htmlFor="license">Referencia profesional</label>
++        <input id="license" className="w-full rounded border p-2" maxLength={100} value={person.licenseRef}
++          onChange={e=>setPerson({...person,licenseRef:e.target.value})}/>
++        <label className="block"><input type="checkbox" checked={person.active}
++          onChange={e=>setPerson({...person,active:e.target.checked})}/> Profesional activo</label>
++        <fieldset className="space-y-2 rounded border p-3"><legend>Servicios asignados</legend>
++          {services.length===0&&<p>Cree primero un servicio.</p>}
++          {services.map(item=><label className="block" key={String(item.id)}>
++            <input type="checkbox" checked={person.serviceIds.includes(String(item.id))}
++              onChange={e=>setPerson({...person,serviceIds:e.target.checked?
++                [...person.serviceIds,String(item.id)]:person.serviceIds.filter(id=>id!==item.id)})}/>
++            {" "+String(item.name)}
++          </label>)}
++        </fieldset>
++        <div className="flex gap-3">
++          <button disabled={busy} className="rounded bg-teal-700 p-2 text-white">Guardar profesional</button>
++          <button disabled={busy} type="button" onClick={()=>setPerson(blankPractitioner)} className="rounded border p-2">Nuevo profesional</button>
++        </div>
++      </form>
++      <ul className="space-y-2">{practitioners.map(item=><li key={String(item.id)}
++        className="flex flex-wrap justify-between gap-2 rounded border p-3">
++        <span>{String(item.name)} · {item.active?"Activo":"Inactivo"}</span>
++        <button disabled={busy} className="underline" onClick={()=>setPerson({
++          id:String(item.id),name:String(item.name),licenseRef:String(item.licenseRef??""),
++          active:Boolean(item.active),version:Number(item.version),
++          serviceIds:Array.isArray(item.serviceIds)?item.serviceIds.map(String):[]
++        })}>Editar profesional</button>
++      </li>)}</ul>
++    </section>
++  </div>;
++}
+diff --git a/portalweb/src/tests/browser/milestone.spec.ts b/portalweb/src/tests/browser/milestone.spec.ts
+--- a/portalweb/src/tests/browser/milestone.spec.ts
++++ b/portalweb/src/tests/browser/milestone.spec.ts
+@@ -2,6 +2,7 @@
+ import {createHmac,randomBytes,randomUUID} from "node:crypto";
+ import path from "node:path";
+ import fs from "node:fs/promises";
++import type {Item} from "../../src/lib/milestone-api";
+ 
+ test.describe.configure({mode:"serial"});
+ const headers={"X-Telemedicina-Client":"milestone"};
+@@ -144,6 +145,50 @@
+   await page.screenshot({path:path.join(artifacts,"horarios.png"),fullPage:false});
+ });
+ 
++test("catalog editor persists synthetic services and professional assignments",async({page,context})=>{
++  const suffix=randomBytes(5).toString("hex");
++  const serviceName="Servicio sintético navegador "+suffix;
++  const personName="Profesional sintético navegador "+suffix;
++  await page.goto("/catalogo");
++  await expect(page.getByRole("heading",{name:"Catálogo",exact:true})).toBeVisible();
++  await page.getByLabel("Nombre del servicio",{exact:true}).fill(serviceName);
++  await page.getByLabel("Especialidad",{exact:true}).fill("Pruebas");
++  await page.getByLabel("Duración en minutos",{exact:true}).fill("20");
++  await expect(page.getByLabel("Servicio sintético",{exact:true})).toBeChecked();
++  await page.getByLabel("Servicio activo",{exact:true}).check();
++  const created=page.waitForResponse(response=>response.url().endsWith("/catalog/services")&&response.request().method()==="POST");
++  await page.getByRole("button",{name:"Guardar servicio",exact:true}).click();
++  const serviceResponse=await created;expect(serviceResponse.status()).toBe(201);
++  const serviceId=(await serviceResponse.json()).data.id;
++  await page.getByLabel("Nombre del profesional",{exact:true}).fill(personName);
++  await page.getByLabel("Referencia profesional",{exact:true}).fill("SYNTHETIC");
++  await page.getByLabel("Profesional activo",{exact:true}).check();
++  await page.getByRole("checkbox",{name:serviceName,exact:true}).check();
++  const assigned=page.waitForResponse(response=>response.url().endsWith("/catalog/practitioners")&&response.request().method()==="POST");
++  await page.getByRole("button",{name:"Guardar profesional",exact:true}).click();
++  const personResponse=await assigned;expect(personResponse.status()).toBe(201);
++  const personId=(await personResponse.json()).data.id;
++  await expect(page.getByText(personName,{exact:false}).first()).toBeVisible();
++  const publicServices=(await (await patient.get("/api/backend/services")).json()).data;
++  expect(publicServices.some((item:Item)=>item.id===serviceId)).toBe(true);
++  await page.screenshot({path:path.join(artifacts,"catalogo.png"),fullPage:true});
++  expect((await context.request.patch("/api/backend/admin/catalog/practitioners/"+personId,{
++    headers,data:{name:personName,licenseRef:"SYNTHETIC",active:false,serviceIds:[],version:1}})).status()).toBe(200);
++  expect((await context.request.patch("/api/backend/admin/catalog/services/"+serviceId,{
++    headers,data:{name:serviceName,specialty:"Pruebas",durationMinutes:20,active:false,isSynthetic:true,
++      approvalReference:"",version:1}})).status()).toBe(200);
++});
++
++test("delivery monitoring shows metadata while patient notifications remain private",async({page})=>{
++  await page.goto("/entregas");
++  await expect(page.getByRole("heading",{name:"Entregas de correo",exact:true})).toBeVisible();
++  await expect(page.getByRole("table")).toBeVisible();
++  await expect(page.getByRole("columnheader",{name:"Último código",exact:true})).toBeVisible();
++  await page.screenshot({path:path.join(artifacts,"entregas.png"),fullPage:false});
++  const notices=(await (await patient.get("/api/backend/notifications/me")).json()).data;
++  expect(notices.filter((item:Item)=>item.resourceId===appointmentId).length).toBe(2);
++});
++
+ test("logout revokes the cookie session and protects navigation again",async({page,context})=>{
+   await page.goto("/admision");
+   await expect(page.getByRole("heading",{name:"Admisión y cobertura",exact:true})).toBeVisible();

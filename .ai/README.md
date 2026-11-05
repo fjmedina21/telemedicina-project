@@ -2,7 +2,7 @@
 
 Todo lo relativo a IA y desarrollo asistido vive aquí:
 
-- `agents/`: orquestador, arquitecto, spec creator, implementador y validador.
+- `agents/`: [flujo y aprobación humana](agents/AGENT.md), roles individuales, configuración y guía del equipo.
 - `specs/`: plan, arquitectura y las 12 especificaciones de telemedicina.
 - `src/teleharness/`: CLI y adaptadores OpenAI, Anthropic, compatibles y mock.
 - `collaboration.json`: participantes y rutas editables.
@@ -17,7 +17,7 @@ Todo lo relativo a IA y desarrollo asistido vive aquí:
 
 ```bash
 PYTHONPATH=.ai/src python3 -m teleharness doctor
-PYTHONPATH=.ai/src python3 -m teleharness team --provider mock --actor mobile --area frontend --module M04 --task "Probar el equipo" --workspace .
+PYTHONPATH=.ai/src python3 -m teleharness run --role architect --provider mock --actor backend_mobile --area fullstack --module M01 --task "Preparar una propuesta técnica para M01" --workspace .
 ```
 
-Consulta el `README.md` raíz para configuración y comandos completos. No almacenar claves ni datos clínicos reales aquí.
+El comando `team` aún ejecuta el pipeline automático legado sin pausa de aprobación humana. Sigue [el flujo de agentes](agents/AGENT.md) y no uses `team` para trabajo que requiera esa aprobación. Consulta el `README.md` raíz para configuración general. No almacenar claves ni datos clínicos reales aquí.
