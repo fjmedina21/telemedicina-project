@@ -86,3 +86,21 @@ bash inicio_local.sh app <device-id> http://<ip-del-mac>:5081/api/v1
 ```
 
 Usa `http://localhost:3000` para entrar al portal; su origen coincide con el permitido por la configuración local de la API.
+
+## Recibir el código de registro por correo
+
+El script usa `Mail__Mode=development` por defecto: captura los mensajes
+en el buzón de desarrollo y no los envía al correo del usuario.
+
+Para enviar correos reales, configura previamente los datos SMTP en
+`api/src/.env`, sin compartir ni subir las credenciales a Git.
+Luego, desde la raíz del repositorio, ejecuta:
+
+```bash
+bash inicio_local.sh stop
+Mail__Mode=smtp bash inicio_local.sh start
+```
+
+Es necesario reiniciar porque `start` reutiliza la API si ya está activa.
+Después pulsa **Reenviar código** en la app; reiniciar los servicios
+no envía el código anterior. Revisa también la carpeta de spam.
