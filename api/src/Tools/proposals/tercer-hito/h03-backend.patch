@@ -1,0 +1,628 @@
+diff --git a/api/src/Telemedicina.Api/Features/Patients/PatientsContracts.cs b/api/src/Telemedicina.Api/Features/Patients/PatientsContracts.cs
+--- a/api/src/Telemedicina.Api/Features/Patients/PatientsContracts.cs
++++ b/api/src/Telemedicina.Api/Features/Patients/PatientsContracts.cs
+@@ -1,16 +1,21 @@
+-using System.ComponentModel.DataAnnotations;
++using System.Text.Json;
++using System.Text.Json.Serialization;
+ 
+ namespace Telemedicina.Api.Features.Patients;
+ 
++// Full replacement; normalize and validate in ProfileRules, before persistence.
+ public sealed record ProfileRequest(
+-    [Required, MaxLength(80)] string FirstName,
+-    [Required, MaxLength(80)] string LastName,
+-    DateOnly BirthDate,
+-    [Required, Phone, MaxLength(30)] string Phone,
+-    [Required, MaxLength(250)] string Address,
+-    [Required, MaxLength(100)] string EmergencyName,
+-    [Required, Phone, MaxLength(30)] string EmergencyPhone,
+-    [MaxLength(20)] string[] Allergies,
+-    [MaxLength(20)] string[] Medications,
+-    [MaxLength(20)] string[] Conditions,
+-    [Range(0, int.MaxValue)] int Version);
++    string FirstName, string LastName, DateOnly BirthDate, string Phone,
++    string Address, string EmergencyName, string EmergencyPhone,
++    string[] Allergies, string[] Medications, string[] Conditions,
++    [property: JsonRequired] int Version)
++{
++    [JsonExtensionData]
++    public Dictionary<string, JsonElement>? AdditionalProperties { get; init; }
++}
++
++public sealed record ProfileCompleteness(string Status, string[] MissingFields);
++public sealed record DeclarationMetadata(string Source, DateTime? UpdatedAt);
++public sealed record ProfileSnapshot(JsonElement Profile, int Version, DateTime UpdatedAt,
++    string Source, Dictionary<string, DeclarationMetadata> DeclarationMetadata, ProfileCompleteness Completeness);
++public sealed record ProfileSaved(int Version);
+diff --git a/api/src/Telemedicina.Api/Features/Patients/ProfileRules.cs b/api/src/Telemedicina.Api/Features/Patients/ProfileRules.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Features/Patients/ProfileRules.cs
+@@ -0,0 +1,97 @@
++using System.ComponentModel.DataAnnotations;
++using System.Globalization;
++using System.Text.Json;
++using Microsoft.AspNetCore.Mvc;
++using Telemedicina.Common.Models.ApiResponses;
++
++namespace Telemedicina.Api.Features.Patients;
++
++public static class ProfileRules
++{
++    public static readonly string[] Fields = ["firstName", "lastName", "birthDate", "phone", "address",
++        "emergencyName", "emergencyPhone", "allergies", "medications", "conditions"];
++    public static readonly string[] Categories = ["allergies", "medications", "conditions"];
++    private static readonly HashSet<string> Protected = new(StringComparer.OrdinalIgnoreCase)
++    {
++        "userId", "patientId", "documentType", "documentNumber", "identificationCard", "verifiedAt",
++        "email", "role", "roles", "status", "active", "verified", "accountStatus", "accountState",
++        "declarationMetadata", "completeness", "source", "updatedAt"
++    };
++    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
++
++    public static ProfileRequest Normalize(ProfileRequest r) => r with
++    {
++        FirstName = r.FirstName?.Trim()!, LastName = r.LastName?.Trim()!, Phone = r.Phone?.Trim()!,
++        Address = r.Address?.Trim()!, EmergencyName = r.EmergencyName?.Trim()!, EmergencyPhone = r.EmergencyPhone?.Trim()!,
++        Allergies = NormalizeList(r.Allergies)!, Medications = NormalizeList(r.Medications)!, Conditions = NormalizeList(r.Conditions)!
++    };
++    private static string[]? NormalizeList(string[]? values) => values?.Select(v => v?.Trim()!).ToArray();
++
++    public static string[] Validate(ProfileRequest r)
++    {
++        var errors = ValidateBody(JsonSerializer.SerializeToElement(r, Json)).ToList();
++        if (r.Version < 0) errors.Add("version:INVALID");
++        if (r.AdditionalProperties?.Keys.Any(Protected.Contains) == true) errors.Add("profile:INVALID");
++        return errors.ToArray();
++    }
++
++    public static ProfileCompleteness Completeness(JsonElement body)
++    {
++        var missing = ValidateBody(body).Select(e => e.Split(':')[0]).Distinct().ToArray();
++        return new(missing.Length == 0 ? "Complete" : "Incomplete", missing);
++    }
++
++    public static string[] ValidateBody(JsonElement body)
++    {
++        var errors = new List<string>();
++        foreach (var field in Fields)
++        {
++            if (body.ValueKind != JsonValueKind.Object || !body.TryGetProperty(field, out var value) || value.ValueKind == JsonValueKind.Null)
++            { errors.Add(field + ":REQUIRED"); continue; }
++            if (Categories.Contains(field))
++            {
++                if (value.ValueKind != JsonValueKind.Array) errors.Add(field + ":INVALID");
++                else if (value.GetArrayLength() > 20) errors.Add(field + ":MAX_ITEMS");
++                else if (value.EnumerateArray().Any(v => v.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(v.GetString())))
++                    errors.Add(field + ":INVALID");
++                else if (value.EnumerateArray().Any(v => v.GetString()!.Trim().Length > 200)) errors.Add(field + ":MAX_LENGTH");
++                continue;
++            }
++            if (value.ValueKind != JsonValueKind.String) { errors.Add(field + ":INVALID"); continue; }
++            var text = value.GetString()!.Trim();
++            if (text.Length == 0) { errors.Add(field + ":REQUIRED"); continue; }
++            if (field == "birthDate")
++            {
++                if (!DateOnly.TryParseExact(text, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date) ||
++                    date.Year < 1900 || date >= DateOnly.FromDateTime(DateTime.UtcNow)) errors.Add(field + ":INVALID");
++                continue;
++            }
++            var max = field switch { "firstName" or "lastName" => 80, "phone" or "emergencyPhone" => 30,
++                "address" => 250, _ => 100 };
++            if (text.Length > max) errors.Add(field + ":MAX_LENGTH");
++            else if ((field is "phone" or "emergencyPhone") && !new PhoneAttribute().IsValid(text)) errors.Add(field + ":INVALID");
++        }
++        return errors.ToArray();
++    }
++
++    public static bool SameCategory(JsonElement previous, string field, string[] current)
++    {
++        if (previous.ValueKind != JsonValueKind.Object || !previous.TryGetProperty(field, out var value) ||
++            value.ValueKind != JsonValueKind.Array || value.EnumerateArray().Any(v => v.ValueKind != JsonValueKind.String)) return false;
++        return value.EnumerateArray().Select(v => v.GetString()!.Trim()).SequenceEqual(current, StringComparer.Ordinal);
++    }
++
++    // Never expose model-binding messages: JsonException may contain submitted values.
++    public static IActionResult BindingFailure(ActionContext context)
++    {
++        var errors = context.ModelState.Where(p => p.Value?.Errors.Count > 0).Select(p =>
++        {
++            var key = p.Key.TrimStart('$', '.').Split('.', '[')[0];
++            var field = Fields.Append("version").FirstOrDefault(f => f.Equals(key, StringComparison.OrdinalIgnoreCase));
++            return (field ?? "profile") + ":INVALID";
++        }).Distinct().ToArray();
++        return new BadRequestObjectResult(new ErrorApiResponse(400, "Los datos enviados no son válidos.",
++            context.HttpContext.Request.Path.Value ?? "/", errors)
++        { Code = "VALIDATION_FAILED", TraceId = context.HttpContext.TraceIdentifier });
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Features/Patients/PatientsController.cs b/api/src/Telemedicina.Api/Features/Patients/PatientsController.cs
+--- a/api/src/Telemedicina.Api/Features/Patients/PatientsController.cs
++++ b/api/src/Telemedicina.Api/Features/Patients/PatientsController.cs
+@@ -3,12 +3,9 @@
+ using Microsoft.AspNetCore.Mvc;
+ using Telemedicina.Api.Infrastructure.Persistence;
+ using Telemedicina.Api.Shared;
+-using Telemedicina.Api.Shared.Contracts;
++using Telemedicina.Common.Models.ApiResponses;
+ using static Telemedicina.Api.Infrastructure.Persistence.Database;
+ using static Telemedicina.Api.Infrastructure.Authentication.Security;
+-using static Telemedicina.Api.Infrastructure.Auditing.AuditLog;
+-using Telemedicina.Api.Features.Appointments;
+-using Telemedicina.Api.Features.Notifications;
+ 
+ namespace Telemedicina.Api.Features.Patients;
+ 
+@@ -16,38 +13,73 @@
+ public sealed class PatientsController(Database database) : ApiControllerBase(database)
+ {
+     [Authorize(Roles = "Patient"), HttpGet("patients/me")]
++    [ProducesResponseType(typeof(ApiResponse<ProfileSnapshot?>), 200)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 401)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 403)]
+     public IActionResult Profile()
+     {
+         using var c = Database.Open();
+-        var rows = Rows(c, null, "SELECT body,version,updated_at FROM profiles WHERE user_id=@u", ("u", UserId(User)));
+-        return Data(rows.Count == 0 ? null : new
+-        {
+-            profile = JsonSerializer.Deserialize<JsonElement>((string)rows[0]["body"]!),
+-            version = rows[0]["version"],
+-            updatedAt = rows[0]["updated_at"],
+-            source = "SelfDeclared"
+-        });
++        var rows = Rows(c, null, "SELECT * FROM profiles WHERE user_id=@u", ("u", UserId(User)));
++        if (rows.Count == 0) return Data(null);
++        var row = rows[0];
++        var body = JsonSerializer.Deserialize<JsonElement>((string)row["body"]!);
++        var metadata = ProfileRules.Categories.ToDictionary(category => category,
++            category => new DeclarationMetadata("SelfDeclared", (DateTime?)row[category + "_updated_at"]));
++        return Data(new ProfileSnapshot(body, (int)row["version"]!, (DateTime)row["updated_at"]!,
++            "SelfDeclared", metadata, ProfileRules.Completeness(body)));
+     }
++
++    [Authorize(Roles = "Patient"), HttpGet("patients/me/completeness")]
++    [ProducesResponseType(typeof(ApiResponse<ProfileCompleteness>), 200)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 401)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 403)]
++    public IActionResult Completeness()
++    {
++        using var c = Database.Open();
++        var body = Scalar(c, null, "SELECT body FROM profiles WHERE user_id=@u", ("u", UserId(User))) as string;
++        return Data(ProfileRules.Completeness(body is null ? default : JsonSerializer.Deserialize<JsonElement>(body)));
++    }
++
++    /// <summary>Reemplaza el perfil propio completo; requiere todos los campos y la versión exterior vigente.</summary>
+     [Authorize(Roles = "Patient"), HttpPatch("patients/me")]
++    [ProducesResponseType(typeof(ApiResponse<ProfileSaved>), 200)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 400)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 401)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 403)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 409)]
+     public IActionResult SaveProfile(ProfileRequest request)
+     {
+-        if (request.BirthDate >= DateOnly.FromDateTime(DateTime.UtcNow) || request.BirthDate.Year < 1900 ||
+-            new[] { request.FirstName, request.LastName, request.Address, request.EmergencyName }.Any(string.IsNullOrWhiteSpace) ||
+-            request.Allergies is null || request.Medications is null || request.Conditions is null ||
+-            request.Allergies.Concat(request.Medications).Concat(request.Conditions).Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 200))
+-            return Fail(400, "INVALID_PROFILE", "Revise los datos del perfil.");
++        request = ProfileRules.Normalize(request);
++        var errors = ProfileRules.Validate(request);
++        if (errors.Length > 0)
++            return StatusCode(400, new ErrorApiResponse(400, "Revise los datos del perfil.", Request.Path.Value ?? "/", errors)
++            { Code = "INVALID_PROFILE", TraceId = HttpContext.TraceIdentifier });
+         using var c = Database.Open(); using var t = Begin(c);
+         Execute(c, t, "SELECT pg_advisory_xact_lock(hashtextextended(@key,0))", ("key", "profile:" + UserId(User)));
+-        var version = Scalar(c, t, "SELECT version FROM profiles WHERE user_id=@u FOR UPDATE", ("u", UserId(User)));
+-        if ((version is null && request.Version != 0) || (version is not null && (int)version != request.Version))
++        var rows = Rows(c, t, "SELECT * FROM profiles WHERE user_id=@u FOR UPDATE", ("u", UserId(User)));
++        var previous = rows.SingleOrDefault();
++        if ((previous is null && request.Version != 0) || (previous is not null && (int)previous["version"]! != request.Version))
+             return Fail(409, "VERSION_CONFLICT", "El perfil cambió. Actualice antes de guardar.");
+-        Execute(c, t, """
+-            INSERT INTO profiles(user_id,body,version) VALUES(@u,@body,1)
+-            ON CONFLICT(user_id) DO UPDATE SET body=excluded.body,version=profiles.version+1,updated_at=now()
+-            """, ("u", UserId(User)), ("body", JsonSerializer.Serialize(request, Json)));
++        var oldBody = previous is null ? default : JsonSerializer.Deserialize<JsonElement>((string)previous["body"]!);
++        var now = (DateTime)Scalar(c, t, "SELECT clock_timestamp()")!;
++        DateTime? Stamp(string category, string[] values) => previous is null
++            ? (values.Length == 0 ? null : now)
++            : ProfileRules.SameCategory(oldBody, category, values) ? (DateTime?)previous[category + "_updated_at"] : now;
++        var body = JsonSerializer.Serialize(request with { AdditionalProperties = null }, Json);
++        if (previous is null)
++            Execute(c, t, """
++                INSERT INTO profiles(user_id,body,version,updated_at,allergies_updated_at,medications_updated_at,conditions_updated_at)
++                VALUES(@u,@body,1,@now,@a::timestamptz,@m::timestamptz,@d::timestamptz)
++                """, ("u", UserId(User)), ("body", body), ("now", now),
++                ("a", Stamp("allergies", request.Allergies)), ("m", Stamp("medications", request.Medications)), ("d", Stamp("conditions", request.Conditions)));
++        else
++            Execute(c, t, """
++                UPDATE profiles SET body=@body,version=version+1,updated_at=@now,
++                    allergies_updated_at=@a::timestamptz,medications_updated_at=@m::timestamptz,conditions_updated_at=@d::timestamptz
++                WHERE user_id=@u
++                """, ("u", UserId(User)), ("body", body), ("now", now),
++                ("a", Stamp("allergies", request.Allergies)), ("m", Stamp("medications", request.Medications)), ("d", Stamp("conditions", request.Conditions)));
+         Log(c, t, "profile.updated", UserId(User)); t.Commit();
+-        return Data(new { version = request.Version + 1 });
++        return Data(new ProfileSaved(request.Version + 1));
+     }
+-
+-
+ }
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/006_profile_declarations.sql b/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/006_profile_declarations.sql
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/006_profile_declarations.sql
+@@ -0,0 +1,6 @@
++-- H03-SPEC-v1. Explicit additive migration; unknown historical dates stay NULL.
++SET LOCAL search_path TO telemedicina_m1, public;
++ALTER TABLE profiles ADD COLUMN IF NOT EXISTS allergies_updated_at timestamptz;
++ALTER TABLE profiles ADD COLUMN IF NOT EXISTS medications_updated_at timestamptz;
++ALTER TABLE profiles ADD COLUMN IF NOT EXISTS conditions_updated_at timestamptz;
++INSERT INTO schema_versions(version) VALUES(6) ON CONFLICT(version) DO NOTHING;
+diff --git a/api/src/Telemedicina.Api/Program.cs b/api/src/Telemedicina.Api/Program.cs
+--- a/api/src/Telemedicina.Api/Program.cs
++++ b/api/src/Telemedicina.Api/Program.cs
+@@ -15,7 +15,10 @@
+ builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
+ {
+     options.InvalidModelStateResponseFactory = context =>
+-        new BadRequestObjectResult(ApiErrors.Create(context.HttpContext, 400, "VALIDATION_FAILED",
++        context.ActionDescriptor is Microsoft.AspNetCore.Mvc.Controllers.ControllerActionDescriptor action &&
++            action.ControllerTypeInfo.AsType() == typeof(Telemedicina.Api.Features.Patients.PatientsController)
++        ? Telemedicina.Api.Features.Patients.ProfileRules.BindingFailure(context)
++        : new BadRequestObjectResult(ApiErrors.Create(context.HttpContext, 400, "VALIDATION_FAILED",
+             "Los datos enviados no son válidos."));
+ });
+ builder.Services.AddEndpointsApiExplorer();
+diff --git a/api/src/Telemedicina.Tests/Contracts/ProfileUnitChecks.cs b/api/src/Telemedicina.Tests/Contracts/ProfileUnitChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/Contracts/ProfileUnitChecks.cs
+@@ -0,0 +1,57 @@
++using System.Text.Json;
++using Telemedicina.Api.Features.Patients;
++
++namespace Telemedicina.Tests;
++
++public static class ProfileUnitChecks
++{
++    public static ProfileRequest Valid() => new(" Paciente ", " Sintético ", new DateOnly(1990,1,1), "8095550101",
++        " Dirección sintética ", " Contacto ", "8095550102", [" Dato, sintético "], [], [], 0);
++    public static void Register(Action<string, Action> test, Action<bool, string> assert)
++    {
++        test("H03_TrimAndCommaArePreserved", () =>
++        {
++            var r = ProfileRules.Normalize(Valid() with { FirstName = " " + new string('A',80) + " " });
++            assert(ProfileRules.Validate(r).Length == 0 && r.FirstName.Length == 80 && r.Allergies[0] == "Dato, sintético",
++                "Trim before validation; commas remain within a declaration.");
++        });
++        test("H03_FieldErrorsAreSafeAndDeterministic", () =>
++        {
++            var errors = ProfileRules.Validate(ProfileRules.Normalize(Valid() with
++                { FirstName = " ", Phone = "invalid", Allergies = [" "], Medications = Enumerable.Repeat("x",21).ToArray(), Version = -1 }));
++            assert(errors.SequenceEqual(new[] {"firstName:REQUIRED","phone:INVALID","allergies:INVALID","medications:MAX_ITEMS","version:INVALID"}),
++                "Only stable field names and codes.");
++        });
++        test("H03_CompletenessAbsentAndHistorical", () =>
++        {
++            assert(ProfileRules.Completeness(default).MissingFields.SequenceEqual(ProfileRules.Fields), "All missing fields in approved order.");
++            var body = JsonSerializer.SerializeToElement(ProfileRules.Normalize(Valid()), new JsonSerializerOptions(JsonSerializerDefaults.Web));
++            assert(ProfileRules.Completeness(body).Status == "Complete", "Empty arrays satisfy presence.");
++            using var historic = JsonDocument.Parse("{\"allergies\":null,\"medications\":[],\"conditions\":[42]}");
++            var missing = ProfileRules.Completeness(historic.RootElement).MissingFields;
++            assert(missing.Contains("allergies") && !missing.Contains("medications") && missing.Contains("conditions"), "Invalid historical values are missing.");
++        });
++        test("H03_IdentityAndMetadataAreNotWritable", () =>
++        {
++            foreach (var field in new[] {"patientId","USERID","documentType","documentNumber","identificationCard","verifiedAt","email","roles","status","accountStatus","declarationMetadata","completeness"})
++            {
++                var r = Valid() with { AdditionalProperties = new() { [field] = JsonSerializer.SerializeToElement("synthetic") } };
++                assert(ProfileRules.Validate(r).Contains("profile:INVALID"), "Protected fields must fail without echo.");
++            }
++        });
++        test("H03_CategoryComparisonHasNoClinicalNormalization", () =>
++        {
++            using var doc = JsonDocument.Parse("""{"allergies":[" A ","a","A"]}""");
++            assert(ProfileRules.SameCategory(doc.RootElement,"allergies",["A","a","A"]), "Only trim strings.");
++            assert(!ProfileRules.SameCategory(doc.RootElement,"allergies",["A","A","a"]), "Order, case and duplicates remain significant.");
++            assert(!ProfileRules.SameCategory(doc.RootElement,"allergies",[]), "Clearing a category changes it.");
++        });
++        test("H03_RequestRequiresVersion", () =>
++        {
++            var rejected=false;
++            try { JsonSerializer.Deserialize<ProfileRequest>("{}",new JsonSerializerOptions(JsonSerializerDefaults.Web)); }
++            catch(JsonException) { rejected=true; }
++            assert(rejected,"Full replacement requires an explicit version.");
++        });
++    }
++}
+diff --git a/api/src/Telemedicina.Tests/Contracts/Program.cs b/api/src/Telemedicina.Tests/Contracts/Program.cs
+--- a/api/src/Telemedicina.Tests/Contracts/Program.cs
++++ b/api/src/Telemedicina.Tests/Contracts/Program.cs
+@@ -17,6 +17,7 @@
+     public static int Main(string[] args)
+     {
+         if (args.Contains("--demo-reset-db-tests", StringComparer.Ordinal)) return DemoResetDbChecks.Run();
++        if (args.Contains("--h03-db-tests", StringComparer.Ordinal)) return ProfileDbChecks.Run();
+         Console.WriteLine("=================================================");
+         Console.WriteLine(" Running Telemedicina Automated Unit Tests");
+         Console.WriteLine("=================================================");
+@@ -202,6 +203,7 @@
+         }
+ 
+         DemoResetUnitChecks.Register(Test, Assert);
++        ProfileUnitChecks.Register(Test, Assert);
+ 
+         Console.WriteLine("-------------------------------------------------");
+         Console.WriteLine($" Summary: {_passedCount} passed, {_failedCount} failed.");
+diff --git a/api/src/Telemedicina.Tests/Contracts/ProfileDbChecks.cs b/api/src/Telemedicina.Tests/Contracts/ProfileDbChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/Contracts/ProfileDbChecks.cs
+@@ -0,0 +1,96 @@
++using System.Security.Claims;
++using System.Text.Json;
++using Microsoft.AspNetCore.Http;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.Extensions.Configuration;
++using Telemedicina.Api.Features.Patients;
++using Telemedicina.Api.Infrastructure.Persistence;
++using static Telemedicina.Api.Infrastructure.Persistence.Database;
++
++namespace Telemedicina.Tests;
++
++// Explicit fixtures only. No deletion, ordinary accounts, credentials or payload output.
++public static class ProfileDbChecks
++{
++    public static int Run()
++    {
++        var check = "SYNTHETIC_OPT_IN";
++        try
++        {
++            if (Environment.GetEnvironmentVariable("MILESTONE_TEST_SYNTHETIC") != "1" ||
++                Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") != "Development" ||
++                Environment.GetEnvironmentVariable("Mail__Mode") != "development") throw new InvalidOperationException();
++            var config = new ConfigurationBuilder().AddEnvironmentVariables().Build();
++            var database = new Database(config);
++            var id = "synthetic-h03-" + Guid.NewGuid().ToString("N"); var session = Guid.NewGuid().ToString("N");
++            using (var c = database.Open())
++            using (var t = c.BeginTransaction())
++            {
++                Execute(c,t,"INSERT INTO users(id,email,password_hash,role,verified) VALUES(@u,@email,'disabled-synthetic-login','Patient',true)",
++                    ("u",id),("email",id+"@example.invalid"));
++                Execute(c,t,"""
++                    INSERT INTO sessions(id,user_id,access_hash,refresh_hash,access_expires,expires,family_id)
++                    VALUES(@s,@u,@a,@r,@e,@e,@s)
++                    """,("s",session),("u",id),("a",Guid.NewGuid().ToString("N")),("r",Guid.NewGuid().ToString("N")),
++                    ("e",DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeSeconds()));
++                t.Commit();
++            }
++            PatientsController Controller(string user = "") => new(database)
++            {
++                ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext
++                {
++                    User = new ClaimsPrincipal(new ClaimsIdentity(new[] {new Claim(ClaimTypes.NameIdentifier,user.Length==0?id:user),
++                        new Claim(ClaimTypes.Role,"Patient"), new Claim("session_id",session)},"synthetic"))
++                } }
++            };
++            JsonElement Value(IActionResult result, int expected=200)
++            {
++                if(result is not ObjectResult obj || obj.StatusCode != expected) throw new InvalidOperationException();
++                return JsonSerializer.SerializeToElement(obj.Value,new JsonSerializerOptions(JsonSerializerDefaults.Web));
++            }
++            JsonElement Read() => Value(Controller().Profile()).GetProperty("data");
++            var r = ProfileUnitChecks.Valid();
++            check="ABSENT_PROFILE";
++            if(Value(Controller().Completeness()).GetProperty("data").GetProperty("missingFields").GetArrayLength()!=10) throw new InvalidOperationException();
++            check="CREATE_AND_METADATA"; Value(Controller().SaveProfile(r));
++            var initial=Read(); var stamp=initial.GetProperty("declarationMetadata").GetProperty("allergies").GetProperty("updatedAt").GetString();
++            if(initial.GetProperty("version").GetInt32()!=1 || stamp is null || initial.GetProperty("completeness").GetProperty("status").GetString()!="Complete") throw new InvalidOperationException();
++            check="UNCHANGED_CATEGORY"; r=r with {Version=1,Phone="8095550103"}; Value(Controller().SaveProfile(r));
++            if(Read().GetProperty("declarationMetadata").GetProperty("allergies").GetProperty("updatedAt").GetString()!=stamp) throw new InvalidOperationException();
++            check="HISTORICAL_NULL_AND_MIGRATION_IDEMPOTENCE";
++            using(var c=database.Open())
++            using(var t=c.BeginTransaction())
++            {
++                Execute(c,t,"UPDATE profiles SET allergies_updated_at=NULL WHERE user_id=@u",("u",id));
++                // Run the additive migration twice on historical fixture, roll it back after inspection.
++                var path=Path.Combine(Directory.GetCurrentDirectory(),"api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/006_profile_declarations.sql");
++                var sql=File.ReadAllText(path); Execute(c,t,sql); Execute(c,t,sql);
++                if(Scalar(c,t,"SELECT allergies_updated_at FROM profiles WHERE user_id=@u",("u",id)) is not DBNull) throw new InvalidOperationException();
++                t.Rollback();
++                Execute(c,null,"UPDATE profiles SET allergies_updated_at=NULL WHERE user_id=@u",("u",id));
++            }
++            r=r with {Version=2,Phone="8095550104"}; Value(Controller().SaveProfile(r));
++            if(Read().GetProperty("declarationMetadata").GetProperty("allergies").GetProperty("updatedAt").ValueKind!=JsonValueKind.Null) throw new InvalidOperationException();
++            check="CLEAR_CATEGORY"; r=r with {Version=3,Allergies=[]}; Value(Controller().SaveProfile(r));
++            if(Read().GetProperty("declarationMetadata").GetProperty("allergies").GetProperty("updatedAt").ValueKind!=JsonValueKind.String) throw new InvalidOperationException();
++            check="IDENTITY_REJECTED_WITHOUT_WRITE";
++            Value(Controller().SaveProfile(r with {Version=4,AdditionalProperties=new(){["patientId"]=JsonSerializer.SerializeToElement("foreign-synthetic")}}),400);
++            if(Read().GetProperty("version").GetInt32()!=4) throw new InvalidOperationException();
++            check="ISOLATION";
++            if(Value(Controller("synthetic-h03-absent-"+Guid.NewGuid().ToString("N")).Profile()).GetProperty("data").ValueKind!=JsonValueKind.Null) throw new InvalidOperationException();
++            check="CONCURRENT_VERSION_AND_AUDIT"; r=r with {Version=4};
++            var statuses=Task.WhenAll(Enumerable.Range(0,2).Select(_=>Task.Run(()=>((ObjectResult)Controller().SaveProfile(r)).StatusCode))).GetAwaiter().GetResult();
++            if(statuses.Count(s=>s==200)!=1 || statuses.Count(s=>s==409)!=1 || Read().GetProperty("version").GetInt32()!=5) throw new InvalidOperationException();
++            using(var c=database.Open())
++                if(Convert.ToInt64(Scalar(c,null,"SELECT count(*) FROM audit WHERE actor_id=@u AND action='profile.updated'",("u",id)))!=5) throw new InvalidOperationException();
++            check="SESSION_REVOCATION";
++            using(var c=database.Open()) Execute(c,null,"UPDATE sessions SET revoked=true WHERE id=@s",("s",session));
++            var denied=false;
++            try { Controller().SaveProfile(r with {Version=5}); } catch(Telemedicina.Api.Infrastructure.Authentication.SessionRejectedException e) {denied=e.Status==401;}
++            if(!denied) throw new InvalidOperationException();
++            Console.WriteLine("H03_DB_CHECKS_PASS: creation,metadata,historical,migration-twice,clear,identity,isolation,concurrency,audit,revocation");
++            return 0;
++        }
++        catch {Console.Error.WriteLine("H03_DB_CHECKS_FAILED: "+check);return 1;}
++    }
++}
+diff --git a/api/src/Tools/run_h03_checks.py b/api/src/Tools/run_h03_checks.py
+new file mode 100644
+--- /dev/null
++++ b/api/src/Tools/run_h03_checks.py
+@@ -0,0 +1,15 @@
++"""Run H03 checks with private config; synthetic data and development mail only."""
++from pathlib import Path
++import subprocess
++from run_local import environment
++
++ROOT=Path(__file__).resolve().parents[3]
++if __name__ == "__main__":
++    env=environment()
++    if env.get("ASPNETCORE_ENVIRONMENT") != "Development":
++        raise SystemExit("H03_REQUIRES_DEVELOPMENT")
++    env["Mail__Mode"]="development"
++    env["MILESTONE_TEST_SYNTHETIC"]="1"
++    command=["dotnet","run","--no-build","--configuration","Release","--project",
++        str(ROOT/"api/src/Telemedicina.Tests/Telemedicina.Tests.csproj"),"--","--h03-db-tests"]
++    raise SystemExit(subprocess.call(command,cwd=ROOT,env=env))
+diff --git a/api/src/Telemedicina.Api/Features/Patients/H03_CONTRACT.md b/api/src/Telemedicina.Api/Features/Patients/H03_CONTRACT.md
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Features/Patients/H03_CONTRACT.md
+@@ -0,0 +1,22 @@
++# Perfil propio — H03-SPEC-v1
++
++GET /api/v1/patients/me conserva data:null sin perfil. Con perfil devuelve data con profile
++(campos existentes), version autoritativa, updatedAt UTC, source:SelfDeclared,
++declarationMetadata:{allergies,medications,conditions}, cada categoría con source:SelfDeclared
++y updatedAt:timestamp UTC|null, y completeness:{status:Complete|Incomplete,missingFields:string[]}.
++La fecha nula significa desconocida; listas vacías significan Sin datos registrados.
++
++GET /api/v1/patients/me/completeness devuelve data:{status,missingFields} incluso sin perfil.
++Campos ordenados: firstName,lastName,birthDate,phone,address,emergencyName,emergencyPhone,
++allergies,medications,conditions. Completo no habilita admisión ni verifica identidad.
++
++PATCH /api/v1/patients/me reemplaza todos los campos de ProfileRequest y requiere version
++explícita. 200 data:{version}. 400 INVALID_PROFILE para reglas; 400 VALIDATION_FAILED para
++binding. errors es string[] con campo:REQUIRED|INVALID|MAX_LENGTH|MAX_ITEMS sin valores.
++401 sin sesión válida; 403 rol distinto de Patient; 409 VERSION_CONFLICT sin sobrescritura.
++Los atributos ProducesResponseType publican respuestas tipadas en /openapi/v1.json.
++Propiedades protegidas y metadatos calculados no son editables. Teléfono no modifica credenciales.
++No hay permisos nuevos para portal, tutores ni personal.
++
++Migración 006 aditiva, explícita e idempotente, no modifica body ni version ni rellena fechas.
++Guardar conserva transacción, revalidación de sesión, bloqueo y auditoría sin contenido clínico.
+diff --git a/api/src/Telemedicina.Tests/Integration/third_milestone_e2e.py b/api/src/Telemedicina.Tests/Integration/third_milestone_e2e.py
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/Integration/third_milestone_e2e.py
+@@ -0,0 +1,94 @@
++"""H03 localhost HTTP tests: synthetic accounts, no SMTP, no payload output.
++Run API with Mail__Mode=development and MILESTONE_TEST_SYNTHETIC=1.
++"""
++import concurrent.futures
++import json
++import os
++import unittest
++import urllib.parse
++import urllib.request
++import uuid
++from milestone_e2e import request, BASE
++
++@unittest.skipUnless(os.environ.get("MILESTONE_TEST_SYNTHETIC")=="1", "Synthetic opt-in required")
++class ThirdMilestone(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        if urllib.parse.urlparse(BASE).hostname not in {"localhost","127.0.0.1","::1"} or os.environ.get("Mail__Mode")!="development":
++            raise RuntimeError("H03 requires loopback and development mail")
++        cls.tokens=[]
++        for _ in range(2):
++            email="synthetic-h03-"+uuid.uuid4().hex+"@example.invalid"; password=uuid.uuid4().hex+"!a9"
++            if request("/auth/register","POST",{"email":email,"password":password})[0]!=202: raise RuntimeError("Synthetic registration failed")
++            status,challenge=request("/auth/dev-mailbox?"+urllib.parse.urlencode({"email":email,"purpose":"verify"}),
++                extra={"X-Dev-Mailbox-Key":os.environ["Milestone__MailboxKey"]})
++            if status!=200: raise RuntimeError("Synthetic mailbox failed")
++            if request("/auth/verify","POST",{"email":email,"token":challenge["token"]})[0]!=200: raise RuntimeError("Synthetic verification failed")
++            status,session=request("/auth/login","POST",{"email":email,"password":password})
++            if status!=200: raise RuntimeError("Synthetic login failed")
++            cls.tokens.append(session["accessToken"])
++
++    @classmethod
++    def tearDownClass(cls):
++        for token in cls.tokens: request("/auth/logout","POST",{},token)
++
++    def status(self,response,expected):
++        self.assertEqual(response[0],expected,"Unexpected HTTP status; payload suppressed")
++        return response[1]
++
++    def test_profile_journey_security_binding_and_openapi(self):
++        token,other=self.tokens
++        self.status(request("/patients/me/completeness"),401)
++        missing=self.status(request("/patients/me/completeness",token=token),200)
++        self.assertEqual(len(missing["missingFields"]),10)
++        self.assertIsNone(self.status(request("/patients/me",token=other),200))
++        profile={"firstName":" Paciente ","lastName":" Sintético ","birthDate":"1990-01-01","phone":"8095550101",
++            "address":" Dirección sintética ","emergencyName":" Contacto ","emergencyPhone":"8095550102",
++            "allergies":[" Dato, sintético "],"medications":[],"conditions":[],"version":0}
++        self.status(request("/patients/me","PATCH",profile,token),200)
++        data=self.status(request("/patients/me",token=token),200)
++        self.assertEqual(data["profile"]["firstName"],"Paciente")
++        self.assertEqual(data["profile"]["allergies"],["Dato, sintético"])
++        self.assertEqual(data["completeness"]["status"],"Complete")
++        before=data["declarationMetadata"]
++        self.assertEqual(before["allergies"]["source"],"SelfDeclared")
++        self.assertIsNotNone(before["allergies"]["updatedAt"])
++        self.assertIsNone(before["conditions"]["updatedAt"])
++        for field,value in [("patientId","foreign-synthetic"),("EMAIL","synthetic@example.invalid"),("declarationMetadata",{}),
++                            ("firstName"," "),("phone","invalid"),("allergies",[" "]),("allergies",["x"]*21),
++                            ("birthDate","not-a-date"),("version","wrong-type"),("allergies",[123])]:
++            error=self.status(request("/patients/me","PATCH",{**profile,"version":1,field:value},token,raw=True),400)
++            self.assertIn(error["code"],("INVALID_PROFILE","VALIDATION_FAILED"))
++            self.assertTrue(error["errors"])
++            self.assertTrue(all(isinstance(e,str) and ":" in e for e in error["errors"]))
++            self.assertNotIn("foreign-synthetic",json.dumps(error))
++        self.assertEqual(self.status(request("/patients/me",token=token),200)["version"],1)
++        profile["version"]=1; profile["phone"]="8095550103"
++        self.status(request("/patients/me","PATCH",profile,token),200)
++        self.assertEqual(self.status(request("/patients/me",token=token),200)["declarationMetadata"],before)
++        profile["version"]=2
++        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
++            statuses=list(pool.map(lambda _:request("/patients/me","PATCH",profile,token)[0],range(2)))
++        self.assertEqual(sorted(statuses),[200,409])
++        profile["version"]=3; profile["allergies"]=[]
++        self.status(request("/patients/me","PATCH",profile,token),200)
++        data=self.status(request("/patients/me",token=token),200)
++        self.assertNotEqual(data["declarationMetadata"]["allergies"]["updatedAt"],before["allergies"]["updatedAt"])
++        self.assertEqual(data["profile"]["allergies"],[])
++        self.assertIsNone(self.status(request("/patients/me",token=other),200))
++        origin=BASE.split("/api/v1")[0]
++        with urllib.request.urlopen(origin+"/openapi/v1.json",timeout=20) as response: document=json.load(response)
++        self.assertIn("/api/v1/patients/me/completeness",document["paths"])
++        self.assertIn("200",document["paths"]["/api/v1/patients/me/completeness"]["get"]["responses"])
++        schemas=document.get("components",{}).get("schemas",{})
++        self.assertTrue(any("declarationMetadata" in value.get("properties",{}) for value in schemas.values()))
++        self.assertTrue(any("missingFields" in value.get("properties",{}) for value in schemas.values()))
++        if os.environ.get("Milestone__AdmissionEmail") and os.environ.get("Milestone__AdmissionPassword"):
++            staff=self.status(request("/auth/login","POST",{"email":os.environ["Milestone__AdmissionEmail"],
++                "password":os.environ["Milestone__AdmissionPassword"]}),200)
++            try:
++                self.status(request("/patients/me/completeness",token=staff["accessToken"]),403)
++                self.status(request("/patients/me","PATCH",profile,staff["accessToken"]),403)
++            finally: request("/auth/logout","POST",{},staff["accessToken"])
++
++if __name__=="__main__": unittest.main()
+diff --git a/api/src/Telemedicina.Tests/Integration/milestone_e2e.py b/api/src/Telemedicina.Tests/Integration/milestone_e2e.py
+--- a/api/src/Telemedicina.Tests/Integration/milestone_e2e.py
++++ b/api/src/Telemedicina.Tests/Integration/milestone_e2e.py
+@@ -115,8 +115,16 @@
+             "email": os.environ["Milestone__AdmissionEmail"],
+             "password": os.environ["Milestone__AdmissionPassword"]})
+         assert status == 200
+-        cls.service = request("/services", token=cls.patients[0]["accessToken"])[1][0]["id"]
+-        cls.practitioner = request("/practitioners", token=cls.patients[0]["accessToken"])[1][0]["id"]
++        status, services = request("/services", token=cls.patients[0]["accessToken"])
++        assert status == 200
++        service_ids = {service["id"] for service in services}
++        status, practitioners = request("/admin/catalog/practitioners", token=cls.staff["accessToken"])
++        assert status == 200
++        pair = next(((practitioner["id"], service_id)
++                     for practitioner in practitioners if practitioner["active"]
++                     for service_id in practitioner["serviceIds"] if service_id in service_ids), None)
++        assert pair is not None, "Synthetic catalog requires an active assigned practitioner/service pair."
++        cls.practitioner, cls.service = pair
+ 
+     def new_slot(self):
+         # Isolated future slot per test; avoids depending on seed availability.

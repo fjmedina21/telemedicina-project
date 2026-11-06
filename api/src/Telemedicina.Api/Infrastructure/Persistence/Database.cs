@@ -10,11 +10,16 @@ public sealed class Database
     {
         var configured = configuration.GetConnectionString("Telemedicina")
             ?? throw new InvalidOperationException("Configure ConnectionStrings__Telemedicina outside source control.");
+        _connectionString = ParseConnectionString(configured).ConnectionString;
+    }
+
+    internal static NpgsqlConnectionStringBuilder ParseConnectionString(string configured)
+    {
         if (configured.StartsWith("postgres://") || configured.StartsWith("postgresql://"))
         {
             var uri = new Uri(configured);
             var credentials = uri.UserInfo.Split(':', 2);
-            var builder = new NpgsqlConnectionStringBuilder
+            return new NpgsqlConnectionStringBuilder
             {
                 Host = uri.Host,
                 Port = uri.Port > 0 ? uri.Port : 5432,
@@ -25,12 +30,11 @@ public sealed class Database
                 IncludeErrorDetail = false,
                 Timeout = 15
             };
-            _connectionString = builder.ConnectionString;
         }
-        else _connectionString = new NpgsqlConnectionStringBuilder(configured)
+        return new NpgsqlConnectionStringBuilder(configured)
         {
             IncludeErrorDetail = false
-        }.ConnectionString;
+        };
     }
     public NpgsqlConnection Open()
     {

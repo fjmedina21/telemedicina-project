@@ -1,0 +1,279 @@
+diff --git a/api/src/Telemedicina.Api/Features/Appointments/AppointmentFilters.cs b/api/src/Telemedicina.Api/Features/Appointments/AppointmentFilters.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Features/Appointments/AppointmentFilters.cs
+@@ -0,0 +1,27 @@
++using Telemedicina.Api.Features.Scheduling;
++namespace Telemedicina.Api.Features.Appointments;
++
++/// <summary>Raw query values distinguish omitted filters from invalid empty values.</summary>
++public sealed record AppointmentFilters(DateTime? FromUtc, DateTime? ToUtc, string Status, string CoverageStatus)
++{
++    public static string? Parse(string? from, string? to, string? status, string? coverageStatus, out AppointmentFilters filters)
++    {
++        filters = new(null, null, status ?? "", coverageStatus ?? "");
++        if (status is not null && status is not ("PendingValidation" or "Confirmed" or "Cancelled" or "Rejected")) return "VALIDATION_FAILED";
++        if (coverageStatus is not null && coverageStatus is not ("Pending" or "ManualReview" or "Approved" or "Denied" or "Expired")) return "VALIDATION_FAILED";
++        if (from is null && to is null) return null;
++        if (from is null || to is null) return "INVALID_RANGE";
++        if (!ScheduleInputs.TryTimestamp(from, out var begin) || !ScheduleInputs.TryTimestamp(to, out var end)) return "VALIDATION_FAILED";
++        if (end <= begin || end - begin > TimeSpan.FromDays(366)) return "INVALID_RANGE";
++        filters = filters with { FromUtc = begin.UtcDateTime, ToUtc = end.UtcDateTime };
++        return null;
++    }
++    public const string Sql = """
++        AND (@from::timestamptz IS NULL OR a.start_utc>=@from::timestamptz)
++        AND (@to::timestamptz IS NULL OR a.start_utc<@to::timestamptz)
++        AND (@status='' OR a.status=@status)
++        AND (@coverage='' OR effective.status=@coverage)
++        """;
++    public (string, object?)[] Parameters(DateTime nowUtc) =>
++        [("from", FromUtc), ("to", ToUtc), ("status", Status), ("coverage", CoverageStatus), ("nowUtc", nowUtc)];
++}
+diff --git a/api/src/Telemedicina.Api/Features/Appointments/AppointmentQueries.cs b/api/src/Telemedicina.Api/Features/Appointments/AppointmentQueries.cs
+--- a/api/src/Telemedicina.Api/Features/Appointments/AppointmentQueries.cs
++++ b/api/src/Telemedicina.Api/Features/Appointments/AppointmentQueries.cs
+@@ -2,14 +2,29 @@
+ 
+ internal static class AppointmentQueries
+ {
++    // One supplied UTC instant governs the projection and filtering for each query.
+     public const string Select = """
+         SELECT a.id,a.user_id AS "patientId",u.email AS "patientEmail",a.slot_id AS "slotId",s.service_id AS "serviceId",
+-            p.name AS "practitionerName",v.name AS "serviceName",v.specialty,
++            a.practitioner_id AS "practitionerId",p.name AS "practitionerName",v.name AS "serviceName",v.specialty,
+             a.start_utc AS "startAt",a.end_utc AS "endAt",a.status,
+-            CASE WHEN a.coverage='Approved' AND a.coverage_valid_until<now() THEN 'Expired' ELSE a.coverage END AS "coverageStatus",
++            effective.status AS "coverageStatus",'Manual' AS "coverageMethod",
++            (effective.status IN ('Pending','ManualReview','Expired')) AS "coverageRequiresReview",
++            validity.reason AS "coverageValidityReason",
+             a.insurer,a.member_last4 AS "memberLast4",a.version,a.evidence,
+             a.reviewed_by AS "reviewedBy",a.reviewed_at AS "reviewedAt",a.coverage_valid_until AS "validUntil"
+         FROM appointments a JOIN slots s ON s.id=a.slot_id JOIN services v ON v.id=s.service_id
+         JOIN practitioners p ON p.id=a.practitioner_id JOIN users u ON u.id=a.user_id
++        CROSS JOIN LATERAL (
++            SELECT CASE WHEN a.coverage<>'Approved' THEN NULL
++                WHEN a.coverage_valid_until IS NULL THEN 'MissingValidity'
++                WHEN a.coverage_valid_until<=@nowUtc THEN 'Expired'
++                WHEN a.coverage_valid_until<a.end_utc THEN 'OutsideAppointment'
++                ELSE NULL END AS reason
++        ) validity
++        CROSS JOIN LATERAL (
++            SELECT CASE WHEN validity.reason='Expired' THEN 'Expired'
++                WHEN validity.reason IN ('MissingValidity','OutsideAppointment') THEN 'ManualReview'
++                ELSE a.coverage END AS status
++        ) effective
+         """;
+ }
+diff --git a/api/src/Telemedicina.Api/Features/Appointments/AppointmentResponses.cs b/api/src/Telemedicina.Api/Features/Appointments/AppointmentResponses.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Features/Appointments/AppointmentResponses.cs
+@@ -0,0 +1,17 @@
++namespace Telemedicina.Api.Features.Appointments;
++
++// OpenAPI describes the existing envelope payloads, including additive H05 fields.
++public sealed record AppointmentSnapshot(
++    string Id, string PatientId, string PatientEmail, string SlotId, string ServiceId,
++    string PractitionerId, string PractitionerName, string ServiceName, string Specialty,
++    DateTime StartAt, DateTime EndAt, string Status, string CoverageStatus,
++    string CoverageMethod, bool CoverageRequiresReview, string? CoverageValidityReason,
++    string Insurer, string MemberLast4, int Version, string? Evidence, string? ReviewedBy,
++    DateTime? ReviewedAt, DateTime? ValidUntil);
++public sealed record AppointmentBooked(string Id, string Status, string CoverageStatus, int Version);
++public sealed record AppointmentCancelled(bool Cancelled);
++public sealed record AppointmentRescheduled(bool Rescheduled);
++public sealed record CoverageReviewed(string Status, string CoverageStatus, int Version);
++public sealed record AppointmentHistoryItem(long Sequence, string? OldSlotId, string NewSlotId,
++    string? OldStatus, string NewStatus, string? OldCoverage, string NewCoverage,
++    int Version, string ActorId, DateTime OccurredAt);
+diff --git a/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs b/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
+--- a/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
++++ b/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
+@@ -1,3 +1,5 @@
++using Telemedicina.Api.Features.Patients;
++using Telemedicina.Common.Models.ApiResponses;
+ using Telemedicina.Api.Features.Catalog;
+ using System.Text.Json;
+ using Microsoft.AspNetCore.Authorization;
+@@ -14,26 +16,40 @@
+ namespace Telemedicina.Api.Features.Appointments;
+ 
+ [ApiController, Authorize(Roles = "Patient,Admission"), Route("api/v1")]
++[ProducesResponseType(typeof(ErrorApiResponse),400)]
++[ProducesResponseType(typeof(ErrorApiResponse),401)]
++[ProducesResponseType(typeof(ErrorApiResponse),403)]
++[ProducesResponseType(typeof(ErrorApiResponse),409)]
+ public sealed class AppointmentsController(Database database, NotificationService notifications) : ApiControllerBase(database)
+ {
+     [Authorize(Roles = "Patient"), HttpGet("appointments/me")]
+-    public IActionResult Mine()
++    [ProducesResponseType(typeof(ApiResponse<List<AppointmentSnapshot>>),200)]
++    public IActionResult Mine([FromQuery] string? from = null, [FromQuery] string? to = null,
++        [FromQuery] string? status = null, [FromQuery] string? coverageStatus = null)
+     {
++        var error=AppointmentFilters.Parse(from,to,status,coverageStatus,out var filters);
++        if(error is not null) return Fail(400,error,"Revise los filtros de citas.");
+         using var c = Database.Open();
+-        return Data(Rows(c, null, AppointmentQueries.Select + " WHERE a.user_id=@u ORDER BY a.start_utc DESC LIMIT 100", ("u", UserId(User))));
++        return Data(Rows(c, null, AppointmentQueries.Select + " WHERE a.user_id=@u " + AppointmentFilters.Sql +
++            " ORDER BY a.start_utc DESC,a.id LIMIT 100", filters.Parameters(DateTime.UtcNow).Append(("u",(object?)UserId(User))).ToArray()));
+     }
+     [HttpGet("appointments/{id:guid}")]
++    [ProducesResponseType(typeof(ApiResponse<AppointmentSnapshot>),200)]
++    [ProducesResponseType(404)]
+     public IActionResult Detail(Guid id)
+     {
+         using var c = Database.Open(); using var t = Begin(c);
+         var rows = Rows(c, t, AppointmentQueries.Select + " WHERE a.id=@id AND (@staff OR a.user_id=@u)",
+-            ("id", id.ToString()), ("staff", User.IsInRole("Admission")), ("u", UserId(User)));
++            ("id", id.ToString()), ("staff", User.IsInRole("Admission")), ("u", UserId(User)), ("nowUtc", DateTime.UtcNow));
+         if (rows.Count == 0) return NotFound();
+         Log(c, t, "appointment.read", id.ToString()); t.Commit(); return Data(rows[0]);
+     }
+     [Authorize(Roles = "Patient"), HttpPost("appointments")]
++    [ProducesResponseType(typeof(ApiResponse<AppointmentBooked>),200)]
++    [ProducesResponseType(typeof(ApiResponse<AppointmentBooked>),201)]
+     public IActionResult Book(BookRequest request)
+     {
++        if (request.SlotId == Guid.Empty) return Fail(400,"VALIDATION_FAILED","Seleccione un horario válido.");
+         var key = Request.Headers["Idempotency-Key"].ToString();
+         if (!Guid.TryParse(key, out _)) return Fail(400, "IDEMPOTENCY_REQUIRED", "Envíe Idempotency-Key como UUID.");
+         if (string.IsNullOrWhiteSpace(request.Insurer)) return Fail(400, "INSURER_REQUIRED", "Indique aseguradora para revisión manual.");
+@@ -46,8 +62,14 @@
+         if (old.Count > 0) return (string)old[0]["request_hash"]! == payload
+             ? Data(JsonSerializer.Deserialize<JsonElement>((string)old[0]["response"]!))
+             : Fail(409, "IDEMPOTENCY_MISMATCH", "La clave ya se usó con otra solicitud.");
+-        if (Scalar(c, t, "SELECT user_id FROM profiles WHERE user_id=@u", ("u", UserId(User))) is null)
+-            return Fail(400, "PROFILE_REQUIRED", "Complete el perfil antes de solicitar.");
++        var storedProfile=Scalar(c,t,"SELECT body FROM profiles WHERE user_id=@u",("u",UserId(User))) as string;
++        if(storedProfile is null) return Fail(400,"PROFILE_REQUIRED","Complete el perfil antes de solicitar.");
++        JsonElement profile;
++        try { profile=JsonSerializer.Deserialize<JsonElement>(storedProfile); }
++        catch(JsonException) { profile=default; }
++        if(ProfileRules.Completeness(profile).Status!="Complete")
++            return StatusCode(400,new ErrorApiResponse(400,"Complete el perfil antes de solicitar.",Request.Path.Value??"/",
++                ProfileRules.ValidateBody(profile)) { Code="PROFILE_INCOMPLETE",TraceId=HttpContext.TraceIdentifier });
+         var slots = AvailableSlots(c, t, request.SlotId.ToString());
+         if (slots.Count == 0) return Fail(409, "SLOT_UNAVAILABLE", "Horario no disponible.");
+         var slot = slots[0]; var id = Guid.NewGuid().ToString();
+@@ -70,6 +92,8 @@
+         Log(c, t, "appointment.requested", id); t.Commit(); return Data(result, 201);
+     }
+     [HttpGet("appointments/{id:guid}/history")]
++    [ProducesResponseType(typeof(ApiResponse<List<AppointmentHistoryItem>>),200)]
++    [ProducesResponseType(404)]
+     public IActionResult History(Guid id)
+     {
+         using var c = Database.Open(); using var t = Begin(c);
+@@ -84,6 +108,8 @@
+         Log(c, t, "appointment.history_read", id.ToString()); t.Commit(); return Data(rows);
+     }
+     [Authorize(Roles = "Patient"), HttpPost("appointments/{id:guid}/cancel")]
++    [ProducesResponseType(typeof(ApiResponse<AppointmentCancelled>),200)]
++    [ProducesResponseType(404)]
+     public IActionResult Cancel(Guid id, VersionRequest request)
+     {
+         using var c = Database.Open(); using var t = Begin(c);
+@@ -98,8 +124,11 @@
+         Log(c, t, "appointment.cancelled", id.ToString()); t.Commit(); return Data(new { cancelled = true });
+     }
+     [Authorize(Roles = "Patient"), HttpPost("appointments/{id:guid}/reschedule")]
++    [ProducesResponseType(typeof(ApiResponse<AppointmentRescheduled>),200)]
++    [ProducesResponseType(404)]
+     public IActionResult Reschedule(Guid id, RescheduleRequest request)
+     {
++        if(request.SlotId==Guid.Empty) return Fail(400,"VALIDATION_FAILED","Seleccione un horario válido.");
+         using var c = Database.Open(); using var t = Begin(c);
+         var a = Rows(c, t, "SELECT * FROM appointments WHERE id=@id AND user_id=@u FOR UPDATE",
+             ("id", id.ToString()), ("u", UserId(User))).FirstOrDefault();
+@@ -107,7 +136,14 @@
+         if ((int)a["version"]! != request.Version || (string)a["status"]! is not ("PendingValidation" or "Confirmed") ||
+             (DateTime)a["start_utc"]! <= DateTime.UtcNow)
+             return Fail(409, "INVALID_TRANSITION", "La cita cambió o ya no permite reprogramación.");
+-        var s = AvailableSlots(c, t, request.SlotId.ToString(), (string)a["slot_id"]!, id.ToString()).FirstOrDefault();
++        var originalSlot=(string)a["slot_id"]!;
++        if(request.SlotId.ToString()==originalSlot) return Fail(409,"SAME_SLOT","Seleccione otro horario.");
++        var identities=OfferPolicy.Identities(c,t,[originalSlot,request.SlotId.ToString()]);
++        var original=identities.Single(row=>row.Id==originalSlot);
++        var target=identities.SingleOrDefault(row=>row.Id==request.SlotId.ToString());
++        if(target is null) return Fail(409,"SLOT_UNAVAILABLE","Horario no disponible.");
++        if(target.ServiceId!=original.ServiceId) return Fail(409,"SERVICE_CHANGE_NOT_ALLOWED","La reprogramación debe conservar el servicio.");
++        var s = AvailableSlots(c, t, request.SlotId.ToString(), originalSlot, id.ToString()).FirstOrDefault();
+         if (s is null) return Fail(409, "SLOT_UNAVAILABLE", "Horario no disponible.");
+         try
+         {
+diff --git a/api/src/Telemedicina.Api/Features/Admission/AdmissionController.cs b/api/src/Telemedicina.Api/Features/Admission/AdmissionController.cs
+--- a/api/src/Telemedicina.Api/Features/Admission/AdmissionController.cs
++++ b/api/src/Telemedicina.Api/Features/Admission/AdmissionController.cs
+@@ -1,3 +1,4 @@
++using Telemedicina.Common.Models.ApiResponses;
+ using System.Text.Json;
+ using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Mvc;
+@@ -13,32 +14,44 @@
+ namespace Telemedicina.Api.Features.Admission;
+ 
+ [ApiController, Authorize, Route("api/v1")]
++[ProducesResponseType(typeof(ErrorApiResponse),400)]
++[ProducesResponseType(typeof(ErrorApiResponse),401)]
++[ProducesResponseType(typeof(ErrorApiResponse),403)]
++[ProducesResponseType(typeof(ErrorApiResponse),409)]
+ public sealed class AdmissionController(Database database, NotificationService notifications) : ApiControllerBase(database)
+ {
+     [Authorize(Roles = "Admission"), HttpGet("admin/work-queue")]
+-    public IActionResult Queue()
++    [ProducesResponseType(typeof(ApiResponse<List<AppointmentSnapshot>>),200)]
++    public IActionResult Queue([FromQuery] string? from = null, [FromQuery] string? to = null,
++        [FromQuery] string? status = null, [FromQuery] string? coverageStatus = null)
+     {
++        var error=AppointmentFilters.Parse(from,to,status,coverageStatus,out var filters);
++        if(error is not null) return Fail(400,error,"Revise los filtros de citas.");
+         using var c = Database.Open();
+-        return Data(Rows(c, null, AppointmentQueries.Select + " ORDER BY a.start_utc DESC LIMIT 200"));
++        return Data(Rows(c, null, AppointmentQueries.Select + " WHERE true " + AppointmentFilters.Sql +
++            " ORDER BY a.start_utc DESC,a.id LIMIT 200",filters.Parameters(DateTime.UtcNow)));
+     }
+     [Authorize(Roles = "Admission"), HttpPatch("admin/appointments/{id:guid}/validation")]
++    [ProducesResponseType(typeof(ApiResponse<CoverageReviewed>),200)]
++    [ProducesResponseType(404)]
+     public IActionResult Review(Guid id, CoverageRequest request)
+     {
+         using var c = Database.Open(); using var t = Begin(c);
+         var a = Rows(c, t, "SELECT * FROM appointments WHERE id=@id FOR UPDATE", ("id", id.ToString())).FirstOrDefault();
+         if (a is null) return NotFound();
++        var nowUtc=DateTime.UtcNow;
+         if ((int)a["version"]! != request.Version || (string)a["status"]! is not ("PendingValidation" or "Confirmed")
+-            || (DateTime)a["start_utc"]! <= DateTime.UtcNow)
++            || (DateTime)a["start_utc"]! <= nowUtc)
+             return Fail(409, "INVALID_TRANSITION", "La cita cambió o ya no permite revisión.");
+         if (string.IsNullOrWhiteSpace(request.Evidence) || (request.Status == "Approved" &&
+-            (request.ValidUntil is null || request.ValidUntil.Value.UtcDateTime < (DateTime)a["end_utc"]!)))
++            (request.ValidUntil is null || request.ValidUntil.Value.UtcDateTime < (DateTime)a["end_utc"]! || request.ValidUntil.Value.UtcDateTime <= nowUtc)))
+             return Fail(400, "EVIDENCE_REQUIRED", "Registre evidencia y una vigencia que cubra la cita.");
+         var next = request.Status == "Approved" ? "Confirmed" : "PendingValidation";
+         Execute(c, t, """
+             UPDATE appointments SET coverage=@coverage,status=@status,evidence=@e,coverage_valid_until=@until,
+             reviewed_by=@actor,reviewed_at=now(),version=version+1 WHERE id=@id
+             """, ("coverage", request.Status), ("status", next), ("e", request.Evidence.Trim()),
+-            ("until", request.ValidUntil?.UtcDateTime), ("actor", UserId(User)), ("id", id.ToString()));
++            ("until", request.Status=="Approved" ? request.ValidUntil?.UtcDateTime : null), ("actor", UserId(User)), ("id", id.ToString()));
+         notifications.AppointmentEvent(c, t, id.ToString(), "reviewed");
+         Log(c, t, "coverage." + request.Status.ToLowerInvariant(), id.ToString()); t.Commit();
+         return Data(new { status = next, coverageStatus = request.Status, version = request.Version + 1 });
+diff --git a/api/src/Telemedicina.Api/Features/Admission/AdmissionContracts.cs b/api/src/Telemedicina.Api/Features/Admission/AdmissionContracts.cs
+--- a/api/src/Telemedicina.Api/Features/Admission/AdmissionContracts.cs
++++ b/api/src/Telemedicina.Api/Features/Admission/AdmissionContracts.cs
+@@ -1,3 +1,5 @@
++using System.Text.Json.Serialization;
++using Telemedicina.Api.Features.Scheduling;
+ using System.ComponentModel.DataAnnotations;
+ 
+ namespace Telemedicina.Api.Features.Admission;
+@@ -5,5 +7,5 @@
+ public sealed record CoverageRequest(
+     [Required, RegularExpression("^(Approved|Denied|ManualReview)$")] string Status,
+     [Required, MaxLength(250)] string Evidence,
+-    DateTimeOffset? ValidUntil,
++    [property: JsonConverter(typeof(ExplicitOffsetDateTimeConverter))] DateTimeOffset? ValidUntil,
+     [Range(1, int.MaxValue)] int Version);

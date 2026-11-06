@@ -115,8 +115,16 @@ class MilestoneE2E(unittest.TestCase):
             "email": os.environ["Milestone__AdmissionEmail"],
             "password": os.environ["Milestone__AdmissionPassword"]})
         assert status == 200
-        cls.service = request("/services", token=cls.patients[0]["accessToken"])[1][0]["id"]
-        cls.practitioner = request("/practitioners", token=cls.patients[0]["accessToken"])[1][0]["id"]
+        status, services = request("/services", token=cls.patients[0]["accessToken"])
+        assert status == 200
+        service_ids = {service["id"] for service in services}
+        status, practitioners = request("/admin/catalog/practitioners", token=cls.staff["accessToken"])
+        assert status == 200
+        pair = next(((practitioner["id"], service_id)
+                     for practitioner in practitioners if practitioner["active"]
+                     for service_id in practitioner["serviceIds"] if service_id in service_ids), None)
+        assert pair is not None, "Synthetic catalog requires an active assigned practitioner/service pair."
+        cls.practitioner, cls.service = pair
 
     def new_slot(self):
         # Isolated future slot per test; avoids depending on seed availability.

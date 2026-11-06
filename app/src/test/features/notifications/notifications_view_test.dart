@@ -28,7 +28,11 @@ void main() {
           'userId': 'synthetic-patient',
           'email': 'synthetic@example.invalid',
           'role': 'Patient',
-          'permissions': ['identity.self', 'profile.self', 'notifications.self'],
+          'permissions': [
+            'identity.self',
+            'profile.self',
+            'notifications.self',
+          ],
           'accountVersion': 1,
         };
       } else if (path.endsWith('/notifications/preferences')) {
@@ -49,6 +53,11 @@ void main() {
             'readAt': read ? '2026-11-05T12:05:00Z' : null,
           },
         ];
+      } else if (path.endsWith('/patients/me/completeness')) {
+        data = {
+          'status': 'Incomplete',
+          'missingFields': ['firstName'],
+        };
       } else if (path.endsWith('/patients/me')) {
         data = null;
       } else {

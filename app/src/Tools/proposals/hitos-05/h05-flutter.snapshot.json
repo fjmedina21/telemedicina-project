@@ -1,0 +1,12 @@
+{
+  "app/src/lib/features/appointments/data/appointment_repository.dart": null,
+  "app/src/lib/features/appointments/presentation/appointment_session_guard.dart": null,
+  "app/src/lib/features/appointments/presentation/appointments_view.dart": "a8fb05cbabe738e71c46c9755fab077eab337478848ab81c6d9559ccfeef0ed5",
+  "app/src/test/features/appointments/appointment_repository_test.dart": null,
+  "app/src/test/features/appointments/appointment_controller_test.dart": null,
+  "app/src/test/features/appointments/booking_summary_test.dart": null,
+  "app/src/lib/app/application/patient_controller.dart": "94be7e50a5e3cbcb6f1765ee82843ddd232a11286e9d7b6b5dcc699251115a6c",
+  "app/src/lib/features/catalog/presentation/booking_form.dart": "336f31ce65d367d750598407106362fcebe435e8ab3f1d5b42e7477b194b0b18",
+  "app/src/lib/app/presentation/patient_shell.dart": "20947ceca5d11e9334af9b208f1d1ba2fd71f92a71b7ee8d60b852c1e8859091",
+  "app/src/lib/core/network/api_client.dart": "8d2ca0509057b093c97acce463ba4beee445412a08736187963ac187c669a41e"
+}

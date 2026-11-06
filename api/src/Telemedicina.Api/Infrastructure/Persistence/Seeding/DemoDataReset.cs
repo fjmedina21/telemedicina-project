@@ -1,4 +1,6 @@
 using System.Data;
+using System.Net;
+using System.Globalization;
 using System.Text.Json;
 using Npgsql;
 using static Telemedicina.Api.Infrastructure.Persistence.Database;
@@ -7,7 +9,8 @@ namespace Telemedicina.Api.Infrastructure.Persistence.Seeding;
 
 public sealed record DemoResetReport(string Dataset, string BaseDate, bool Committed,
     IReadOnlyDictionary<string, long> Before, IReadOnlyDictionary<string, long> Planned,
-    IReadOnlyDictionary<string, long>? After, int BlockedSlots);
+    IReadOnlyDictionary<string, long>? After, int BlockedSlots, string DatabaseName,
+    string EndpointHost, int EndpointPort);
 
 public static class DemoDataReset
 {
@@ -19,6 +22,9 @@ public static class DemoDataReset
         "notification_preferences", "notifications", "email_outbox", "staff_invitations"
     });
     private const string Schema = "telemedicina_m1";
+    private const string AllowedRemoteHost = "pg-2db5ca83-telemedicina-iso910.l.aivencloud.com";
+    private const int AllowedRemotePort = 10036;
+    private const string AllowedRemoteDatabase = "defaultdb";
     private static string Qualified(string table) => "\"" + Schema + "\".\"" + table + "\"";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
@@ -40,6 +46,7 @@ public static class DemoDataReset
         var plan = DemoDataPlan.Create(options.BaseDate ?? DemoDataPlan.Today(), configuration);
         if (plan.Slots.Min(s => s.StartUtc) <= DateTime.UtcNow)
             throw new DemoResetException("DEMO_BASE_DATE_PAST");
+        if (options.Execute) RequireAllowedTarget(configuration);
         using var c = database.Open();
         using var t = c.BeginTransaction(options.Execute ? IsolationLevel.ReadCommitted : IsolationLevel.RepeatableRead);
         if (options.Execute)
@@ -49,6 +56,7 @@ public static class DemoDataReset
                     throw new DemoResetException("DEMO_BUSY");
         }
         if (!options.Execute) Execute(c, t, "SET TRANSACTION READ ONLY");
+        var endpoint = new NpgsqlConnectionStringBuilder(c.ConnectionString);
         Preflight(c, t);
         if (options.Execute)
         {
@@ -61,7 +69,7 @@ public static class DemoDataReset
         var expected = Expected();
         if (!options.Execute)
             return new DemoResetReport(DemoDataPlan.Version, plan.BaseDate.ToString("yyyy-MM-dd"), false,
-                before, expected, null, 60);
+                before, expected, null, 60, endpoint.Database ?? "unknown", endpoint.Host ?? "unknown", endpoint.Port);
 
         Execute(c, t, "ALTER TABLE telemedicina_m1.audit DISABLE TRIGGER audit_no_mutation");
         Execute(c, t, "ALTER TABLE telemedicina_m1.appointment_history DISABLE TRIGGER history_no_mutation");
@@ -76,7 +84,40 @@ public static class DemoDataReset
         var after = Counts(c, t);
         t.Commit();
         return new DemoResetReport(DemoDataPlan.Version, plan.BaseDate.ToString("yyyy-MM-dd"), true,
-            before, expected, after, 60);
+            before, expected, after, 60, endpoint.Database ?? "unknown", endpoint.Host ?? "unknown", endpoint.Port);
+    }
+
+    internal static void RequireAllowedTarget(IConfiguration configuration)
+    {
+        var connectionString = configuration.GetConnectionString("Telemedicina");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            throw new DemoResetException("DEMO_DATABASE_TARGET_NOT_ALLOWED");
+        var endpoint = Database.ParseConnectionString(connectionString);
+        var expectedDatabase = configuration["DemoReset:ExpectedDatabase"];
+        var localHost = string.Equals(endpoint.Host, "localhost", StringComparison.OrdinalIgnoreCase) ||
+            IPAddress.TryParse(endpoint.Host, out var address) && IPAddress.IsLoopback(address);
+
+        if (localHost)
+        {
+            if (!string.IsNullOrWhiteSpace(endpoint.Database) &&
+                !string.IsNullOrWhiteSpace(expectedDatabase) &&
+                string.Equals(endpoint.Database, expectedDatabase.Trim(), StringComparison.Ordinal))
+                return;
+            throw new DemoResetException("DEMO_DATABASE_TARGET_NOT_ALLOWED");
+        }
+
+        // Configuration confirms the single hardcoded remote target; it cannot extend the allowlist.
+        var expectedHost = configuration["DemoReset:ExpectedHost"];
+        var expectedPort = configuration["DemoReset:ExpectedPort"];
+        var expectedRemoteDatabase = configuration["DemoReset:ExpectedDatabase"];
+        if (!string.Equals(endpoint.Host, AllowedRemoteHost, StringComparison.OrdinalIgnoreCase) ||
+            endpoint.Port != AllowedRemotePort ||
+            !string.Equals(endpoint.Database, AllowedRemoteDatabase, StringComparison.Ordinal) ||
+            !string.Equals(expectedHost?.Trim(), AllowedRemoteHost, StringComparison.OrdinalIgnoreCase) ||
+            !int.TryParse(expectedPort, NumberStyles.None, CultureInfo.InvariantCulture, out var confirmedPort) ||
+            confirmedPort != AllowedRemotePort ||
+            !string.Equals(expectedRemoteDatabase?.Trim(), AllowedRemoteDatabase, StringComparison.Ordinal))
+            throw new DemoResetException("DEMO_DATABASE_TARGET_NOT_ALLOWED");
     }
 
     private static void Preflight(NpgsqlConnection c, NpgsqlTransaction t)
@@ -95,7 +136,7 @@ public static class DemoDataReset
         if (tables.Any(row => row["can_own"] is not true))
             throw new DemoResetException("DEMO_OWNER_REQUIRED");
         var versions = Rows(c, t, "SELECT version FROM telemedicina_m1.schema_versions ORDER BY version");
-        if (!versions.Select(row => (int)row["version"]!).SequenceEqual(new[] { 1, 2, 3, 4, 5 }))
+        if (!versions.Select(row => (int)row["version"]!).SequenceEqual(new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 }))
             throw new DemoResetException("DEMO_SCHEMA_VERSION_MISMATCH");
         // Reject references that would require CASCADE or truncate another schema/table.
         if (Convert.ToInt64(Scalar(c, t, """
@@ -126,14 +167,23 @@ public static class DemoDataReset
             (string)row["relname"]! != spec.Table || (string)row["proname"]! != spec.Function ||
             (string)row["function_schema"]! != Schema || (int)row["type"]! != spec.Type ||
             (string)row["enabled"]! != "O" || (int)row["arguments"]! != 0 || row["unconditional"] is not true))
-            throw new DemoResetException("DEMO_TRIGGER_MISMATCH");
+        {
+            var actual = triggers.Select(row =>
+                $"{SafeIdentifier(row["relname"])}.{SafeIdentifier(row["tgname"])}:" +
+                $"{row["type"]}/{row["enabled"]}:{SafeIdentifier(row["function_schema"])}." +
+                $"{SafeIdentifier(row["proname"])}:args={row["arguments"]}:unconditional={row["unconditional"]}");
+            throw new DemoResetException($"DEMO_TRIGGER_MISMATCH count={triggers.Count} actual=[{string.Join(",", actual)}]");
+        }
     }
+
+    private static string SafeIdentifier(object? value) => value is string text && text.Length <= 63 &&
+        text.All(character => char.IsAsciiLetterOrDigit(character) || character == '_') ? text : "invalid";
 
     public static IReadOnlyDictionary<string, long> Expected() =>
         Tables.ToDictionary(table => table, table => table switch
         {
             "users" => 30L, "profiles" => 24, "services" or "practitioners" or "practitioner_services" => 6,
-            "slots" => 800, "appointments" => 30, "appointment_history" or "notifications" => 48,
+            "slots" => 800, "appointments" or "appointment_history" or "notifications" => 0,
             "notification_preferences" => 24, "audit" => 1, _ => 0
         }, StringComparer.Ordinal);
 
@@ -173,52 +223,11 @@ public static class DemoDataReset
                 VALUES(@id,@s,@p,@start,@end,@blocked)
                 """, ("id", slot.Id), ("s", slot.ServiceId), ("p", slot.PractitionerId),
                 ("start", slot.StartUtc), ("end", slot.EndUtc), ("blocked", slot.Blocked));
-        foreach (var appointment in plan.Appointments)
-        {
-            Execute(c, t, "SELECT set_config('telemedicina.actor',@actor,true)", ("actor", appointment.UserId));
-            Execute(c, t, """
-                INSERT INTO telemedicina_m1.appointments(id,user_id,slot_id,practitioner_id,start_utc,end_utc,
-                    status,coverage,insurer,member_last4)
-                VALUES(@id,@u,@slot,@p,@start,@end,'PendingValidation','Pending',@insurer,@member)
-                """, ("id", appointment.Id), ("u", appointment.UserId), ("slot", appointment.Slot.Id),
-                ("p", appointment.Slot.PractitionerId), ("start", appointment.Slot.StartUtc),
-                ("end", appointment.Slot.EndUtc), ("insurer", appointment.Insurer), ("member", appointment.MemberLast4));
-            Notify(c, t, appointment, 1, "requested",
-                "Tu solicitud fue registrada. Inicia sesión para consultar su estado.");
-            if (appointment.HasTransition)
-            {
-                Execute(c, t, "SELECT set_config('telemedicina.actor',@actor,true)",
-                    ("actor", appointment.ReviewerId ?? appointment.UserId));
-                Execute(c, t, """
-                    UPDATE telemedicina_m1.appointments SET status=@status,coverage=@coverage,version=2,
-                        evidence=@evidence,coverage_valid_until=@valid,reviewed_by=@reviewer,
-                        reviewed_at=CASE WHEN @reviewer::text IS NULL THEN NULL ELSE now() END WHERE id=@id
-                    """, ("status", appointment.Status), ("coverage", appointment.Coverage),
-                    ("evidence", appointment.ReviewerId is null ? null : "DEMO: resultado simulado; sin validación ARS"),
-                    ("valid", appointment.Coverage == "Approved" ? appointment.Slot.EndUtc.AddDays(1) : (DateTime?)null),
-                    ("reviewer", appointment.ReviewerId), ("id", appointment.Id));
-                Notify(c, t, appointment, 2, appointment.Status == "Cancelled" ? "cancelled" : "updated",
-                    appointment.Status == "Cancelled" ?
-                        "Tu cita fue cancelada. Inicia sesión para consultar los detalles." :
-                        "El estado de tu cita cambió. Inicia sesión para consultar los detalles.");
-            }
-        }
         Execute(c, t, """
             INSERT INTO telemedicina_m1.audit(id,actor_id,action,resource_id,trace_id,result)
             VALUES(@id,@actor,'demo.reset_seed_applied',@resource,'demo-reset','Success')
             """, ("id", DemoDataPlan.Id("audit:reset")), ("actor", admin.Id),
-            ("resource", DemoDataPlan.Version + ";users=30;profiles=24;services=6;practitioners=6;slots=800;blocked=60;appointments=30;history=48"));
-    }
-
-    private static void Notify(NpgsqlConnection c, NpgsqlTransaction t, DemoAppointment appointment,
-        int version, string kind, string text)
-    {
-        var key = "demo:" + appointment.Id + ":" + version + ":" + kind;
-        Execute(c, t, """
-            INSERT INTO telemedicina_m1.notifications(id,user_id,event_key,kind,body,resource_id,resource_version)
-            VALUES(@id,@u,@key,@kind,@body,@resource,@version)
-            """, ("id", DemoDataPlan.Id("notification:" + key)), ("u", appointment.UserId), ("key", key),
-            ("kind", kind), ("body", text), ("resource", appointment.Id), ("version", version));
+            ("resource", DemoDataPlan.Version + ";users=30;profiles=24;services=6;practitioners=6;slots=800;blocked=60;appointments=0;history=0;notifications=0"));
     }
 
     private static void AssertIntegrity(NpgsqlConnection c, NpgsqlTransaction t, IReadOnlyDictionary<string, long> expected)
@@ -229,24 +238,13 @@ public static class DemoDataReset
         if (Convert.ToInt64(Scalar(c, t, """
             SELECT count(*) FROM telemedicina_m1.slots WHERE blocked
             """)) != 60 || Convert.ToInt64(Scalar(c, t, """
-            SELECT count(*) FROM telemedicina_m1.appointments a JOIN telemedicina_m1.slots s ON s.id=a.slot_id
-            WHERE s.blocked OR s.start_utc<>a.start_utc OR s.end_utc<>a.end_utc
-            """)) != 0 || Convert.ToInt64(Scalar(c, t, """
             SELECT count(*) FROM telemedicina_m1.slots a JOIN telemedicina_m1.slots b
             ON a.practitioner_id=b.practitioner_id AND a.id<b.id
             AND tstzrange(a.start_utc,a.end_utc,'[)') && tstzrange(b.start_utc,b.end_utc,'[)')
             """)) != 0)
             throw new DemoResetException("DEMO_INTEGRITY_FAILED");
-        var distribution = Rows(c, t, """
-            SELECT status,coverage,count(*) AS total FROM telemedicina_m1.appointments
-            GROUP BY status,coverage
-            """).ToDictionary(row => (string)row["status"]! + "/" + row["coverage"],
-                row => (long)row["total"]!);
-        if (distribution.Count != 4 || distribution.GetValueOrDefault("PendingValidation/Pending") != 12 ||
-            distribution.GetValueOrDefault("Confirmed/Approved") != 8 ||
-            distribution.GetValueOrDefault("Cancelled/Pending") != 6 ||
-            distribution.GetValueOrDefault("PendingValidation/Denied") != 4)
-            throw new DemoResetException("DEMO_DISTRIBUTION_FAILED");
+        if (actual["appointments"] != 0 || actual["appointment_history"] != 0 || actual["notifications"] != 0)
+            throw new DemoResetException("DEMO_APPOINTMENT_DATA_NOT_EMPTY");
         // Check restored trigger identities as well as data before committing.
         Preflight(c, t);
     }

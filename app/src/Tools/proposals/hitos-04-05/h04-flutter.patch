@@ -1,0 +1,678 @@
+diff --git a/app/src/lib/features/catalog/data/catalog_repository.dart b/app/src/lib/features/catalog/data/catalog_repository.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/lib/features/catalog/data/catalog_repository.dart
+@@ -0,0 +1,112 @@
++import '../../../core/network/api_client.dart';
++
++class CatalogService {
++  final String id, name, specialty;
++  final int durationMinutes;
++  const CatalogService(this.id, this.name, this.specialty, this.durationMinutes);
++  factory CatalogService.fromJson(JsonMap data) => CatalogService(
++    data['id'] as String, data['name'] as String, data['specialty'] as String,
++    data['durationMinutes'] as int,
++  );
++  JsonMap toJson() => {'id': id, 'name': name, 'specialty': specialty, 'durationMinutes': durationMinutes};
++}
++
++class CatalogPractitioner {
++  final String id, name;
++  const CatalogPractitioner(this.id, this.name);
++  factory CatalogPractitioner.fromJson(JsonMap data) => CatalogPractitioner(data['id'] as String, data['name'] as String);
++  JsonMap toJson() => {'id': id, 'name': name};
++}
++
++class CatalogSlot {
++  final String id, serviceId, practitionerId, practitionerName, serviceName, specialty;
++  final DateTime startAt, endAt;
++  const CatalogSlot(this.id, this.serviceId, this.practitionerId, this.practitionerName,
++    this.serviceName, this.specialty, this.startAt, this.endAt);
++  factory CatalogSlot.fromJson(JsonMap data) => CatalogSlot(
++    data['id'] as String, data['serviceId'] as String, data['practitionerId'] as String,
++    data['practitionerName'] as String, data['serviceName'] as String, data['specialty'] as String,
++    DateTime.parse(data['startAt'] as String).toUtc(), DateTime.parse(data['endAt'] as String).toUtc(),
++  );
++  JsonMap toJson() => {'id': id, 'serviceId': serviceId, 'practitionerId': practitionerId,
++    'practitionerName': practitionerName, 'serviceName': serviceName, 'specialty': specialty,
++    'startAt': startAt.toIso8601String(), 'endAt': endAt.toIso8601String()};
++}
++
++class CatalogOptions {
++  final List<String> specialties;
++  final List<CatalogService> services;
++  const CatalogOptions(this.specialties, this.services);
++}
++
++enum CatalogAvailabilityState { notQueried, loading, empty, results, error }
++
++/// Civil dates are interpreted in America/Santo_Domingo, independently of the device zone.
++/// The end date is exclusive. The server remains authoritative for slot availability.
++class CatalogDateRange {
++  final DateTime from, to;
++  const CatalogDateRange(this.from, this.to);
++  factory CatalogDateRange.fromCivilDates(String from, String to) {
++    DateTime civil(String value) {
++      final match = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(value);
++      if (match == null) {
++        throw ApiFailure(400, 'Usa fechas válidas con formato AAAA-MM-DD.');
++      }
++      final year = int.parse(match[1]!), month = int.parse(match[2]!), day = int.parse(match[3]!);
++      final date = DateTime.utc(year, month, day);
++      if (date.year != year || date.month != month || date.day != day) {
++        throw ApiFailure(400, 'Usa fechas válidas con formato AAAA-MM-DD.');
++      }
++      return date.add(const Duration(hours: 4));
++    }
++    final start = civil(from), end = civil(to);
++    if (!end.isAfter(start) || end.difference(start) > const Duration(days: 31)) {
++      throw ApiFailure(400, 'El rango debe ser positivo y de hasta 31 días.');
++    }
++    return CatalogDateRange(start, end);
++  }
++  static String civilDate(DateTime utc) {
++    final local = utc.toUtc().subtract(const Duration(hours: 4));
++    String pad(int value) => value.toString().padLeft(2, '0');
++    return '${local.year.toString().padLeft(4, '0')}-${pad(local.month)}-${pad(local.day)}';
++  }
++}
++
++class CatalogRepository {
++  final ApiClient api;
++  CatalogRepository(this.api);
++
++  Future<List<T>> _list<T>(String path, T Function(JsonMap) parse) async {
++    final data = await api.request('GET', path);
++    try {
++      return List<T>.unmodifiable((data as List).map((item) => parse(Map<String, dynamic>.from(item as Map))));
++    } on TypeError {
++      throw ApiFailure(502, 'Respuesta de catálogo no válida.');
++    } on FormatException {
++      throw ApiFailure(502, 'Respuesta de catálogo no válida.');
++    }
++  }
++
++  Future<CatalogOptions> catalog() async {
++    final results = await Future.wait([
++      _list<String>('/specialties', (item) => item['name'] as String),
++      _list<CatalogService>('/services', CatalogService.fromJson),
++    ]);
++    return CatalogOptions(results[0] as List<String>, results[1] as List<CatalogService>);
++  }
++
++  Future<List<CatalogPractitioner>> practitioners(String serviceId) => _list(
++    '/practitioners?${Uri(queryParameters: {'serviceId': serviceId}).query}', CatalogPractitioner.fromJson,
++  );
++
++  Future<List<CatalogSlot>> availability({required String serviceId, String? practitionerId,
++    required String fromDate, required String toDate}) {
++    final range = CatalogDateRange.fromCivilDates(fromDate, toDate);
++    final query = Uri(queryParameters: {
++      'serviceId': serviceId,
++      if (practitionerId != null) 'practitionerId': practitionerId,
++      'from': range.from.toIso8601String(), 'to': range.to.toIso8601String(),
++    }).query;
++    return _list('/availability?$query', CatalogSlot.fromJson);
++  }
++}
+diff --git a/app/src/lib/app/application/patient_controller.dart b/app/src/lib/app/application/patient_controller.dart
+--- a/app/src/lib/app/application/patient_controller.dart
++++ b/app/src/lib/app/application/patient_controller.dart
+@@ -6,6 +6,7 @@
+ import '../../features/auth/data/auth_repository.dart';
+ import '../../features/appointments/domain/reschedule_options.dart';
+ import '../../features/patient_profile/data/profile_repository.dart';
++import '../../features/catalog/data/catalog_repository.dart';
+ 
+ class PatientController extends ChangeNotifier {
+   final ApiClient api;
+@@ -33,12 +34,41 @@
+   int preferencesVersion = 0;
+   bool emailEnabled = false;
+   String? selectedServiceId;
++  String? selectedSpecialty, selectedPractitionerId;
++  late final CatalogRepository catalogRepository = CatalogRepository(api);
++  List<String> specialties = [];
++  List<JsonMap> practitioners = [];
++  late String catalogFromDate, catalogToDate;
++  String bookingInsurerDraft = '', bookingMemberDraft = '';
++  String catalogError = '', availabilityError = '';
++  bool practitionersLoading = false;
++  CatalogAvailabilityState availabilityState = CatalogAvailabilityState.notQueried;
++  int _catalogLoadRevision = 0, _practitionerRevision = 0, _availabilityRevision = 0;
++  List<JsonMap> get filteredServices => services.where((service) =>
++    selectedSpecialty == null || service['specialty'] == selectedSpecialty).toList();
+   List<JsonMap> services = [],
+       slots = [],
+       appointments = [],
+       notifications = [];
+   final _bookingKeys = <String, String>{};
+-  PatientController(this.api);
++  PatientController(this.api) {
++    _defaultCatalogDates();
++  }
++
++  void _defaultCatalogDates() {
++    final now = DateTime.now().toUtc();
++    catalogFromDate = CatalogDateRange.civilDate(now);
++    catalogToDate = CatalogDateRange.civilDate(now.add(const Duration(days: 14)));
++  }
++
++  void _invalidateAvailability() {
++    _availabilityRevision++;
++    slots = [];
++    availabilityState = CatalogAvailabilityState.notQueried;
++    availabilityError = '';
++  }
++
++  bool _currentSession(int generation) => !_disposed && authenticated && generation == api.sessionGeneration;
+ 
+   bool get authenticated => api.authenticated;
+   void setMessage(String value) {
+@@ -74,6 +104,18 @@
+     appointments = [];
+     notifications = [];
+     selectedServiceId = null;
++    selectedSpecialty = null;
++    selectedPractitionerId = null;
++    specialties = [];
++    practitioners = [];
++    practitionersLoading = false;
++    catalogError = '';
++    bookingInsurerDraft = '';
++    bookingMemberDraft = '';
++    _catalogLoadRevision++;
++    _practitionerRevision++;
++    _defaultCatalogDates();
++    _invalidateAvailability();
+     _bookingKeys.clear();
+   }
+ 
+@@ -97,6 +139,7 @@
+ 
+   Future<void> load() async {
+     final generation = api.sessionGeneration;
++    final catalogRevision = ++_catalogLoadRevision;
+     final me = Map<String, dynamic>.from(
+       await api.request('GET', '/auth/me') as Map,
+     );
+@@ -110,7 +153,7 @@
+     }
+     final results = await Future.wait([
+       profileRepository.load(),
+-      api.request('GET', '/services'),
++      catalogRepository.catalog(),
+       api.request('GET', '/appointments/me'),
+       api.request('GET', '/notifications/me'),
+       api.request('GET', '/notifications/preferences'),
+@@ -119,14 +162,16 @@
+       return;
+     identity = me;
+     _acceptProfile(results[0] as ProfileSnapshot);
+-    services = _records(results[1]);
++    if (catalogRevision == _catalogLoadRevision) {
++      _acceptCatalog(results[1] as CatalogOptions);
++    }
+     appointments = _records(results[2]);
+     notifications = _records(results[3]);
+     final preferences = results[4] as Map;
+     emailEnabled = preferences['emailEnabled'] as bool;
+     preferencesVersion = preferences['version'] as int;
+-    if (!services.any((item) => item['id'] == selectedServiceId)) {
+-      selectedServiceId = services.firstOrNull?['id'] as String?;
++    if (catalogRevision == _catalogLoadRevision) {
++      await refreshPractitioners();
+     }
+   }
+ 
+@@ -193,17 +238,142 @@
+     }
+   }
+ 
+-  void selectService(String? id) {
++  void _acceptCatalog(CatalogOptions options) {
++    specialties = options.specialties;
++    services = options.services.map((item) => item.toJson()).toList();
++    if (selectedSpecialty != null && !specialties.contains(selectedSpecialty)) {
++      selectedSpecialty = null;
++    }
++    if (!filteredServices.any((item) => item['id'] == selectedServiceId)) {
++      selectedServiceId = filteredServices.firstOrNull?['id'] as String?;
++      selectedPractitionerId = null;
++      practitioners = [];
++    }
++    catalogError = '';
++    _invalidateAvailability();
++  }
++
++  Future<void> refreshCatalog() async {
++    final generation = api.sessionGeneration;
++    final revision = ++_catalogLoadRevision;
++    _invalidateAvailability();
++    _notify();
++    try {
++      final options = await catalogRepository.catalog();
++      if (!_currentSession(generation) || revision != _catalogLoadRevision) return;
++      _acceptCatalog(options);
++      await refreshPractitioners();
++    } on ApiFailure catch (error) {
++      if (!_currentSession(generation) || revision != _catalogLoadRevision) return;
++      catalogError = error.message;
++      rethrow;
++    } finally {
++      if (_currentSession(generation) && revision == _catalogLoadRevision) _notify();
++    }
++  }
++
++  Future<void> refreshPractitioners() async {
++    final service = selectedServiceId;
++    final generation = api.sessionGeneration;
++    final revision = ++_practitionerRevision;
++    practitionersLoading = service != null;
++    catalogError = '';
++    _notify();
++    try {
++      final values = service == null
++          ? <CatalogPractitioner>[]
++          : await catalogRepository.practitioners(service);
++      if (!_currentSession(generation) || revision != _practitionerRevision || service != selectedServiceId) return;
++      practitioners = values.map((item) => item.toJson()).toList();
++      if (selectedPractitionerId != null && !practitioners.any((item) => item['id'] == selectedPractitionerId)) {
++        selectedPractitionerId = null;
++        _invalidateAvailability();
++      }
++    } on ApiFailure catch (error) {
++      if (!_currentSession(generation) || revision != _practitionerRevision || service != selectedServiceId) return;
++      catalogError = error.message;
++      rethrow;
++    } finally {
++      if (_currentSession(generation) && revision == _practitionerRevision) {
++        practitionersLoading = false;
++        _notify();
++      }
++    }
++  }
++
++  Future<void> selectSpecialty(String? specialty) async {
++    if (specialty != null && !specialties.contains(specialty)) {
++      throw ApiFailure(400, 'Selecciona una especialidad disponible.');
++    }
++    if (specialty == selectedSpecialty) return;
++    selectedSpecialty = specialty;
++    selectedServiceId = filteredServices.firstOrNull?['id'] as String?;
++    selectedPractitionerId = null;
++    practitioners = [];
++    _invalidateAvailability();
++    _notify();
++    await refreshPractitioners();
++  }
++
++  Future<void> selectService(String? id) async {
++    if (id != null && !filteredServices.any((item) => item['id'] == id)) {
++      throw ApiFailure(400, 'Selecciona un servicio disponible.');
++    }
++    if (id == selectedServiceId) return;
+     selectedServiceId = id;
++    selectedPractitionerId = null;
++    practitioners = [];
++    _invalidateAvailability();
++    _notify();
++    await refreshPractitioners();
++  }
++
++  void selectPractitioner(String? id) {
++    if (id != null && !practitioners.any((item) => item['id'] == id)) {
++      throw ApiFailure(400, 'Selecciona un profesional asociado al servicio.');
++    }
++    if (id == selectedPractitionerId) return;
++    selectedPractitionerId = id;
++    _invalidateAvailability();
++    _notify();
++  }
++
++  void updateAvailabilityRange(String from, String to) {
++    if (from == catalogFromDate && to == catalogToDate) return;
++    catalogFromDate = from;
++    catalogToDate = to;
++    _invalidateAvailability();
++    _notify();
++  }
++
++  void updateBookingDraft(String insurer, String member) {
++    bookingInsurerDraft = insurer;
++    bookingMemberDraft = member;
++  }
++
++  Future<void> availability() async {
++    final service = selectedServiceId;
++    if (service == null) return;
++    final generation = api.sessionGeneration;
++    final revision = ++_availabilityRevision;
+     slots = [];
+-    _notify();
+-  }
+-
+-  Future<void> availability() async {
+-    if (selectedServiceId == null) return;
+-    slots = _records(
+-      await api.request('GET', '/availability?serviceId=$selectedServiceId'),
+-    );
++    availabilityError = '';
++    availabilityState = CatalogAvailabilityState.loading;
++    _notify();
++    try {
++      final values = await catalogRepository.availability(serviceId: service,
++        practitionerId: selectedPractitionerId, fromDate: catalogFromDate, toDate: catalogToDate);
++      if (!_currentSession(generation) || revision != _availabilityRevision) return;
++      slots = values.map((item) => item.toJson()).toList();
++      availabilityState = slots.isEmpty ? CatalogAvailabilityState.empty : CatalogAvailabilityState.results;
++    } on ApiFailure catch (error) {
++      if (!_currentSession(generation) || revision != _availabilityRevision) return;
++      availabilityError = error.message;
++      availabilityState = CatalogAvailabilityState.error;
++      rethrow;
++    } finally {
++      if (_currentSession(generation) && revision == _availabilityRevision) _notify();
++    }
+   }
+ 
+   Future<void> book(JsonMap slot, String insurer, String member) async {
+diff --git a/app/src/lib/app/presentation/patient_shell.dart b/app/src/lib/app/presentation/patient_shell.dart
+--- a/app/src/lib/app/presentation/patient_shell.dart
++++ b/app/src/lib/app/presentation/patient_shell.dart
+@@ -51,12 +51,29 @@
+         onSave: (body) => c.execute(() => c.saveProfile(body)),
+       ),
+       1 => BookingForm(
+-        services: c.services,
++        services: c.filteredServices,
+         slots: c.slots,
++        specialties: c.specialties,
++        practitioners: c.practitioners,
++        selectedSpecialty: c.selectedSpecialty,
++        selectedPractitionerId: c.selectedPractitionerId,
++        fromDate: c.catalogFromDate,
++        toDate: c.catalogToDate,
++        insurerDraft: c.bookingInsurerDraft,
++        memberDraft: c.bookingMemberDraft,
++        availabilityState: c.availabilityState,
++        availabilityError: c.availabilityError,
++        catalogError: c.catalogError,
++        practitionersLoading: c.practitionersLoading,
++        onSpecialtyChanged: (value) => c.execute(() => c.selectSpecialty(value)),
++        onPractitionerChanged: c.selectPractitioner,
++        onRangeChanged: c.updateAvailabilityRange,
++        onDraftChanged: c.updateBookingDraft,
++        onReloadCatalog: () => c.execute(c.refreshCatalog),
+         selectedServiceId: c.selectedServiceId,
+         busy: c.busy,
+         hasProfile: c.profileVersion > 0,
+-        onServiceChanged: c.selectService,
++        onServiceChanged: (value) => c.execute(() => c.selectService(value)),
+         onAvailability: () => c.execute(c.availability),
+         onBook: (slot, insurer, member) async {
+           final saved = await c.execute(() => c.book(slot, insurer, member));
+diff --git a/app/src/lib/features/catalog/presentation/booking_form.dart b/app/src/lib/features/catalog/presentation/booking_form.dart
+--- a/app/src/lib/features/catalog/presentation/booking_form.dart
++++ b/app/src/lib/features/catalog/presentation/booking_form.dart
+@@ -1,123 +1,163 @@
+ import 'package:flutter/material.dart';
+ 
+ import '../../../core/models/json_map.dart';
++import '../../../core/errors/api_failure.dart';
+ import '../../../shared/formatting/date_time.dart';
+-import '../../../shared/widgets/labeled_text_field.dart';
++import '../data/catalog_repository.dart';
+ 
+ class BookingForm extends StatefulWidget {
+   final List<JsonMap> services, slots;
+-  final String? selectedServiceId;
+-  final bool busy, hasProfile;
++  final List<String> specialties;
++  final List<JsonMap> practitioners;
++  final String? selectedServiceId, selectedSpecialty, selectedPractitionerId;
++  final String fromDate, toDate, insurerDraft, memberDraft, availabilityError, catalogError;
++  final bool busy, hasProfile, practitionersLoading;
++  final CatalogAvailabilityState availabilityState;
+   final ValueChanged<String?> onServiceChanged;
++  final ValueChanged<String?>? onSpecialtyChanged, onPractitionerChanged;
++  final void Function(String, String)? onRangeChanged, onDraftChanged;
+   final VoidCallback onAvailability;
++  final VoidCallback? onReloadCatalog;
+   final Future<bool> Function(JsonMap, String, String) onBook;
+   const BookingForm({
+-    super.key,
+-    required this.services,
+-    required this.slots,
+-    required this.selectedServiceId,
+-    required this.busy,
+-    required this.hasProfile,
+-    required this.onServiceChanged,
+-    required this.onAvailability,
+-    required this.onBook,
++    super.key, required this.services, required this.slots,
++    required this.selectedServiceId, required this.busy, required this.hasProfile,
++    required this.onServiceChanged, required this.onAvailability, required this.onBook,
++    this.specialties = const [], this.practitioners = const [], this.selectedSpecialty,
++    this.selectedPractitionerId, this.fromDate = '', this.toDate = '', this.insurerDraft = '',
++    this.memberDraft = '', this.availabilityError = '', this.catalogError = '',
++    this.practitionersLoading = false, this.availabilityState = CatalogAvailabilityState.notQueried,
++    this.onSpecialtyChanged, this.onPractitionerChanged, this.onRangeChanged,
++    this.onDraftChanged, this.onReloadCatalog,
+   });
+   @override
+   State<BookingForm> createState() => _BookingFormState();
+ }
+ 
+ class _BookingFormState extends State<BookingForm> {
+-  final insurer = TextEditingController(), member = TextEditingController();
++  late final insurer = TextEditingController(text: widget.insurerDraft);
++  late final member = TextEditingController(text: widget.memberDraft);
++  late final from = TextEditingController(text: widget.fromDate);
++  late final to = TextEditingController(text: widget.toDate);
++  String? rangeError;
++
++  @override
++  void didUpdateWidget(covariant BookingForm oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    void sync(TextEditingController controller, String previous, String next) {
++      if (previous != next && controller.text != next) controller.text = next;
++    }
++    sync(insurer, oldWidget.insurerDraft, widget.insurerDraft);
++    sync(member, oldWidget.memberDraft, widget.memberDraft);
++    sync(from, oldWidget.fromDate, widget.fromDate);
++    sync(to, oldWidget.toDate, widget.toDate);
++  }
++
+   @override
+   void dispose() {
+-    insurer.dispose();
+-    member.dispose();
++    insurer.dispose(); member.dispose(); from.dispose(); to.dispose();
+     super.dispose();
+   }
+ 
++  void rangeChanged(String _) {
++    setState(() => rangeError = null);
++    widget.onRangeChanged?.call(from.text, to.text);
++  }
++
++  void consult() {
++    try {
++      CatalogDateRange.fromCivilDates(from.text, to.text);
++      setState(() => rangeError = null);
++      widget.onAvailability();
++    } on ApiFailure catch (error) {
++      setState(() => rangeError = error.message);
++    }
++  }
++
++  Widget selector({required String label, required String? value,
++    required List<DropdownMenuItem<String>> items, required ValueChanged<String?>? onChanged}) => Padding(
++    padding: const EdgeInsets.symmetric(vertical: 8),
++    child: InputDecorator(decoration: InputDecoration(labelText: label),
++      child: DropdownButtonHideUnderline(child: DropdownButton<String>(
++        value: value, isExpanded: true, items: items,
++        onChanged: widget.busy ? null : onChanged,
++      )),
++    ),
++  );
++
+   @override
+-  Widget build(BuildContext context) => Column(
+-    crossAxisAlignment: CrossAxisAlignment.stretch,
+-    children: [
+-      const Text(
+-        'Solicitar cita',
+-        style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+-      ),
+-      const SizedBox(height: 16),
++  Widget build(BuildContext context) {
++    final service = widget.services.any((item) => item['id'] == widget.selectedServiceId)
++        ? widget.selectedServiceId : null;
++    final person = widget.practitioners.any((item) => item['id'] == widget.selectedPractitionerId)
++        ? widget.selectedPractitionerId : null;
++    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++      const Text('Solicitar cita', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
++      const SizedBox(height: 12),
++      const Text('Consulta los servicios habilitados para atención remota. Si necesitas atención presencial, consulta las opciones del centro.'),
+       if (!widget.hasProfile) const Text('Complete primero su perfil.'),
+-      if (widget.services.isEmpty)
+-        const Text('No hay servicios disponibles. Puede actualizar más tarde.'),
+-      if (widget.services.isNotEmpty)
+-        InputDecorator(
+-          decoration: const InputDecoration(labelText: 'Servicio'),
+-          child: DropdownButtonHideUnderline(
+-            child: DropdownButton<String>(
+-              value: widget.selectedServiceId,
+-              isExpanded: true,
+-              items: widget.services
+-                  .map(
+-                    (service) => DropdownMenuItem(
+-                      value: service['id'] as String,
+-                      child: Text(
+-                        '${service['name']} · ${service['durationMinutes']} min',
+-                        overflow: TextOverflow.ellipsis,
+-                      ),
+-                    ),
+-                  )
+-                  .toList(),
+-              onChanged: widget.busy ? null : widget.onServiceChanged,
+-            ),
+-          ),
+-        ),
+-      const SizedBox(height: 16),
+-      FilledButton(
+-        onPressed: widget.busy || widget.services.isEmpty
+-            ? null
+-            : widget.onAvailability,
+-        child: const Text('Consultar horarios'),
+-      ),
+-      LabeledTextField(
+-        controller: insurer,
+-        label: 'Aseguradora para revisión manual',
+-        enabled: !widget.busy,
+-      ),
+-      LabeledTextField(
+-        controller: member,
+-        label: 'Últimos 4 dígitos de afiliación',
+-        enabled: !widget.busy,
+-      ),
+-      const Text(
+-        'La disponibilidad no garantiza reserva. No se confirma cobertura ni copago sin revisión.',
+-      ),
++      selector(label: 'Especialidad', value: widget.selectedSpecialty ?? '', items: [
++        const DropdownMenuItem(value: '', child: Text('Todas las especialidades')),
++        for (final item in widget.specialties) DropdownMenuItem(value: item, child: Text(item, overflow: TextOverflow.ellipsis)),
++      ], onChanged: widget.onSpecialtyChanged == null ? null : (value) => widget.onSpecialtyChanged!(value == '' ? null : value)),
++      if (widget.services.isEmpty) const Text('No hay servicios disponibles. Puede actualizar más tarde.'),
++      if (widget.services.isNotEmpty) selector(label: 'Servicio', value: service, items: [
++        for (final item in widget.services) DropdownMenuItem(value: item['id'] as String,
++          child: Text('${item['name']} · ${item['durationMinutes']} min', overflow: TextOverflow.ellipsis)),
++      ], onChanged: widget.onServiceChanged),
++      selector(label: 'Profesional asociado', value: person ?? '', items: [
++        const DropdownMenuItem(value: '', child: Text('Cualquier profesional asociado')),
++        for (final item in widget.practitioners) DropdownMenuItem(value: item['id'] as String,
++          child: Text(item['name'] as String, overflow: TextOverflow.ellipsis)),
++      ], onChanged: widget.practitionersLoading || service == null || widget.onPractitionerChanged == null
++          ? null : (value) => widget.onPractitionerChanged!(value == '' ? null : value)),
++      if (widget.practitionersLoading) const Semantics(liveRegion: true, child: Text('Cargando profesionales asociados…')),
++      if (widget.catalogError.isNotEmpty) ...[
++        Semantics(liveRegion: true, child: Text(widget.catalogError)),
++        if (widget.onReloadCatalog != null) TextButton(onPressed: widget.busy ? null : widget.onReloadCatalog,
++          child: const Text('Reintentar catálogo')),
++      ],
++      const SizedBox(height: 8),
++      TextField(key: const ValueKey('catalog-from'), controller: from, enabled: !widget.busy,
++        keyboardType: TextInputType.datetime, textInputAction: TextInputAction.next,
++        decoration: const InputDecoration(labelText: 'Desde (AAAA-MM-DD, Santo Domingo)'), onChanged: rangeChanged),
++      const SizedBox(height: 12),
++      TextField(key: const ValueKey('catalog-to'), controller: to, enabled: !widget.busy,
++        keyboardType: TextInputType.datetime, textInputAction: TextInputAction.next,
++        decoration: const InputDecoration(labelText: 'Hasta (excluyente, AAAA-MM-DD, Santo Domingo)'), onChanged: rangeChanged),
++      if (rangeError != null) Semantics(liveRegion: true, child: Text(rangeError!)),
++      const SizedBox(height: 12),
++      const Text('Consulta un rango de hasta 31 días. Se muestran hasta 300 horarios; reduce el rango o filtra por profesional para acotar resultados.'),
++      FilledButton(onPressed: widget.busy || service == null || widget.practitionersLoading ? null : consult,
++        child: const Text('Consultar horarios')),
++      if (widget.availabilityState == CatalogAvailabilityState.notQueried)
++        const Text('Selecciona los filtros y consulta los horarios.'),
++      if (widget.availabilityState == CatalogAvailabilityState.loading)
++        const Semantics(liveRegion: true, child: Text('Consultando horarios…')),
++      if (widget.availabilityState == CatalogAvailabilityState.empty)
++        const Semantics(liveRegion: true, child: Text('No hay horarios disponibles para estos filtros. Prueba con otro rango o profesional.')),
++      if (widget.availabilityState == CatalogAvailabilityState.error)
++        Semantics(liveRegion: true, child: Text(widget.availabilityError.isEmpty
++          ? 'No se pudieron consultar los horarios. Conservamos tus filtros para reintentar.' : widget.availabilityError)),
++      const SizedBox(height: 12),
++      TextField(key: const ValueKey('booking-insurer'), controller: insurer, enabled: !widget.busy,
++        decoration: const InputDecoration(labelText: 'Aseguradora para revisión manual'),
++        onChanged: (_) => widget.onDraftChanged?.call(insurer.text, member.text)),
++      const SizedBox(height: 12),
++      TextField(key: const ValueKey('booking-member'), controller: member, enabled: !widget.busy,
++        decoration: const InputDecoration(labelText: 'Últimos 4 dígitos de afiliación'),
++        onChanged: (_) => widget.onDraftChanged?.call(insurer.text, member.text)),
++      const SizedBox(height: 12),
++      const Text('La disponibilidad no garantiza reserva. No se confirma cobertura ni copago sin revisión.'),
+       const SizedBox(height: 20),
+-      for (final slot in widget.slots)
+-        Card(
+-          child: Padding(
+-            padding: const EdgeInsets.all(16),
+-            child: Column(
+-              crossAxisAlignment: CrossAxisAlignment.start,
+-              children: [
+-                Text(
+-                  localTime(slot['startAt'] as String),
+-                  style: const TextStyle(fontWeight: FontWeight.w600),
+-                ),
+-                const SizedBox(height: 4),
+-                Text(slot['practitionerName'] as String),
+-                const SizedBox(height: 12),
+-                FilledButton(
+-                  onPressed: widget.busy || !widget.hasProfile
+-                      ? null
+-                      : () => widget.onBook(
+-                          slot,
+-                          insurer.text.trim(),
+-                          member.text.trim(),
+-                        ),
+-                  child: const Text('Solicitar'),
+-                ),
+-              ],
+-            ),
+-          ),
+-        ),
+-    ],
+-  );
++      for (final slot in widget.slots) Card(child: Padding(padding: const EdgeInsets.all(16),
++        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++          Text(localTime(slot['startAt'] as String), style: const TextStyle(fontWeight: FontWeight.w600)),
++          const SizedBox(height: 4), Text(slot['practitionerName'] as String), const SizedBox(height: 12),
++          FilledButton(onPressed: widget.busy || !widget.hasProfile ? null : () => widget.onBook(slot, insurer.text.trim(), member.text.trim()),
++            child: const Text('Solicitar')),
++        ]),
++      )),
++    ]);
++  }
+ }

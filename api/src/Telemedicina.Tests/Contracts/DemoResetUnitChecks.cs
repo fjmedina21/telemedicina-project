@@ -50,6 +50,64 @@ public static class DemoResetUnitChecks
             Reject(() => DemoDataReset.RequireEnvironment(Configuration(new() { ["Mail:Mode"] = "smtp" }), development.Environment), assert);
             Reject(() => DemoDataReset.RequireEnvironment(Configuration(new() { ["Milestone:Enabled"] = "false" }), development.Environment), assert);
         });
+        test("DemoReset_ExecutionAllowsOnlyConfirmedLocalOrExactRemoteTarget", () =>
+        {
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new()
+                { ["ConnectionStrings:Telemedicina"] = "Host=db.example.invalid;Database=telemedicina;Username=demo;Password=not-a-real-secret" })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new()
+                { ["ConnectionStrings:Telemedicina"] = null })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new()
+                { ["ConnectionStrings:Telemedicina"] = "Host=127.0.0.1;Database=telemedicina;Username=demo;Password=not-a-real-secret" })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new()
+                { ["ConnectionStrings:Telemedicina"] = "Host=127.0.0.1;Database=telemedicina;Username=demo;Password=not-a-real-secret",
+                  ["DemoReset:ExpectedDatabase"] = "telemedicina_prod" })), assert);
+            DemoDataReset.RequireAllowedTarget(Configuration(new()
+                { ["ConnectionStrings:Telemedicina"] = "Host=127.0.0.1;Database=telemedicina;Username=demo;Password=not-a-real-secret",
+                  ["DemoReset:ExpectedDatabase"] = "telemedicina" }));
+            assert(true, "Loopback targets are allowed for the separately approved local execution.");
+
+            const string remoteConnection =
+                "Host=pg-2db5ca83-telemedicina-iso910.l.aivencloud.com;Port=10036;Database=defaultdb;Username=demo;Password=not-a-real-secret";
+            var confirmedRemote = new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:Telemedicina"] = remoteConnection,
+                ["DemoReset:ExpectedHost"] = "pg-2db5ca83-telemedicina-iso910.l.aivencloud.com",
+                ["DemoReset:ExpectedPort"] = "10036",
+                ["DemoReset:ExpectedDatabase"] = "defaultdb"
+            };
+            DemoDataReset.RequireAllowedTarget(Configuration(confirmedRemote));
+            assert(true, "The exact remote target with all confirmation values is allowed.");
+
+            var uriRemote = "postgresql://demo:not-a-real-secret@pg-2db5ca83-telemedicina-iso910.l.aivencloud.com:10036/defaultdb";
+            DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["ConnectionStrings:Telemedicina"] = uriRemote }));
+            assert(true, "The exact remote PostgreSQL URI uses the same target allowlist.");
+
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["ConnectionStrings:Telemedicina"] = remoteConnection.Replace("10036", "10037") })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["ConnectionStrings:Telemedicina"] = remoteConnection.Replace("defaultdb", "otherdb") })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["ConnectionStrings:Telemedicina"] = remoteConnection.Replace(
+                    "pg-2db5ca83-telemedicina-iso910.l.aivencloud.com", "other.example.invalid") })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["DemoReset:ExpectedHost"] = "other.example.invalid" })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["DemoReset:ExpectedPort"] = "10037" })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["DemoReset:ExpectedDatabase"] = "otherdb" })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["DemoReset:ExpectedHost"] = null })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["DemoReset:ExpectedPort"] = "invalid" })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["ConnectionStrings:Telemedicina"] = uriRemote.Replace(":10036/", ":10037/") })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["ConnectionStrings:Telemedicina"] = uriRemote.Replace("/defaultdb", "/otherdb") })), assert);
+            Reject(() => DemoDataReset.RequireAllowedTarget(Configuration(new(confirmedRemote)
+                { ["ConnectionStrings:Telemedicina"] = uriRemote.Replace(
+                    "pg-2db5ca83-telemedicina-iso910.l.aivencloud.com", "other.example.invalid") })), assert);
+        });
         test("DemoReset_CredentialsAndCollisionsRejectBeforeConnection", () =>
         {
             var date = new DateOnly(2040, 1, 2);
@@ -71,7 +129,7 @@ public static class DemoResetUnitChecks
                 plan.Users.Count(user => user.Role == "Admission") == 2 &&
                 plan.Users.Count(user => user.Role == "Practitioner") == 2 &&
                 plan.Users.Count(user => user.Role == "Support") == 1, "Approved staff distribution.");
-            assert(plan.Slots.SequenceEqual(repeat.Slots) && plan.Appointments.SequenceEqual(repeat.Appointments), "Business data must repeat.");
+            assert(plan.Slots.SequenceEqual(repeat.Slots) && DemoDataPlan.Version == "SEED-REALISTA-v2", "Slots repeat under the approved dataset version.");
             assert(plan.Slots.Count == 800 && plan.Slots.Count(slot => slot.Blocked) == 60, "Approved agenda totals.");
             assert(plan.Slots.Select(slot => DateOnly.FromDateTime(slot.StartUtc.AddHours(-4))).Distinct().Count() == 10, "Ten weekdays.");
             foreach (var slot in plan.Slots)
@@ -89,11 +147,10 @@ public static class DemoResetUnitChecks
                 var ordered = group.OrderBy(slot => slot.StartUtc).ToArray();
                 assert(ordered.Zip(ordered.Skip(1)).All(pair => pair.First.EndUtc <= pair.Second.StartUtc), "No practitioner overlaps.");
             }
-            assert(plan.Appointments.Count == 30 && plan.Appointments.Count(a => a.HasTransition) == 18 &&
-                plan.Appointments.All(a => !a.Slot.Blocked), "Thirty appointments, eighteen transitions, no blocked reservation.");
             assert(plan.Patients.All(patient => patient.Profile.LastName.Contains("(DEMO)") &&
                 patient.Profile.BirthDate.AddYears(18) < date), "Synthetic adults with visible mark.");
-            assert(DemoDataReset.Tables.Count == 17 && DemoDataReset.Expected()["appointment_history"] == 48 &&
+            assert(DemoDataReset.Tables.Count == 17 && DemoDataReset.Expected()["appointments"] == 0 &&
+                DemoDataReset.Expected()["appointment_history"] == 0 && DemoDataReset.Expected()["notifications"] == 0 &&
                 DemoDataReset.Expected()["email_outbox"] == 0, "Closed replacement manifest and expected counts.");
         });
     }

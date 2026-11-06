@@ -26,6 +26,7 @@ class ApiClient {
   }) : _client = client ?? http.Client();
 
   bool get authenticated => _access != null;
+  int get sessionGeneration => _sessionGeneration;
   void clearSession() {
     _sessionGeneration++;
     _access = null;
@@ -53,6 +54,7 @@ class ApiClient {
     Map<String, String> extraHeaders = const {},
     bool retry = true,
   }) async {
+    final generation = _sessionGeneration;
     try {
       final request = http.Request(method, Uri.parse('$baseUrl$path'));
       request.headers.addAll({
@@ -65,6 +67,12 @@ class ApiClient {
       final response = await http.Response.fromStream(
         await _client.send(request).timeout(const Duration(seconds: 15)),
       ).timeout(const Duration(seconds: 15));
+      if (generation != _sessionGeneration) {
+        throw ApiFailure(
+          401,
+          'La sesión ya no está disponible. Inicia sesión nuevamente.',
+        );
+      }
       if (response.statusCode == 401 &&
           retry &&
           _refresh != null &&
@@ -94,6 +102,10 @@ class ApiClient {
               ? (parsed['title'] ?? parsed['detail'] ?? 'Solicitud rechazada')
                     .toString()
               : 'Solicitud rechazada (${response.statusCode})',
+          code: parsed is Map ? parsed['code'] as String? : null,
+          errors: parsed is Map && parsed['errors'] is List
+              ? (parsed['errors'] as List).whereType<String>().toList()
+              : const [],
         );
       }
       return parsed is Map ? parsed['data'] : null;
@@ -135,7 +147,10 @@ class ApiClient {
         retry: false,
       );
       if (generation != _sessionGeneration) {
-        throw ApiFailure(401, 'La sesión ya no está disponible. Inicia sesión nuevamente.');
+        throw ApiFailure(
+          401,
+          'La sesión ya no está disponible. Inicia sesión nuevamente.',
+        );
       }
       _access = data['accessToken'];
       _refresh = data['refreshToken'];

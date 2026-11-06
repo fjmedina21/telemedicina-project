@@ -1,0 +1,16 @@
+[
+  {
+    "patch": "api/src/Tools/proposals/tercer-hito/h03-backend.patch",
+    "sha256": "ef14e06bdaffdd85c6c458ecdb6dbd1e3f6b78404a1b447b9f2fb425e7783b1f",
+    "files": 12,
+    "applied": true,
+    "reverse_check": "PASS"
+  },
+  {
+    "patch": "app/src/Tools/proposals/tercer-hito/h03-flutter.patch",
+    "sha256": "c04604917229367cdffb57257c1b8e5bf34d424a4eef3b25520d7e10f91ca385",
+    "files": 10,
+    "applied": true,
+    "reverse_check": "PASS"
+  }
+]

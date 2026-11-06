@@ -9,3 +9,7 @@ public sealed record CatalogServiceRequest(
 public sealed record CatalogPractitionerRequest(
     [Required, MaxLength(120)] string Name, [MaxLength(100)] string? LicenseRef,
     bool Active, [Required, MaxLength(100)] string[] ServiceIds, [Range(0, int.MaxValue)] int Version = 0);
+
+public sealed record SpecialtySummary(string Name);
+public sealed record ServiceSummary(string Id, string Name, string Specialty, int DurationMinutes);
+public sealed record PractitionerSummary(string Id, string Name);

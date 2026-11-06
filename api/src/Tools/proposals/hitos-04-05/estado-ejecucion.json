@@ -1,0 +1,26 @@
+{
+  "date": "2026-11-05",
+  "state": "h04_validated_h05_ready",
+  "approval": "api/src/Tools/proposals/hitos-04-05/aprobacion-H04-H05-v1.md",
+  "sequence": [
+    "H04",
+    "H05"
+  ],
+  "specs": [
+    {
+      "version": "H04-SPEC-v1",
+      "path": "api/src/Tools/proposals/hitos-04-05/H04-SPEC-v1.md",
+      "sha256": "96f1f2b113d00e411d852286e8fa46802544cb81cb311a782129ab12fe6d41fa",
+      "status": "approved"
+    },
+    {
+      "version": "H05-SPEC-v1",
+      "path": "api/src/Tools/proposals/hitos-04-05/H05-SPEC-v1.md",
+      "sha256": "413cbf04f22add637589fbe00e51c2946a62972fa8eb9455bab58a431639b742",
+      "status": "approved"
+    }
+  ],
+  "h04_status": "PASS_LOCAL",
+  "h05_status": "ready_for_implementation",
+  "validation": "api/src/Tools/proposals/hitos-04-05/revision-03/VALIDACION-H04.md"
+}

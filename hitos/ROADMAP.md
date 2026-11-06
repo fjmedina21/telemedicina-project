@@ -1,7 +1,7 @@
 # Hoja de ruta de hitos — Telemedicina
 
 **Alcance:** primera versión usable y evolución del MVP de los módulos M01–M12.  
-**Estado:** hitos 01 y 02 completados en su alcance funcional local; UAT, PR y go/no-go de producción permanecen separados.
+**Estado:** hitos 01–05 completados en su alcance funcional local aprobado. La base técnica de H06-SPEC-v1 está completada y deshabilitada; el flujo clínico/legal completo de M06 sigue condicionado. UAT, PR y go/no-go de producción permanecen separados.
 
 ## Resumen
 
@@ -9,10 +9,10 @@
 |---|---|---|---|---|
 | 01. Base usable de paciente y citas | M01–M05 parcial, M12 mínimo | Paciente verificado explora catálogo y solicita/gestiona citas; admisión revisa solicitudes; auditoría básica | Plataforma y PostgreSQL | **Completado en alcance usable** |
 | 02. Roles y operación de cuentas | M01, M12 | Roles autorizados, cuentas sintéticas de personal y ciclo de vida auditable | Hito 01; matriz de permisos aprobada | **Completado** |
-| 03. Perfil completo y dependientes | M02 | Perfil/contacto y declaraciones del paciente con fuente; dependientes solo con vínculo verificado | Hito 02; política de tutoría para dependientes | Por iniciar |
-| 04. Catálogo y agendas operativas | M03 | Servicios, profesionales y horarios configurables; disponibilidad coherente | Hito 02; reglas de oferta y horarios | Por iniciar |
-| 05. Citas y cobertura | M04, M05 | Políticas aprobadas de reserva/cambio; revisión manual de cobertura sin afirmar autorización no recibida | Hitos 03–04; reglas administrativas y de cobertura | Por iniciar |
-| 06. Admisión, triaje y consentimiento | M06 | Check-in con estados auditables según reglas aprobadas | Hito 05; aprobación clínica y legal | Condicionado |
+| 03. Perfil completo y dependientes | M02 | Perfil propio P0 con contacto, declaraciones, fuente/fecha y completitud; dependientes P1 fuera del cierre | Hito 02; H03-SPEC-v1 aprobada | **Completado — perfil P0** |
+| 04. Catálogo y agendas operativas | M03 | Servicios, profesionales y horarios configurables; disponibilidad coherente | Hito 02; reglas de oferta y horarios | **Completado en alcance aprobado; validación local PASS** |
+| 05. Citas y cobertura | M04, M05 | Políticas aprobadas de reserva/cambio; revisión manual de cobertura sin afirmar autorización no recibida | Hitos 03–04; reglas administrativas y de cobertura | **Completado en alcance H05-SPEC-v1 (P0), validación local PASS** |
+| 06. Admisión, triaje y consentimiento | M06 | Check-in con estados auditables según reglas aprobadas | Hito 05; aprobación clínica y legal | **Base técnica H06-SPEC-v1 completada**; flujo clínico/legal condicionado |
 | 07. Videoconsulta | M07 | Sala de espera, acceso temporal, unión/reconexión y fallos controlados | Hito 06; proveedor y revisión de privacidad/seguridad | Condicionado |
 | 08. Encuentro e historia clínica | M08 | Profesional autorizado documenta y cierra el encuentro con historial trazable | Hitos 02, 03 y 07; flujo clínico aprobado | Condicionado |
 | 09. Documentos clínicos | M09 | Publicación y descarga autenticada de documentos autorizados y versionados | Hito 08; política de documentos y firma aprobada | Condicionado |
@@ -32,19 +32,29 @@ Los informes del incremento reportan PASS con datos sintéticos. El estado compl
 
 Continuar con el [plan API](api/segundo-hito-api/PLAN.md), [plan Flutter](app/segundo-hito-app/PLAN.md) y [plan Portal Web](portalweb/segundo-hito-portalweb/PLAN.md). El orquestador coordina las etapas; la spec del hito requiere aprobación humana antes de implementación. Habilitar solo roles y acciones aprobados, con datos sintéticos, autorización en servidor, suspensión/revocación y auditoría. No habilita acceso clínico por sí solo.
 
-### 03. Perfil completo y dependientes
+### 03. Perfil completo y dependientes — completado en perfil P0
 
-Completar contacto y datos autodeclarados con procedencia/fecha y presentación segura. Separar titular de cuenta y persona atendida. No habilitar acceso de tutor ni dependientes hasta aprobar cómo se verifica, revisa, vence y revoca el vínculo.
+Cierre aprobado por el usuario el 2026-11-05 mediante «marca el hito como completado», después de aplicar y validar H03-SPEC-v1. API y Flutter completan perfil propio, contacto de emergencia, declaraciones autodeclaradas con fuente/fecha, validación y completitud, protección de identidad, concurrencia y borradores.
 
-### 04. Catálogo y agendas operativas
+Evidencia: [validación y cierre](api/tercer-hito-api/VALIDACION_completado.md), [API](api/tercer-hito-api/PLAN_completado.md) y [Flutter](app/tercer-hito-app/PLAN_completado.md). Pasaron 25 pruebas .NET, 25 Flutter, integración PostgreSQL, HTTP/OpenAPI y dos regresiones de citas. Validator emitió PASS.
+
+Dependientes/tutores P1 y las pantallas administrativas de portal quedan fuera del alcance cerrado. Su desarrollo sigue condicionado a aprobar vínculo, tareas y permisos. PR, UAT y go/no-go de producción permanecen separados del cierre funcional local.
+
+### 04. Catálogo y agendas operativas — completado localmente
+
+H04-SPEC-v1 fue implementada y validada localmente con datos sintéticos. La revisión final reporta PASS; incluye verificaciones de API, Flutter, portal, integración y navegador. Evidencia: [validación final H04](../api/src/Tools/proposals/hitos-04-05/revision-03/VALIDACION-H04.md). No implica UAT ni producción.
 
 Completar gestión de servicios habilitados, profesionales, agendas, duración, zonas horarias, bloqueos y disponibilidad. La administración no puede publicar automáticamente servicios sin aprobación correspondiente. Disponibilidad informativa y reserva final validada transaccionalmente.
 
 ### 05. Citas y cobertura
 
+H05-SPEC-v1 (alcance P0 aprobado) está implementada y validada localmente. El cierre se limita a los cambios de solicitud, cancelación/reprogramación, historial, revisión manual de cobertura y cola de admisión; no declara completos todos los requisitos de M04/M05 ni habilita ARS automática, pagos o políticas no aprobadas. Evidencia: [plan de cierre](hito-05/PLAN_completado.md) y [validación](hito-05/VALIDACION_completado.md).
+
 Definir anticipación, cancelación, reprogramación, no-show y atención particular; estados de cobertura, evidencia y vigencia; concurrencia, idempotencia e historial. Una revisión manual nunca debe presentarse como aprobación de la aseguradora.
 
 ### 06. Admisión, triaje y consentimiento
+
+La base técnica de H06-SPEC-v1 está completada localmente: la API devuelve `NotConfigured` y Flutter muestra un aviso sin acciones. Evidencia: [plan de base técnica](hito-06/PLAN_BASE_TECNICA_completado.md) y [validación](hito-06/VALIDACION_BASE_TECNICA_completado.md). No incluye triaje, consentimiento ni check-in activo. El flujo completo de M06 permanece condicionado a las aprobaciones clínicas, legales y de producto.
 
 Implementar solo reglas y textos revisados por responsables clínicos y legales. La falta de consentimiento o los criterios de exclusión impiden avanzar al estado autorizado que se apruebe. No inventar triage ni recomendaciones clínicas.
 
@@ -76,4 +86,4 @@ Completar revisión de permisos y amenazas, auditoría, copias/restauración, ob
 
 Un hito solo se marca completado cuando sus criterios de aceptación fueron revisados, la evidencia de validación está guardada, Validator documentó el resultado y la persona responsable aprobó el cierre. Entonces se añade `_completado` al nombre de los documentos principales del hito, antes de la extensión: `PLAN_completado.md`, `VALIDACION_completado.md`. No renombrar una propuesta, evidencia o archivo de código para sugerir un cierre que no ocurrió. Mantener los enlaces actualizados.
 
-Para el hito 01 ya existente, los informes de validación completados llevan ahora `_completado`. Los planes del hito 02 y todos los siguientes conservan su nombre normal hasta que terminen.
+Los informes de validación cerrados llevan `_completado`. Para el hito 03, los planes finales de API y Flutter y su validación llevan ese sufijo; las versiones originalmente aprobadas se conservan como `PLAN_aprobado-v1.md`. Los documentos de alcances todavía condicionados conservan su nombre normal.

@@ -15,7 +15,14 @@ builder.AddTelemedicina();
 builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
 {
     options.InvalidModelStateResponseFactory = context =>
-        new BadRequestObjectResult(ApiErrors.Create(context.HttpContext, 400, "VALIDATION_FAILED",
+        context.ActionDescriptor is Microsoft.AspNetCore.Mvc.Controllers.ControllerActionDescriptor patientAction &&
+            patientAction.ControllerTypeInfo.AsType() == typeof(Telemedicina.Api.Features.Patients.PatientsController)
+        ? Telemedicina.Api.Features.Patients.ProfileRules.BindingFailure(context)
+        : context.ActionDescriptor is Microsoft.AspNetCore.Mvc.Controllers.ControllerActionDescriptor appointmentAction &&
+            appointmentAction.ControllerTypeInfo.AsType() == typeof(Telemedicina.Api.Features.Appointments.AppointmentsController) &&
+            appointmentAction.ActionName == nameof(Telemedicina.Api.Features.Appointments.AppointmentsController.Book)
+        ? Telemedicina.Api.Features.Appointments.AppointmentBindingErrors.Create(context)
+        : new BadRequestObjectResult(ApiErrors.Create(context.HttpContext, 400, "VALIDATION_FAILED",
             "Los datos enviados no son válidos."));
 });
 builder.Services.AddEndpointsApiExplorer();

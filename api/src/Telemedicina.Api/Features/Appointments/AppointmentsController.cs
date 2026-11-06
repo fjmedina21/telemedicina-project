@@ -1,3 +1,6 @@
+using Telemedicina.Api.Features.Patients;
+using Telemedicina.Common.Models.ApiResponses;
+using Telemedicina.Api.Features.Catalog;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -13,26 +16,55 @@ using Telemedicina.Api.Features.Notifications;
 namespace Telemedicina.Api.Features.Appointments;
 
 [ApiController, Authorize(Roles = "Patient,Admission"), Route("api/v1")]
+[ProducesResponseType(typeof(ErrorApiResponse),400)]
+[ProducesResponseType(typeof(ErrorApiResponse),401)]
+[ProducesResponseType(typeof(ErrorApiResponse),403)]
+[ProducesResponseType(typeof(ErrorApiResponse),409)]
 public sealed class AppointmentsController(Database database, NotificationService notifications) : ApiControllerBase(database)
 {
     [Authorize(Roles = "Patient"), HttpGet("appointments/me")]
-    public IActionResult Mine()
+    [ProducesResponseType(typeof(ApiResponse<List<AppointmentSnapshot>>),200)]
+    public IActionResult Mine([FromQuery] string? from = null, [FromQuery] string? to = null,
+        [FromQuery] string? status = null, [FromQuery] string? coverageStatus = null)
     {
+        var error=AppointmentFilters.Parse(from,to,status,coverageStatus,out var filters);
+        if(error is not null) return Fail(400,error,"Revise los filtros de citas.");
         using var c = Database.Open();
-        return Data(Rows(c, null, AppointmentQueries.Select + " WHERE a.user_id=@u ORDER BY a.start_utc DESC LIMIT 100", ("u", UserId(User))));
+        return Data(Rows(c, null, AppointmentQueries.Select + " WHERE a.user_id=@u " + AppointmentFilters.Sql +
+            " ORDER BY a.start_utc DESC,a.id LIMIT 100", filters.Parameters(DateTime.UtcNow).Append(("u",(object?)UserId(User))).ToArray()));
     }
     [HttpGet("appointments/{id:guid}")]
+    [ProducesResponseType(typeof(ApiResponse<AppointmentSnapshot>),200)]
+    [ProducesResponseType(404)]
     public IActionResult Detail(Guid id)
     {
         using var c = Database.Open(); using var t = Begin(c);
         var rows = Rows(c, t, AppointmentQueries.Select + " WHERE a.id=@id AND (@staff OR a.user_id=@u)",
-            ("id", id.ToString()), ("staff", User.IsInRole("Admission")), ("u", UserId(User)));
+            ("id", id.ToString()), ("staff", User.IsInRole("Admission")), ("u", UserId(User)), ("nowUtc", DateTime.UtcNow));
         if (rows.Count == 0) return NotFound();
         Log(c, t, "appointment.read", id.ToString()); t.Commit(); return Data(rows[0]);
     }
+
+    [HttpGet("appointments/{id:guid}/check-in-requirements")]
+    [ProducesResponseType(typeof(ApiResponse<CheckInRequirementsSnapshot>),200)]
+    [ProducesResponseType(404)]
+    public IActionResult CheckInRequirements(Guid id)
+    {
+        using var c = Database.Open(); using var t = Begin(c);
+        var rows = Rows(c, t, "SELECT a.id FROM appointments a WHERE a.id=@id AND (@staff OR a.user_id=@u)",
+            ("id", id.ToString()), ("staff", User.IsInRole("Admission")), ("u", UserId(User)));
+        if (rows.Count == 0) return NotFound();
+        Log(c, t, "appointment.check_in_requirements.read", id.ToString());
+        t.Commit();
+        return Data(new CheckInRequirementsSnapshot("NotConfigured", false, null));
+    }
+
     [Authorize(Roles = "Patient"), HttpPost("appointments")]
+    [ProducesResponseType(typeof(ApiResponse<AppointmentBooked>),200)]
+    [ProducesResponseType(typeof(ApiResponse<AppointmentBooked>),201)]
     public IActionResult Book(BookRequest request)
     {
+        if (request.SlotId == Guid.Empty) return Fail(400,"VALIDATION_FAILED","Seleccione un horario válido.");
         var key = Request.Headers["Idempotency-Key"].ToString();
         if (!Guid.TryParse(key, out _)) return Fail(400, "IDEMPOTENCY_REQUIRED", "Envíe Idempotency-Key como UUID.");
         if (string.IsNullOrWhiteSpace(request.Insurer)) return Fail(400, "INSURER_REQUIRED", "Indique aseguradora para revisión manual.");
@@ -45,15 +77,15 @@ public sealed class AppointmentsController(Database database, NotificationServic
         if (old.Count > 0) return (string)old[0]["request_hash"]! == payload
             ? Data(JsonSerializer.Deserialize<JsonElement>((string)old[0]["response"]!))
             : Fail(409, "IDEMPOTENCY_MISMATCH", "La clave ya se usó con otra solicitud.");
-        if (Scalar(c, t, "SELECT user_id FROM profiles WHERE user_id=@u", ("u", UserId(User))) is null)
-            return Fail(400, "PROFILE_REQUIRED", "Complete el perfil antes de solicitar.");
-        var slots = Rows(c, t, """
-            SELECT s.* FROM slots s JOIN services v ON v.id=s.service_id
-            JOIN practitioners p ON p.id=s.practitioner_id
-            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>now() AND p.active AND v.active
-            AND EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.practitioner_id=p.id AND ps.service_id=v.id AND ps.active)
-            FOR UPDATE OF s FOR SHARE OF p,v
-            """, ("id", request.SlotId.ToString()));
+        var storedProfile=Scalar(c,t,"SELECT body FROM profiles WHERE user_id=@u",("u",UserId(User))) as string;
+        if(storedProfile is null) return Fail(400,"PROFILE_REQUIRED","Complete el perfil antes de solicitar.");
+        JsonElement profile;
+        try { profile=JsonSerializer.Deserialize<JsonElement>(storedProfile); }
+        catch(JsonException) { profile=default; }
+        if(ProfileRules.Completeness(profile).Status!="Complete")
+            return StatusCode(400,new ErrorApiResponse(400,"Complete el perfil antes de solicitar.",Request.Path.Value??"/",
+                ProfileRules.ValidateBody(profile)) { Code="PROFILE_INCOMPLETE",TraceId=HttpContext.TraceIdentifier });
+        var slots = AvailableSlots(c, t, request.SlotId.ToString());
         if (slots.Count == 0) return Fail(409, "SLOT_UNAVAILABLE", "Horario no disponible.");
         var slot = slots[0]; var id = Guid.NewGuid().ToString();
         try
@@ -75,6 +107,8 @@ public sealed class AppointmentsController(Database database, NotificationServic
         Log(c, t, "appointment.requested", id); t.Commit(); return Data(result, 201);
     }
     [HttpGet("appointments/{id:guid}/history")]
+    [ProducesResponseType(typeof(ApiResponse<List<AppointmentHistoryItem>>),200)]
+    [ProducesResponseType(404)]
     public IActionResult History(Guid id)
     {
         using var c = Database.Open(); using var t = Begin(c);
@@ -89,6 +123,8 @@ public sealed class AppointmentsController(Database database, NotificationServic
         Log(c, t, "appointment.history_read", id.ToString()); t.Commit(); return Data(rows);
     }
     [Authorize(Roles = "Patient"), HttpPost("appointments/{id:guid}/cancel")]
+    [ProducesResponseType(typeof(ApiResponse<AppointmentCancelled>),200)]
+    [ProducesResponseType(404)]
     public IActionResult Cancel(Guid id, VersionRequest request)
     {
         using var c = Database.Open(); using var t = Begin(c);
@@ -103,8 +139,11 @@ public sealed class AppointmentsController(Database database, NotificationServic
         Log(c, t, "appointment.cancelled", id.ToString()); t.Commit(); return Data(new { cancelled = true });
     }
     [Authorize(Roles = "Patient"), HttpPost("appointments/{id:guid}/reschedule")]
+    [ProducesResponseType(typeof(ApiResponse<AppointmentRescheduled>),200)]
+    [ProducesResponseType(404)]
     public IActionResult Reschedule(Guid id, RescheduleRequest request)
     {
+        if(request.SlotId==Guid.Empty) return Fail(400,"VALIDATION_FAILED","Seleccione un horario válido.");
         using var c = Database.Open(); using var t = Begin(c);
         var a = Rows(c, t, "SELECT * FROM appointments WHERE id=@id AND user_id=@u FOR UPDATE",
             ("id", id.ToString()), ("u", UserId(User))).FirstOrDefault();
@@ -112,12 +151,14 @@ public sealed class AppointmentsController(Database database, NotificationServic
         if ((int)a["version"]! != request.Version || (string)a["status"]! is not ("PendingValidation" or "Confirmed") ||
             (DateTime)a["start_utc"]! <= DateTime.UtcNow)
             return Fail(409, "INVALID_TRANSITION", "La cita cambió o ya no permite reprogramación.");
-        var s = Rows(c, t, """
-            SELECT s.* FROM slots s JOIN services v ON v.id=s.service_id JOIN practitioners p ON p.id=s.practitioner_id
-            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>now() AND v.active AND p.active
-            AND EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.practitioner_id=p.id AND ps.service_id=v.id AND ps.active)
-            FOR UPDATE OF s FOR SHARE OF p,v
-            """, ("id", request.SlotId.ToString())).FirstOrDefault();
+        var originalSlot=(string)a["slot_id"]!;
+        if(request.SlotId.ToString()==originalSlot) return Fail(409,"SAME_SLOT","Seleccione otro horario.");
+        var identities=OfferPolicy.Identities(c,t,[originalSlot,request.SlotId.ToString()]);
+        var original=identities.Single(row=>row.Id==originalSlot);
+        var target=identities.SingleOrDefault(row=>row.Id==request.SlotId.ToString());
+        if(target is null) return Fail(409,"SLOT_UNAVAILABLE","Horario no disponible.");
+        if(target.ServiceId!=original.ServiceId) return Fail(409,"SERVICE_CHANGE_NOT_ALLOWED","La reprogramación debe conservar el servicio.");
+        var s = AvailableSlots(c, t, request.SlotId.ToString(), originalSlot, id.ToString()).FirstOrDefault();
         if (s is null) return Fail(409, "SLOT_UNAVAILABLE", "Horario no disponible.");
         try
         {
@@ -134,6 +175,28 @@ public sealed class AppointmentsController(Database database, NotificationServic
         }
         notifications.AppointmentEvent(c, t, id.ToString(), "rescheduled");
         Log(c, t, "appointment.rescheduled", id.ToString()); t.Commit(); return Data(new { rescheduled = true });
+    }
+
+    private static List<Dictionary<string, object?>> AvailableSlots(Npgsql.NpgsqlConnection c,
+        Npgsql.NpgsqlTransaction t, string target, string? previous = null, string appointment = "")
+    {
+        var slotIds = previous is null ? new[] { target } : new[] { previous, target };
+        var identities = OfferPolicy.Identities(c, t, slotIds);
+        var targetIdentity=identities.SingleOrDefault(row=>row.Id==target);
+        if (targetIdentity is null) return [];
+        OfferPolicy.LockOffers(c, t, identities);
+        // Re-read target association/publication after waiting for offer locks, before slot locks.
+        var offer=OfferPolicy.Read(c,t,targetIdentity.ServiceId,targetIdentity.PractitionerId);
+        if(offer is null || !offer.ServiceActive || !offer.PractitionerActive || !offer.Published || !offer.Assigned) return [];
+        OfferPolicy.LockSlots(c, t, slotIds);
+        // This read has a fresh READ COMMITTED snapshot after all catalog locks.
+        return Rows(c, t, """
+            SELECT s.* FROM slots s JOIN services v ON v.id=s.service_id JOIN practitioners p ON p.id=s.practitioner_id
+            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>@nowUtc AND p.active AND
+            """ + " " + OfferPolicy.PublicServiceSql + " " + """
+             AND EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.practitioner_id=p.id AND ps.service_id=v.id AND ps.active)
+            AND NOT EXISTS(SELECT 1 FROM appointments a WHERE a.slot_id=s.id AND a.id<>@appointment AND a.status IN ('PendingValidation','Confirmed'))
+            """, ("id", target), ("appointment", appointment), ("nowUtc", DateTime.UtcNow));
     }
 
 }

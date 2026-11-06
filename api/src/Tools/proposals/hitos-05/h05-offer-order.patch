@@ -1,0 +1,17 @@
+diff --git a/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs b/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
+--- a/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
++++ b/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
+@@ -167,8 +167,12 @@
+     {
+         var slotIds = previous is null ? new[] { target } : new[] { previous, target };
+         var identities = OfferPolicy.Identities(c, t, slotIds);
+-        if (!identities.Any(row => row.Id == target)) return [];
++        var targetIdentity=identities.SingleOrDefault(row=>row.Id==target);
++        if (targetIdentity is null) return [];
+         OfferPolicy.LockOffers(c, t, identities);
++        // Re-read target association/publication after waiting for offer locks, before slot locks.
++        var offer=OfferPolicy.Read(c,t,targetIdentity.ServiceId,targetIdentity.PractitionerId);
++        if(offer is null || !offer.ServiceActive || !offer.PractitionerActive || !offer.Published || !offer.Assigned) return [];
+         OfferPolicy.LockSlots(c, t, slotIds);
+         // This read has a fresh READ COMMITTED snapshot after all catalog locks.
+         return Rows(c, t, """

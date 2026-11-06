@@ -1,0 +1,763 @@
+diff --git a/api/src/Telemedicina.Api/Features/Catalog/OfferPolicy.cs b/api/src/Telemedicina.Api/Features/Catalog/OfferPolicy.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Features/Catalog/OfferPolicy.cs
+@@ -0,0 +1,52 @@
++using Npgsql;
++using static Telemedicina.Api.Infrastructure.Persistence.Database;
++
++namespace Telemedicina.Api.Features.Catalog;
++
++public sealed record SlotIdentity(string Id, string ServiceId, string PractitionerId);
++public sealed record OfferState(bool ServiceActive, bool PractitionerActive, bool Published, bool Assigned, int Duration);
++
++/// <summary>Catalog rows are locked before slots; associations are read after those locks.</summary>
++public static class OfferPolicy
++{
++    public const string PublicServiceSql = "v.active AND (v.is_synthetic OR length(btrim(coalesce(v.approval_reference,'')))>0)";
++    public static bool IsPublished(bool active, bool synthetic, string? reference) =>
++        active && (synthetic || !string.IsNullOrWhiteSpace(reference));
++
++    public static void LockServices(NpgsqlConnection c, NpgsqlTransaction t, IEnumerable<string> ids)
++    {
++        foreach (var id in ids.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
++            Scalar(c, t, "SELECT id FROM services WHERE id=@id FOR SHARE", ("id", id));
++    }
++    public static void LockPractitioners(NpgsqlConnection c, NpgsqlTransaction t, IEnumerable<string> ids)
++    {
++        foreach (var id in ids.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
++            Scalar(c, t, "SELECT id FROM practitioners WHERE id=@id FOR SHARE", ("id", id));
++    }
++    public static void LockOffers(NpgsqlConnection c, NpgsqlTransaction t, IEnumerable<SlotIdentity> identities)
++    {
++        var rows = identities.ToArray();
++        LockServices(c, t, rows.Select(r => r.ServiceId));
++        LockPractitioners(c, t, rows.Select(r => r.PractitionerId));
++    }
++    public static List<SlotIdentity> Identities(NpgsqlConnection c, NpgsqlTransaction t, IEnumerable<string> ids) =>
++        Rows(c, t, "SELECT id,service_id,practitioner_id FROM slots WHERE id=ANY(@ids)",
++            ("ids", ids.Distinct(StringComparer.Ordinal).ToArray()))
++        .Select(r => new SlotIdentity((string)r["id"]!, (string)r["service_id"]!, (string)r["practitioner_id"]!)).ToList();
++    public static void LockSlots(NpgsqlConnection c, NpgsqlTransaction t, IEnumerable<string> ids)
++    {
++        foreach (var id in ids.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
++            Scalar(c, t, "SELECT id FROM slots WHERE id=@id FOR UPDATE", ("id", id));
++    }
++    public static OfferState? Read(NpgsqlConnection c, NpgsqlTransaction t, string service, string practitioner)
++    {
++        var row = Rows(c, t, """
++            SELECT v.active AS service_active,p.active AS practitioner_active,v.duration,
++                (v.active AND (v.is_synthetic OR length(btrim(coalesce(v.approval_reference,'')))>0)) AS published,
++                EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.service_id=v.id AND ps.practitioner_id=p.id AND ps.active) AS assigned
++            FROM services v CROSS JOIN practitioners p WHERE v.id=@s AND p.id=@p
++            """, ("s", service), ("p", practitioner)).SingleOrDefault();
++        return row is null ? null : new((bool)row["service_active"]!, (bool)row["practitioner_active"]!,
++            (bool)row["published"]!, (bool)row["assigned"]!, (int)row["duration"]!);
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Features/Scheduling/ScheduleInputs.cs b/api/src/Telemedicina.Api/Features/Scheduling/ScheduleInputs.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Features/Scheduling/ScheduleInputs.cs
+@@ -0,0 +1,59 @@
++using System.Globalization;
++using System.Text.Json;
++using System.Text.Json.Serialization;
++using System.Text.RegularExpressions;
++
++namespace Telemedicina.Api.Features.Scheduling;
++
++public readonly record struct ScheduleRange(DateTime FromUtc, DateTime ToUtc);
++public static class ScheduleInputs
++{
++    public static bool TryId(string? value, bool required, out string id)
++    {
++        id = "";
++        if (value is null) return !required;
++        if (!Guid.TryParse(value, out var parsed) || parsed == Guid.Empty) return false;
++        id = parsed.ToString(); return true;
++    }
++    public static bool TryTimestamp(string? value, out DateTimeOffset result)
++    {
++        result = default;
++        return value is not null && Regex.IsMatch(value, @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,7})?)?(?:Z|[+-]\d{2}:\d{2})$", RegexOptions.CultureInvariant)
++            && DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out result);
++    }
++    public static string? Range(string? from, string? to, DateTimeOffset now, out ScheduleRange range)
++    {
++        range = default;
++        var begin = now;
++        if (from is not null && !TryTimestamp(from, out begin)) return "VALIDATION_FAILED";
++        DateTimeOffset end;
++        if (to is not null)
++        {
++            if (!TryTimestamp(to, out end)) return "VALIDATION_FAILED";
++        }
++        else
++        {
++            if (begin > DateTimeOffset.MaxValue.AddDays(-14)) return "INVALID_RANGE";
++            end = begin.AddDays(14);
++        }
++        if (end <= begin || end - begin > TimeSpan.FromDays(31)) return "INVALID_RANGE";
++        range = new(begin.UtcDateTime, end.UtcDateTime); return null;
++    }
++    public static bool TryBoolean(string? value, out bool? result)
++    {
++        result = null;
++        if (value is null) return true;
++        if (!bool.TryParse(value, out var parsed)) return false;
++        result = parsed; return true;
++    }
++}
++public sealed class ExplicitOffsetDateTimeConverter : JsonConverter<DateTimeOffset>
++{
++    public override DateTimeOffset Read(ref Utf8JsonReader reader, Type type, JsonSerializerOptions options)
++    {
++        if (reader.TokenType != JsonTokenType.String || !ScheduleInputs.TryTimestamp(reader.GetString(), out var value))
++            throw new JsonException("A date with an explicit UTC offset is required.");
++        return value;
++    }
++    public override void Write(Utf8JsonWriter writer, DateTimeOffset value, JsonSerializerOptions options) => writer.WriteStringValue(value.ToUniversalTime());
++}
+diff --git a/api/src/Telemedicina.Api/Features/Scheduling/SchedulingContracts.cs b/api/src/Telemedicina.Api/Features/Scheduling/SchedulingContracts.cs
+--- a/api/src/Telemedicina.Api/Features/Scheduling/SchedulingContracts.cs
++++ b/api/src/Telemedicina.Api/Features/Scheduling/SchedulingContracts.cs
+@@ -1,6 +1,16 @@
+ using System.ComponentModel.DataAnnotations;
++using System.Text.Json.Serialization;
+ 
+ namespace Telemedicina.Api.Features.Scheduling;
+ 
+-public sealed record SlotRequest(Guid ServiceId, Guid PractitionerId, DateTimeOffset StartAt);
+-public sealed record BlockRequest(bool Blocked);
++public sealed record SlotRequest(Guid ServiceId, Guid PractitionerId,
++    [property: JsonConverter(typeof(ExplicitOffsetDateTimeConverter))] DateTimeOffset StartAt);
++public sealed record BlockRequest([property: JsonRequired] bool Blocked, [Range(1, int.MaxValue)] int? Version = null);
++public sealed record SlotCreated(string Id, int Version);
++public sealed record SlotBlocked(bool Blocked, int Version);
++public sealed record AvailabilityItem(string Id, string ServiceId, string PractitionerId, string PractitionerName,
++    DateTimeOffset StartAt, DateTimeOffset EndAt, string ServiceName, string Specialty);
++public sealed record AdminSlotItem(string Id, string ServiceId, string ServiceName, string PractitionerId,
++    string PractitionerName, DateTimeOffset StartAt, DateTimeOffset EndAt, bool Blocked, bool Reserved,
++    int Version, bool ServiceActive, bool PractitionerActive, bool AssignmentActive, bool ServicePublishable);
++public sealed record AdminSlotPage(List<AdminSlotItem> Items, long TotalCount, int Offset, int Limit, bool HasMore);
+diff --git a/api/src/Telemedicina.Api/Features/Scheduling/SchedulesController.cs b/api/src/Telemedicina.Api/Features/Scheduling/SchedulesController.cs
+--- a/api/src/Telemedicina.Api/Features/Scheduling/SchedulesController.cs
++++ b/api/src/Telemedicina.Api/Features/Scheduling/SchedulesController.cs
+@@ -1,53 +1,127 @@
++using System.Globalization;
+ using System.Text.Json;
+ using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Mvc;
++using Telemedicina.Api.Features.Catalog;
+ using Telemedicina.Api.Infrastructure.Persistence;
+ using Telemedicina.Api.Shared;
+-using Telemedicina.Api.Shared.Contracts;
++using Telemedicina.Common.Models.ApiResponses;
+ using static Telemedicina.Api.Infrastructure.Persistence.Database;
+-using static Telemedicina.Api.Infrastructure.Authentication.Security;
+-using static Telemedicina.Api.Infrastructure.Auditing.AuditLog;
+-using Telemedicina.Api.Features.Appointments;
+-using Telemedicina.Api.Features.Notifications;
+ 
+ namespace Telemedicina.Api.Features.Scheduling;
+ 
+-[ApiController, Authorize, Route("api/v1")]
++[ApiController, Authorize(Roles = "Admission"), Route("api/v1")]
++[ProducesResponseType(typeof(ErrorApiResponse), 400)]
++[ProducesResponseType(typeof(ErrorApiResponse), 401)]
++[ProducesResponseType(typeof(ErrorApiResponse), 403)]
++[ProducesResponseType(typeof(ErrorApiResponse), 409)]
+ public sealed class SchedulesController(Database database) : ApiControllerBase(database)
+ {
+-    [Authorize(Roles = "Admission"), HttpPost("admin/slots")]
++    [HttpGet("admin/slots")]
++    [ProducesResponseType(typeof(ApiResponse<AdminSlotPage>), 200)]
++    public IActionResult List([FromQuery] string? from = null, [FromQuery] string? to = null,
++        [FromQuery] string? serviceId = null, [FromQuery] string? practitionerId = null,
++        [FromQuery] string? blocked = null, [FromQuery] string? reserved = null,
++        [FromQuery] string offset = "0", [FromQuery] string limit = "100")
++    {
++        if (!ScheduleInputs.TryId(serviceId, false, out var service) ||
++            !ScheduleInputs.TryId(practitionerId, false, out var practitioner) ||
++            !ScheduleInputs.TryBoolean(blocked, out var isBlocked) || !ScheduleInputs.TryBoolean(reserved, out var isReserved) ||
++            !int.TryParse(offset, NumberStyles.None, CultureInfo.InvariantCulture, out var skip) || skip < 0 ||
++            !int.TryParse(limit, NumberStyles.None, CultureInfo.InvariantCulture, out var take) || take < 1 || take > 300)
++            return Fail(400, "VALIDATION_FAILED", "Revise los filtros de agenda.");
++        var error = ScheduleInputs.Range(from, to, DateTimeOffset.UtcNow, out var range);
++        if (error is not null) return Fail(400, error, "Seleccione un rango válido de hasta 31 días.");
++        using var c = Database.Open();
++        var row = Rows(c, null, """
++            WITH slots_with_state AS MATERIALIZED (
++                SELECT s.id,s.service_id AS "serviceId",v.name AS "serviceName",
++                    s.practitioner_id AS "practitionerId",p.name AS "practitionerName",
++                    s.start_utc AS "startAt",s.end_utc AS "endAt",s.blocked,s.version,
++                    EXISTS(SELECT 1 FROM appointments a WHERE a.slot_id=s.id AND a.status IN ('PendingValidation','Confirmed')) AS reserved,
++                    v.active AS "serviceActive",p.active AS "practitionerActive",
++                    EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.service_id=v.id AND ps.practitioner_id=p.id AND ps.active) AS "assignmentActive",
++                    (v.active AND (v.is_synthetic OR length(btrim(coalesce(v.approval_reference,'')))>0)) AS "servicePublishable"
++                FROM slots s JOIN services v ON v.id=s.service_id JOIN practitioners p ON p.id=s.practitioner_id
++                WHERE s.start_utc>=@from AND s.start_utc<@to
++                    AND (@service='' OR s.service_id=@service) AND (@person='' OR s.practitioner_id=@person)
++            ), filtered AS MATERIALIZED (
++                SELECT * FROM slots_with_state WHERE (@blocked::boolean IS NULL OR blocked=@blocked::boolean)
++                    AND (@reserved::boolean IS NULL OR reserved=@reserved::boolean)
++            )
++            SELECT (SELECT count(*) FROM filtered) AS total_count,
++                coalesce((SELECT jsonb_agg(to_jsonb(page) ORDER BY page."startAt",page.id)
++                    FROM (SELECT * FROM filtered ORDER BY "startAt",id OFFSET @offset LIMIT @limit) page),'[]'::jsonb)::text AS items
++            """, ("from", range.FromUtc), ("to", range.ToUtc), ("service", service), ("person", practitioner),
++            ("blocked", isBlocked), ("reserved", isReserved), ("offset", skip), ("limit", take)).Single();
++        var items = JsonSerializer.Deserialize<List<AdminSlotItem>>((string)row["items"]!, Json)!;
++        var count = (long)row["total_count"]!;
++        return Data(new AdminSlotPage(items, count, skip, take, ((long)skip + items.Count) < count));
++    }
++
++    [HttpPost("admin/slots")]
++    [ProducesResponseType(typeof(ApiResponse<SlotCreated>), 201)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 404)]
+     public IActionResult AddSlot(SlotRequest request)
+     {
++        if (request.ServiceId == Guid.Empty || request.PractitionerId == Guid.Empty)
++            return Fail(400, "VALIDATION_FAILED", "Seleccione servicio y profesional válidos.");
+         if (request.StartAt <= DateTimeOffset.UtcNow) return Fail(400, "INVALID_DATE", "Seleccione una fecha futura.");
+         using var c = Database.Open(); using var t = Begin(c);
+-        var duration = Scalar(c, t, "SELECT duration FROM services WHERE id=@id AND active FOR SHARE", ("id", request.ServiceId.ToString()));
+-        if (duration is null || Scalar(c, t, "SELECT id FROM practitioners WHERE id=@id AND active FOR SHARE",
+-            ("id", request.PractitionerId.ToString())) is null) return NotFound();
+-        if (Scalar(c, t, "SELECT practitioner_id FROM practitioner_services WHERE practitioner_id=@p AND service_id=@s AND active FOR SHARE",
+-            ("p", request.PractitionerId.ToString()), ("s", request.ServiceId.ToString())) is null)
+-            return Fail(400, "PRACTITIONER_SERVICE_REQUIRED", "El profesional no está asignado al servicio.");
++        var service = request.ServiceId.ToString(); var person = request.PractitionerId.ToString();
++        OfferPolicy.LockServices(c, t, [service]);
++        OfferPolicy.LockPractitioners(c, t, [person]);
++        var offer = OfferPolicy.Read(c, t, service, person);
++        if (offer is null || !offer.ServiceActive || !offer.PractitionerActive) return NotFound();
++        if (!offer.Published) return Fail(409, "SLOT_UNAVAILABLE", "El servicio no está publicado.");
++        if (!offer.Assigned) return Fail(400, "PRACTITIONER_SERVICE_REQUIRED", "El profesional no está asignado al servicio.");
++        if (request.StartAt <= DateTimeOffset.UtcNow) return Fail(400, "INVALID_DATE", "Seleccione una fecha futura.");
++        DateTime end;
++        try { end = request.StartAt.UtcDateTime.AddMinutes(offer.Duration); }
++        catch (ArgumentOutOfRangeException) { return Fail(400, "INVALID_DATE", "Seleccione una fecha válida."); }
+         var id = Guid.NewGuid().ToString();
+         try
+         {
+             Execute(c, t, "INSERT INTO slots(id,service_id,practitioner_id,start_utc,end_utc) VALUES(@id,@s,@p,@start,@end)",
+-                ("id", id), ("s", request.ServiceId.ToString()), ("p", request.PractitionerId.ToString()),
+-                ("start", request.StartAt.UtcDateTime), ("end", request.StartAt.AddMinutes((int)duration).UtcDateTime));
++                ("id", id), ("s", service), ("p", person), ("start", request.StartAt.UtcDateTime),
++                ("end", end));
+         }
+-        catch (Npgsql.PostgresException e) when (e.SqlState == "23P01")
++        catch (Npgsql.PostgresException e) when (e.SqlState is "23P01" or "23505")
+         {
+             return Fail(409, "SCHEDULE_OVERLAP", "El profesional ya tiene un horario que solapa.");
+         }
+-        Log(c, t, "schedule.slot_created", id); t.Commit(); return Data(new { id }, 201);
++        Log(c, t, "schedule.slot_created", id); t.Commit(); return Data(new SlotCreated(id, 1), 201);
+     }
+-    [Authorize(Roles = "Admission"), HttpPatch("admin/slots/{id:guid}/block")]
++
++    [HttpPatch("admin/slots/{id:guid}/block")]
++    [ProducesResponseType(typeof(ApiResponse<SlotBlocked>), 200)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 404)]
+     public IActionResult Block(Guid id, BlockRequest request)
+     {
++        if (request.Version is < 1) return Fail(400, "VALIDATION_FAILED", "Revise la versión del horario.");
+         using var c = Database.Open(); using var t = Begin(c);
+-        if (Scalar(c, t, "SELECT id FROM slots WHERE id=@id FOR UPDATE", ("id", id.ToString())) is null) return NotFound();
+-        if (request.Blocked && Scalar(c, t, "SELECT id FROM appointments WHERE slot_id=@id AND status IN ('PendingValidation','Confirmed')",
+-            ("id", id.ToString())) is not null) return Fail(409, "SLOT_RESERVED", "Gestione primero las citas existentes.");
+-        Execute(c, t, "UPDATE slots SET blocked=@b WHERE id=@id", ("b", request.Blocked), ("id", id.ToString()));
+-        Log(c, t, "schedule.block_changed", id.ToString()); t.Commit(); return Data(new { blocked = request.Blocked });
++        var ids = OfferPolicy.Identities(c, t, [id.ToString()]);
++        if (ids.Count == 0) return NotFound();
++        OfferPolicy.LockOffers(c, t, ids);
++        OfferPolicy.LockSlots(c, t, [id.ToString()]);
++        var slot = Rows(c, t, "SELECT * FROM slots WHERE id=@id", ("id", id.ToString())).SingleOrDefault();
++        if (slot is null) return NotFound();
++        var version = (int)slot["version"]!;
++        if (request.Version is not null && request.Version != version)
++            return Fail(409, "VERSION_CONFLICT", "El horario cambió. Recargue antes de continuar.");
++        var current = (bool)slot["blocked"]!;
++        var occupied = (bool)Scalar(c, t, "SELECT EXISTS(SELECT 1 FROM appointments WHERE slot_id=@id AND status IN ('PendingValidation','Confirmed'))", ("id", id.ToString()))!;
++        if (occupied && (request.Blocked || current != request.Blocked))
++            return Fail(409, "SLOT_RESERVED", "Gestione primero las citas existentes.");
++        if (current == request.Blocked) return Data(new SlotBlocked(current, version));
++        if (!request.Blocked)
++        {
++            if ((DateTime)slot["start_utc"]! <= DateTime.UtcNow) return Fail(400, "INVALID_DATE", "El horario ya no es futuro.");
++            var offer = OfferPolicy.Read(c, t, (string)slot["service_id"]!, (string)slot["practitioner_id"]!);
++            if (offer is null || !offer.Published || !offer.PractitionerActive || !offer.Assigned)
++                return Fail(409, "SLOT_UNAVAILABLE", "La oferta del horario ya no está disponible.");
++        }
++        Execute(c, t, "UPDATE slots SET blocked=@b,version=version+1 WHERE id=@id", ("b", request.Blocked), ("id", id.ToString()));
++        Log(c, t, "schedule.block_changed", id.ToString()); t.Commit(); return Data(new SlotBlocked(request.Blocked, version + 1));
+     }
+-
+ }
+diff --git a/api/src/Telemedicina.Api/Features/Scheduling/AvailabilityController.cs b/api/src/Telemedicina.Api/Features/Scheduling/AvailabilityController.cs
+--- a/api/src/Telemedicina.Api/Features/Scheduling/AvailabilityController.cs
++++ b/api/src/Telemedicina.Api/Features/Scheduling/AvailabilityController.cs
+@@ -1,14 +1,10 @@
+-using System.Text.Json;
+ using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Mvc;
++using Telemedicina.Api.Features.Catalog;
+ using Telemedicina.Api.Infrastructure.Persistence;
+ using Telemedicina.Api.Shared;
+-using Telemedicina.Api.Shared.Contracts;
++using Telemedicina.Common.Models.ApiResponses;
+ using static Telemedicina.Api.Infrastructure.Persistence.Database;
+-using static Telemedicina.Api.Infrastructure.Authentication.Security;
+-using static Telemedicina.Api.Infrastructure.Auditing.AuditLog;
+-using Telemedicina.Api.Features.Appointments;
+-using Telemedicina.Api.Features.Notifications;
+ 
+ namespace Telemedicina.Api.Features.Scheduling;
+ 
+@@ -16,24 +12,30 @@
+ public sealed class AvailabilityController(Database database) : ApiControllerBase(database)
+ {
+     [HttpGet("availability")]
+-    public IActionResult Availability([FromQuery] Guid serviceId, [FromQuery] DateTimeOffset? from = null,
+-        [FromQuery] DateTimeOffset? to = null, [FromQuery] string? practitionerId = null)
++    [ProducesResponseType(typeof(ApiResponse<List<AvailabilityItem>>), 200)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 400)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 401)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 403)]
++    public IActionResult Availability([FromQuery] string? serviceId = null, [FromQuery] string? from = null,
++        [FromQuery] string? to = null, [FromQuery] string? practitionerId = null)
+     {
+-        var start = (from ?? DateTimeOffset.UtcNow).UtcDateTime;
+-        var end = (to ?? DateTimeOffset.UtcNow.AddDays(14)).UtcDateTime;
+-        if (end <= start || end - start > TimeSpan.FromDays(31)) return Fail(400, "INVALID_RANGE", "Rango máximo: 31 días.");
++        if (!ScheduleInputs.TryId(serviceId, true, out var service) || !ScheduleInputs.TryId(practitionerId, false, out var person))
++            return Fail(400, "VALIDATION_FAILED", "Revise los filtros de disponibilidad.");
++        var error = ScheduleInputs.Range(from, to, DateTimeOffset.UtcNow, out var range);
++        if (error is not null) return Fail(400, error, "Seleccione un rango válido de hasta 31 días.");
+         using var c = Database.Open();
+         return Data(Rows(c, null, """
+             SELECT s.id,s.service_id AS "serviceId",p.id AS "practitionerId",p.name AS "practitionerName",
+                 s.start_utc AS "startAt",s.end_utc AS "endAt",v.name AS "serviceName",v.specialty
+             FROM slots s JOIN services v ON v.id=s.service_id JOIN practitioners p ON p.id=s.practitioner_id
+-            WHERE s.service_id=@sid AND v.active AND p.active AND NOT s.blocked
++            WHERE s.service_id=@sid AND
++            """ + " " + OfferPolicy.PublicServiceSql + " " + """
++             AND p.active AND NOT s.blocked
+             AND EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.practitioner_id=p.id AND ps.service_id=v.id AND ps.active)
+             AND s.start_utc>now() AND s.start_utc>=@from AND s.end_utc<=@to
+             AND (@pid='' OR p.id=@pid)
+             AND NOT EXISTS(SELECT 1 FROM appointments a WHERE a.slot_id=s.id AND a.status IN ('PendingValidation','Confirmed'))
+-            ORDER BY s.start_utc,p.name LIMIT 300
+-            """, ("sid", serviceId.ToString()), ("from", start), ("to", end), ("pid", practitionerId ?? "")));
++            ORDER BY s.start_utc,p.name,s.id LIMIT 300
++            """, ("sid", service), ("from", range.FromUtc), ("to", range.ToUtc), ("pid", person)));
+     }
+-
+ }
+diff --git a/api/src/Telemedicina.Api/Features/Catalog/CatalogReadController.cs b/api/src/Telemedicina.Api/Features/Catalog/CatalogReadController.cs
+--- a/api/src/Telemedicina.Api/Features/Catalog/CatalogReadController.cs
++++ b/api/src/Telemedicina.Api/Features/Catalog/CatalogReadController.cs
+@@ -1,40 +1,45 @@
+-using System.Text.Json;
+ using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Mvc;
++using Telemedicina.Api.Features.Scheduling;
+ using Telemedicina.Api.Infrastructure.Persistence;
+ using Telemedicina.Api.Shared;
+-using Telemedicina.Api.Shared.Contracts;
++using Telemedicina.Common.Models.ApiResponses;
+ using static Telemedicina.Api.Infrastructure.Persistence.Database;
+-using static Telemedicina.Api.Infrastructure.Authentication.Security;
+-using static Telemedicina.Api.Infrastructure.Auditing.AuditLog;
+-using Telemedicina.Api.Features.Appointments;
+-using Telemedicina.Api.Features.Notifications;
+ 
+ namespace Telemedicina.Api.Features.Catalog;
+ 
+ [ApiController, Authorize(Roles = "Patient,Admission"), Route("api/v1")]
++[ProducesResponseType(typeof(ErrorApiResponse), 401)]
++[ProducesResponseType(typeof(ErrorApiResponse), 403)]
+ public sealed class CatalogReadController(Database database) : ApiControllerBase(database)
+ {
+     [HttpGet("specialties")]
++    [ProducesResponseType(typeof(ApiResponse<List<SpecialtySummary>>), 200)]
+     public IActionResult Specialties()
+     {
+         using var c = Database.Open();
+-        return Data(Rows(c, null, "SELECT DISTINCT specialty AS name FROM services WHERE active ORDER BY specialty"));
++        return Data(Rows(c, null, "SELECT DISTINCT v.specialty AS name FROM services v WHERE " + OfferPolicy.PublicServiceSql + " ORDER BY name"));
+     }
+     [HttpGet("services")]
++    [ProducesResponseType(typeof(ApiResponse<List<ServiceSummary>>), 200)]
+     public IActionResult Services([FromQuery] string? specialty = null)
+     {
+         using var c = Database.Open();
+         return Data(Rows(c, null, """
+-            SELECT id,name,specialty,duration AS "durationMinutes" FROM services
+-            WHERE active AND (@s='' OR specialty=@s) ORDER BY name
+-            """, ("s", specialty ?? "")));
++            SELECT v.id,v.name,v.specialty,v.duration AS "durationMinutes" FROM services v WHERE
++            """ + " " + OfferPolicy.PublicServiceSql + " AND (@s='' OR v.specialty=@s) ORDER BY v.name,v.id", ("s", specialty ?? "")));
+     }
+     [HttpGet("practitioners")]
+-    public IActionResult Practitioners()
++    [ProducesResponseType(typeof(ApiResponse<List<PractitionerSummary>>), 200)]
++    [ProducesResponseType(typeof(ErrorApiResponse), 400)]
++    public IActionResult Practitioners([FromQuery] string? serviceId = null)
+     {
++        if (!ScheduleInputs.TryId(serviceId, false, out var service)) return Fail(400, "VALIDATION_FAILED", "Seleccione un servicio válido.");
+         using var c = Database.Open();
+-        return Data(Rows(c, null, "SELECT id,name FROM practitioners WHERE active ORDER BY name"));
++        return Data(Rows(c, null, """
++            SELECT p.id,p.name FROM practitioners p WHERE p.active AND (@sid='' OR EXISTS(
++                SELECT 1 FROM practitioner_services ps JOIN services v ON v.id=ps.service_id
++                WHERE ps.practitioner_id=p.id AND ps.service_id=@sid AND ps.active AND
++            """ + " " + OfferPolicy.PublicServiceSql + ")) ORDER BY p.name,p.id", ("sid", service)));
+     }
+-
+ }
+diff --git a/api/src/Telemedicina.Api/Features/Catalog/CatalogContracts.cs b/api/src/Telemedicina.Api/Features/Catalog/CatalogContracts.cs
+--- a/api/src/Telemedicina.Api/Features/Catalog/CatalogContracts.cs
++++ b/api/src/Telemedicina.Api/Features/Catalog/CatalogContracts.cs
+@@ -9,3 +9,7 @@
+ public sealed record CatalogPractitionerRequest(
+     [Required, MaxLength(120)] string Name, [MaxLength(100)] string? LicenseRef,
+     bool Active, [Required, MaxLength(100)] string[] ServiceIds, [Range(0, int.MaxValue)] int Version = 0);
++
++public sealed record SpecialtySummary(string Name);
++public sealed record ServiceSummary(string Id, string Name, string Specialty, int DurationMinutes);
++public sealed record PractitionerSummary(string Id, string Name);
+diff --git a/api/src/Telemedicina.Api/Features/Catalog/CatalogController.cs b/api/src/Telemedicina.Api/Features/Catalog/CatalogController.cs
+--- a/api/src/Telemedicina.Api/Features/Catalog/CatalogController.cs
++++ b/api/src/Telemedicina.Api/Features/Catalog/CatalogController.cs
+@@ -76,18 +76,25 @@
+     public IActionResult UpdatePractitioner(Guid id, CatalogPractitionerRequest request) => SavePractitioner(id.ToString(), request);
+     private IActionResult SavePractitioner(string? id, CatalogPractitionerRequest request)
+     {
+-        if (string.IsNullOrWhiteSpace(request.Name) || request.ServiceIds is null || request.ServiceIds.Any(x => !Guid.TryParse(x, out _)))
++        if (string.IsNullOrWhiteSpace(request.Name) || request.ServiceIds is null || request.ServiceIds.Any(x => !Guid.TryParse(x, out var parsed) || parsed == Guid.Empty))
+             return Fail(400, "CATALOG_VALIDATION", "Revise nombre y servicios asignados.");
+         var ids = request.ServiceIds.Select(x => Guid.Parse(x).ToString()).Distinct().ToArray();
+         using var c = Database.Open(); using var t = Begin(c);
++        var created = id is null; id ??= Guid.NewGuid().ToString(); var version = 1;
++        var observedVersion = created ? null : Scalar(c, t, "SELECT version FROM practitioners WHERE id=@id", ("id", id));
++        if (!created && observedVersion is null) return NotFound();
++        string[] Links() => Rows(c, t, "SELECT service_id FROM practitioner_services WHERE practitioner_id=@id ORDER BY service_id", ("id", id))
++            .Select(row => (string)row["service_id"]!).ToArray();
++        var observedLinks = created ? Array.Empty<string>() : Links();
++        OfferPolicy.LockServices(c, t, ids.Concat(observedLinks));
+         if (Convert.ToInt64(Scalar(c, t, "SELECT count(*) FROM services WHERE id=ANY(@ids)", ("ids", ids))) != ids.Length)
+             return Fail(400, "UNKNOWN_SERVICE", "Uno de los servicios no existe.");
+-        var created = id is null; id ??= Guid.NewGuid().ToString(); var version = 1;
+         if (!created)
+         {
+             var old = Scalar(c, t, "SELECT version FROM practitioners WHERE id=@id FOR UPDATE", ("id", id));
+             if (old is null) return NotFound();
+-            if ((int)old != request.Version) return Fail(409, "VERSION_CONFLICT", "El profesional cambió. Actualice la lista.");
++            if ((int)old != request.Version || !Equals(old, observedVersion) || !observedLinks.SequenceEqual(Links(), StringComparer.Ordinal))
++                return Fail(409, "VERSION_CONFLICT", "El profesional cambió. Actualice la lista.");
+             version = request.Version + 1;
+             Execute(c, t, "UPDATE practitioners SET name=@name,license_ref=@license,active=@active,version=@version WHERE id=@id",
+                 ("name", request.Name.Trim()), ("license", request.LicenseRef?.Trim()), ("active", request.Active), ("version", version), ("id", id));
+diff --git a/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs b/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
+--- a/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
++++ b/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
+@@ -1,3 +1,4 @@
++using Telemedicina.Api.Features.Catalog;
+ using System.Text.Json;
+ using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Mvc;
+@@ -47,13 +48,7 @@
+             : Fail(409, "IDEMPOTENCY_MISMATCH", "La clave ya se usó con otra solicitud.");
+         if (Scalar(c, t, "SELECT user_id FROM profiles WHERE user_id=@u", ("u", UserId(User))) is null)
+             return Fail(400, "PROFILE_REQUIRED", "Complete el perfil antes de solicitar.");
+-        var slots = Rows(c, t, """
+-            SELECT s.* FROM slots s JOIN services v ON v.id=s.service_id
+-            JOIN practitioners p ON p.id=s.practitioner_id
+-            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>now() AND p.active AND v.active
+-            AND EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.practitioner_id=p.id AND ps.service_id=v.id AND ps.active)
+-            FOR UPDATE OF s FOR SHARE OF p,v
+-            """, ("id", request.SlotId.ToString()));
++        var slots = AvailableSlots(c, t, request.SlotId.ToString());
+         if (slots.Count == 0) return Fail(409, "SLOT_UNAVAILABLE", "Horario no disponible.");
+         var slot = slots[0]; var id = Guid.NewGuid().ToString();
+         try
+@@ -112,12 +107,7 @@
+         if ((int)a["version"]! != request.Version || (string)a["status"]! is not ("PendingValidation" or "Confirmed") ||
+             (DateTime)a["start_utc"]! <= DateTime.UtcNow)
+             return Fail(409, "INVALID_TRANSITION", "La cita cambió o ya no permite reprogramación.");
+-        var s = Rows(c, t, """
+-            SELECT s.* FROM slots s JOIN services v ON v.id=s.service_id JOIN practitioners p ON p.id=s.practitioner_id
+-            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>now() AND v.active AND p.active
+-            AND EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.practitioner_id=p.id AND ps.service_id=v.id AND ps.active)
+-            FOR UPDATE OF s FOR SHARE OF p,v
+-            """, ("id", request.SlotId.ToString())).FirstOrDefault();
++        var s = AvailableSlots(c, t, request.SlotId.ToString(), (string)a["slot_id"]!, id.ToString()).FirstOrDefault();
+         if (s is null) return Fail(409, "SLOT_UNAVAILABLE", "Horario no disponible.");
+         try
+         {
+@@ -136,4 +126,22 @@
+         Log(c, t, "appointment.rescheduled", id.ToString()); t.Commit(); return Data(new { rescheduled = true });
+     }
+ 
++    private static List<Dictionary<string, object?>> AvailableSlots(Npgsql.NpgsqlConnection c,
++        Npgsql.NpgsqlTransaction t, string target, string? previous = null, string appointment = "")
++    {
++        var slotIds = previous is null ? new[] { target } : new[] { previous, target };
++        var identities = OfferPolicy.Identities(c, t, slotIds);
++        if (!identities.Any(row => row.Id == target)) return [];
++        OfferPolicy.LockOffers(c, t, identities);
++        OfferPolicy.LockSlots(c, t, slotIds);
++        // This read has a fresh READ COMMITTED snapshot after all catalog locks.
++        return Rows(c, t, """
++            SELECT s.* FROM slots s JOIN services v ON v.id=s.service_id JOIN practitioners p ON p.id=s.practitioner_id
++            WHERE s.id=@id AND NOT s.blocked AND s.start_utc>now() AND p.active AND
++            """ + " " + OfferPolicy.PublicServiceSql + " " + """
++             AND EXISTS(SELECT 1 FROM practitioner_services ps WHERE ps.practitioner_id=p.id AND ps.service_id=v.id AND ps.active)
++            AND NOT EXISTS(SELECT 1 FROM appointments a WHERE a.slot_id=s.id AND a.id<>@appointment AND a.status IN ('PendingValidation','Confirmed'))
++            """, ("id", target), ("appointment", appointment));
++    }
++
+ }
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/007_slot_versions.sql b/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/007_slot_versions.sql
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/007_slot_versions.sql
+@@ -0,0 +1,4 @@
++-- H04-SPEC-v1. Explicit, additive and repeatable; preserves slot data.
++SET LOCAL search_path TO telemedicina_m1, public;
++ALTER TABLE slots ADD COLUMN IF NOT EXISTS version integer NOT NULL DEFAULT 1;
++INSERT INTO schema_versions(version) VALUES(7) ON CONFLICT(version) DO NOTHING;
+diff --git a/api/src/Telemedicina.Tests/Contracts/H04UnitChecks.cs b/api/src/Telemedicina.Tests/Contracts/H04UnitChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/Contracts/H04UnitChecks.cs
+@@ -0,0 +1,48 @@
++using System.Text.Json;
++using Telemedicina.Api.Features.Catalog;
++using Telemedicina.Api.Features.Scheduling;
++
++namespace Telemedicina.Tests;
++
++public static class H04UnitChecks
++{
++    public static void Register(Action<string, Action> test, Action<bool, string> assert)
++    {
++        test("H04_PublicationRejectsUnknownHistoricalApproval", () =>
++        {
++            assert(!OfferPolicy.IsPublished(true, false, null), "Historical absence is not an approval.");
++            assert(!OfferPolicy.IsPublished(true, false, "  "), "Whitespace is not an approval reference.");
++            assert(OfferPolicy.IsPublished(true, true, null), "Synthetic development offering remains visible.");
++            assert(OfferPolicy.IsPublished(true, false, "synthetic-reference"), "Explicit reference permits publication.");
++            assert(!OfferPolicy.IsPublished(false, true, "reference"), "Inactive services never publish.");
++        });
++        test("H04_RangeUsesEffectiveFromAndRejectsUnzonedValues", () =>
++        {
++            var now = DateTimeOffset.Parse("2026-11-05T10:00:00Z");
++            assert(ScheduleInputs.Range("2026-12-01T10:00:00-04:00", null, now, out var range) is null &&
++                range.ToUtc-range.FromUtc == TimeSpan.FromDays(14) && range.FromUtc.Hour==14, "Default end follows effective start.");
++            assert(ScheduleInputs.Range("2026-12-01T10:00:00", null, now, out _) == "VALIDATION_FAILED", "Require explicit offset.");
++            assert(ScheduleInputs.Range("2026-12-01T10:00:00Z", "2027-01-02T10:00:00Z", now, out _) == "INVALID_RANGE", "Maximum 31 days.");
++            assert(ScheduleInputs.Range("2026-12-01T10:00:00Z", "2026-12-01T10:00:00Z", now, out _) == "INVALID_RANGE", "Positive interval required.");
++        });
++        test("H04_InvalidOptionalFiltersAreNotSilentlyOmitted", () =>
++        {
++            assert(ScheduleInputs.TryId(null, false, out _) && !ScheduleInputs.TryId("", false, out _), "Omitted differs from empty.");
++            assert(!ScheduleInputs.TryId(Guid.Empty.ToString(), true, out _) && !ScheduleInputs.TryId(null, true, out _), "Require nonempty UUID.");
++            assert(!ScheduleInputs.TryBoolean("", out _) && ScheduleInputs.TryBoolean("false", out var value) && value==false, "Boolean filter must be valid.");
++        });
++        test("H04_BindingPreservesLegacyButRequiresBlocked", () =>
++        {
++            var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
++            var legacy = JsonSerializer.Deserialize<BlockRequest>("""{"blocked":false}""", options)!;
++            assert(!legacy.Blocked && legacy.Version is null, "Legacy assignment remains available.");
++            var rejected = false;
++            try { JsonSerializer.Deserialize<BlockRequest>("{}", options); } catch(JsonException) { rejected=true; }
++            assert(rejected, "Missing boolean is not a deliberate unblock.");
++            rejected=false;
++            try { JsonSerializer.Deserialize<SlotRequest>("""{"serviceId":"10000000-0000-4000-8000-000000000001","practitionerId":"20000000-0000-4000-8000-000000000001","startAt":"2026-12-01T10:00:00"}""", options); }
++            catch(JsonException) { rejected=true; }
++            assert(rejected, "Slot body must carry an explicit offset.");
++        });
++    }
++}
+diff --git a/api/src/Telemedicina.Tests/Contracts/H04DbChecks.cs b/api/src/Telemedicina.Tests/Contracts/H04DbChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/Contracts/H04DbChecks.cs
+@@ -0,0 +1,154 @@
++using System.Security.Claims;
++using System.Text.Json;
++using Microsoft.AspNetCore.Builder;
++using Microsoft.AspNetCore.Http;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.Extensions.Configuration;
++using Telemedicina.Api.Features.Appointments;
++using Telemedicina.Api.Features.Catalog;
++using Telemedicina.Api.Features.Notifications;
++using Telemedicina.Api.Features.Scheduling;
++using Telemedicina.Api.Infrastructure.Email;
++using Telemedicina.Api.Infrastructure.Persistence;
++using static Telemedicina.Api.Infrastructure.Persistence.Database;
++
++namespace Telemedicina.Tests;
++
++// Opt-in, exclusive synthetic fixtures. Never mutate ordinary accounts, audit history or global constraints.
++public static class H04DbChecks
++{
++    public static int Run()
++    {
++        var stage="OPT_IN";
++        try
++        {
++            if(Environment.GetEnvironmentVariable("MILESTONE_TEST_SYNTHETIC")!="1" ||
++                Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")!="Development" ||
++                Environment.GetEnvironmentVariable("Mail__Mode")!="development") throw new InvalidOperationException();
++            var config=new ConfigurationBuilder().AddEnvironmentVariables().Build();
++            var db=new Database(config);
++            var environment=WebApplication.CreateBuilder(new WebApplicationOptions{EnvironmentName="Development"}).Environment;
++            var notifications=new NotificationService(new MailSettings(config,environment));
++            var service=Guid.NewGuid().ToString(); var person=Guid.NewGuid().ToString();
++            string Actor(string role)
++            {
++                var actor=Guid.NewGuid().ToString();
++                using var c=db.Open();using var t=c.BeginTransaction();
++                Execute(c,t,"INSERT INTO users(id,email,password_hash,role,verified) VALUES(@u,@email,'disabled-synthetic-login',@role,true)",
++                    ("u",actor),("email","synthetic-h04-"+actor+"@example.invalid"),("role",role));
++                Execute(c,t,"""
++                    INSERT INTO sessions(id,user_id,access_hash,refresh_hash,access_expires,expires,family_id)
++                    VALUES(@u,@u,@a,@r,@e,@e,@u)
++                    """,("u",actor),("a",Guid.NewGuid().ToString("N")),("r",Guid.NewGuid().ToString("N")),
++                    ("e",DateTimeOffset.UtcNow.AddMinutes(15).ToUnixTimeSeconds()));
++                if(role=="Patient") Execute(c,t,"INSERT INTO profiles(user_id,body,version) VALUES(@u,@body,1)",
++                    ("u",actor),("body",JsonSerializer.Serialize(ProfileUnitChecks.Valid(),new JsonSerializerOptions(JsonSerializerDefaults.Web))));
++                t.Commit();return actor;
++            }
++            var admin=Actor("Admission");var otherAdmin=Actor("Admission");var patient=Actor("Patient");
++            ControllerContext Context(string actor,string role)
++            {
++                var context=new DefaultHttpContext();
++                context.User=new ClaimsPrincipal(new ClaimsIdentity(new[]{new Claim(ClaimTypes.NameIdentifier,actor),
++                    new Claim(ClaimTypes.Role,role),new Claim("session_id",actor)},"synthetic"));
++                context.Request.Headers["Idempotency-Key"]=Guid.NewGuid().ToString();
++                return new ControllerContext{HttpContext=context};
++            }
++            SchedulesController Controller(string? actor=null)=>new(db){ControllerContext=Context(actor??admin,"Admission")};
++            JsonElement Data(IActionResult result,int expected=200)
++            {
++                if(result is not ObjectResult value || value.StatusCode!=expected) throw new InvalidOperationException();
++                return JsonSerializer.SerializeToElement(value.Value,new JsonSerializerOptions(JsonSerializerDefaults.Web)).GetProperty("data");
++            }
++            long CountAudit(string resource)
++            {
++                using var c=db.Open();return Convert.ToInt64(Scalar(c,null,"SELECT count(*) FROM audit WHERE resource_id=@r AND action='schedule.block_changed'",("r",resource)));
++            }
++            stage="FIXTURE";
++            using(var c=db.Open())using(var t=c.BeginTransaction())
++            {
++                Execute(c,t,"INSERT INTO services(id,specialty,name,duration,is_synthetic) VALUES(@s,'Synthetic H04','Synthetic H04',30,true)",("s",service));
++                Execute(c,t,"INSERT INTO practitioners(id,name) VALUES(@p,'Synthetic H04')",("p",person));
++                Execute(c,t,"INSERT INTO practitioner_services(practitioner_id,service_id) VALUES(@p,@s)",("p",person),("s",service));t.Commit();
++            }
++            var start=new DateTimeOffset(DateTime.UtcNow.Date.AddDays(2).AddHours(12),TimeSpan.Zero);
++            JsonElement Add(DateTimeOffset at,string? actor=null)=>Data(Controller(actor).AddSlot(new(Guid.Parse(service),Guid.Parse(person),at)),201);
++            var slot=Add(start).GetProperty("id").GetString()!;Add(start.AddHours(2));Add(start.AddHours(4));
++            stage="PAGING_AND_PRIVACY";
++            var page=Data(Controller().List(serviceId:service,limit:"1"));
++            if(page.GetProperty("totalCount").GetInt64()!=3 || !page.GetProperty("hasMore").GetBoolean())throw new InvalidOperationException();
++            var keys=page.GetProperty("items")[0].EnumerateObject().Select(p=>p.Name).ToHashSet();
++            if(keys.Overlaps(new[]{"patientId","patientEmail","appointmentId","evidence"}))throw new InvalidOperationException();
++            page=Data(Controller().List(serviceId:service,offset:"99",limit:"1"));
++            if(page.GetProperty("totalCount").GetInt64()!=3 || page.GetProperty("items").GetArrayLength()!=0)throw new InvalidOperationException();
++            stage="BLOCK_VERSION_NOOP_LEGACY";
++            Data(Controller().Block(Guid.Parse(slot),new(true,1)));
++            var unchanged=Data(Controller().Block(Guid.Parse(slot),new(true,2)));
++            if(unchanged.GetProperty("version").GetInt32()!=2 || CountAudit(slot)!=1)throw new InvalidOperationException();
++            Data(Controller().Block(Guid.Parse(slot),new(false,1)),409);
++            Data(Controller().Block(Guid.Parse(slot),new(false)));
++            if(CountAudit(slot)!=2)throw new InvalidOperationException();
++            stage="MIGRATION_TWICE";
++            using(var c=db.Open())using(var t=c.BeginTransaction())
++            {
++                var before=Rows(c,t,"SELECT id,blocked,version,start_utc,end_utc FROM slots WHERE id=@s",("s",slot)).Single();
++                var sql=File.ReadAllText("api/src/Telemedicina.Api/Infrastructure/Persistence/Migrations/007_slot_versions.sql");
++                Execute(c,t,sql);Execute(c,t,sql);
++                var after=Rows(c,t,"SELECT id,blocked,version,start_utc,end_utc FROM slots WHERE id=@s",("s",slot)).Single();
++                if(before.Any(p=>!Equals(p.Value,after[p.Key])))throw new InvalidOperationException();t.Rollback();
++            }
++            stage="CONCURRENT_OVERLAP_AND_ROLLBACK";
++            var at=start.AddHours(6);
++            var statuses=Task.WhenAll(new[]{admin,otherAdmin}.Select(actor=>Task.Run(()=>
++                ((ObjectResult)Controller(actor).AddSlot(new(Guid.Parse(service),Guid.Parse(person),at))).StatusCode))).GetAwaiter().GetResult();
++            if(statuses.Count(v=>v==201)!=1 || statuses.Count(v=>v==409)!=1)throw new InvalidOperationException();
++            using(var c=db.Open())
++                if(Convert.ToInt64(Scalar(c,null,"SELECT count(*) FROM slots WHERE service_id=@s AND start_utc=@at",("s",service),("at",at.UtcDateTime)))!=1)throw new InvalidOperationException();
++            stage="CONCURRENT_VERSION";
++            statuses=Task.WhenAll(new[]{admin,otherAdmin}.Select(actor=>Task.Run(()=>
++                ((ObjectResult)Controller(actor).Block(Guid.Parse(slot),new(true,3))).StatusCode))).GetAwaiter().GetResult();
++            if(statuses.Count(v=>v==200)!=1 || statuses.Count(v=>v==409)!=1 || CountAudit(slot)!=3)throw new InvalidOperationException();
++            stage="RESERVATION_AND_GUARD";
++            Data(Controller().Block(Guid.Parse(slot),new(false,4)));
++            var appointmentController=new AppointmentsController(db,notifications){ControllerContext=Context(patient,"Patient")};
++            var booked=Data(appointmentController.Book(new(Guid.Parse(slot),"Synthetic H04","0000")),201);
++            Data(Controller().Block(Guid.Parse(slot),new(true,5)),409);
++            using(var c=db.Open())using(var t=c.BeginTransaction())
++            {
++                OfferPolicy.LockServices(c,t,[service]);
++                Scalar(c,t,"SELECT id FROM practitioners WHERE id=@p FOR UPDATE",("p",person));
++                Execute(c,t,"UPDATE practitioner_services SET active=false WHERE service_id=@s AND practitioner_id=@p",("s",service),("p",person));
++                var pending=Task.Run(()=>Controller(otherAdmin).AddSlot(new(Guid.Parse(service),Guid.Parse(person),start.AddHours(8))));
++                Thread.Sleep(150);t.Commit();
++                Data(pending.GetAwaiter().GetResult(),400);
++            }
++            using(var c=db.Open())
++                if((string?)Scalar(c,null,"SELECT status FROM appointments WHERE id=@a",("a",booked.GetProperty("id").GetString()))!="PendingValidation")throw new InvalidOperationException();
++            stage="HISTORICAL_PUBLICATION_ISOLATED";
++            using(var c=db.Open())using(var t=c.BeginTransaction())
++            {
++                // Temporary shadow tables deliberately lack global publication constraints; no real table is changed.
++                Execute(c,t,"""
++                    CREATE TEMP TABLE services(id text,active boolean,is_synthetic boolean,approval_reference text,duration integer) ON COMMIT DROP;
++                    CREATE TEMP TABLE practitioners(id text,active boolean) ON COMMIT DROP;
++                    CREATE TEMP TABLE practitioner_services(service_id text,practitioner_id text,active boolean) ON COMMIT DROP;
++                    INSERT INTO services VALUES('legacy',true,false,NULL,30);
++                    INSERT INTO practitioners VALUES('synthetic',true);
++                    INSERT INTO practitioner_services VALUES('legacy','synthetic',true);
++                    """);
++                var offer=OfferPolicy.Read(c,t,"legacy","synthetic");
++                if(offer is null || offer.Published || !offer.Assigned ||
++                    Convert.ToInt64(Scalar(c,t,"SELECT count(*) FROM services v WHERE "+OfferPolicy.PublicServiceSql))!=0)throw new InvalidOperationException();
++                t.Rollback();
++            }
++            stage="REVOKED_SESSION";
++            using(var c=db.Open())Execute(c,null,"UPDATE sessions SET revoked=true WHERE id=@s",("s",admin));
++            var denied=false;
++            try{Controller().Block(Guid.Parse(slot),new(false));}
++            catch(Telemedicina.Api.Infrastructure.Authentication.SessionRejectedException e){denied=e.Status==401;}
++            if(!denied)throw new InvalidOperationException();
++            Console.WriteLine("H04_DB_CHECKS_PASS: paging,privacy,version,no-op,legacy,migration-twice,overlap,rollback,reservation,association-race,historical-publication,revocation");return 0;
++        }
++        catch{Console.Error.WriteLine("H04_DB_CHECKS_FAILED: "+stage);return 1;}
++    }
++}
+diff --git a/api/src/Telemedicina.Tests/Contracts/Program.cs b/api/src/Telemedicina.Tests/Contracts/Program.cs
+--- a/api/src/Telemedicina.Tests/Contracts/Program.cs
++++ b/api/src/Telemedicina.Tests/Contracts/Program.cs
+@@ -18,6 +18,7 @@
+     {
+         if (args.Contains("--demo-reset-db-tests", StringComparer.Ordinal)) return DemoResetDbChecks.Run();
+         if (args.Contains("--h03-db-tests", StringComparer.Ordinal)) return ProfileDbChecks.Run();
++        if (args.Contains("--h04-db-tests", StringComparer.Ordinal)) return H04DbChecks.Run();
+         Console.WriteLine("=================================================");
+         Console.WriteLine(" Running Telemedicina Automated Unit Tests");
+         Console.WriteLine("=================================================");
+@@ -204,6 +205,7 @@
+ 
+         DemoResetUnitChecks.Register(Test, Assert);
+         ProfileUnitChecks.Register(Test, Assert);
++        H04UnitChecks.Register(Test, Assert);
+ 
+         Console.WriteLine("-------------------------------------------------");
+         Console.WriteLine($" Summary: {_passedCount} passed, {_failedCount} failed.");

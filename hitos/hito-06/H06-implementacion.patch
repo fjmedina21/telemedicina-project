@@ -1,0 +1,259 @@
+diff --git a/api/src/Telemedicina.Api/Features/Appointments/AppointmentResponses.cs b/api/src/Telemedicina.Api/Features/Appointments/AppointmentResponses.cs
+--- a/api/src/Telemedicina.Api/Features/Appointments/AppointmentResponses.cs
++++ b/api/src/Telemedicina.Api/Features/Appointments/AppointmentResponses.cs
+@@ -13,3 +13,4 @@ public sealed record AppointmentRescheduled(bool Rescheduled);
+ public sealed record CoverageReviewed(string Status, string CoverageStatus, int Version);
+ public sealed record AppointmentHistoryItem(long Sequence, string? OldSlotId, string NewSlotId,
+     string? OldStatus, string NewStatus, string? OldCoverage, string NewCoverage,
+     int Version, string ActorId, DateTime OccurredAt);
++public sealed record CheckInRequirementsSnapshot(string Status, bool CanProceed, int? ConfigurationVersion);
+diff --git a/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs b/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
+--- a/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
++++ b/api/src/Telemedicina.Api/Features/Appointments/AppointmentsController.cs
+@@ -44,6 +44,21 @@ public sealed class AppointmentsController(Database database, NotificationServic
+         if (rows.Count == 0) return NotFound();
+         Log(c, t, "appointment.read", id.ToString()); t.Commit(); return Data(rows[0]);
+     }
++
++    [HttpGet("appointments/{id:guid}/check-in-requirements")]
++    [ProducesResponseType(typeof(ApiResponse<CheckInRequirementsSnapshot>),200)]
++    [ProducesResponseType(404)]
++    public IActionResult CheckInRequirements(Guid id)
++    {
++        using var c = Database.Open(); using var t = Begin(c);
++        var rows = Rows(c, t, "SELECT a.id FROM appointments a WHERE a.id=@id AND (@staff OR a.user_id=@u)",
++            ("id", id.ToString()), ("staff", User.IsInRole("Admission")), ("u", UserId(User)));
++        if (rows.Count == 0) return NotFound();
++        Log(c, t, "appointment.check_in_requirements.read", id.ToString());
++        t.Commit();
++        return Data(new CheckInRequirementsSnapshot("NotConfigured", false, null));
++    }
++
+     [Authorize(Roles = "Patient"), HttpPost("appointments")]
+     [ProducesResponseType(typeof(ApiResponse<AppointmentBooked>),200)]
+     [ProducesResponseType(typeof(ApiResponse<AppointmentBooked>),201)]
+diff --git a/api/src/Telemedicina.Tests/Integration/fifth_milestone_e2e.py b/api/src/Telemedicina.Tests/Integration/fifth_milestone_e2e.py
+--- a/api/src/Telemedicina.Tests/Integration/fifth_milestone_e2e.py
++++ b/api/src/Telemedicina.Tests/Integration/fifth_milestone_e2e.py
+@@ -157,7 +157,7 @@ class FifthMilestone(unittest.TestCase):
+         token=session["accessToken"]
+         self.status(request("/auth/logout","POST",{},token),200)
+-        for path in (self.path,self.path+"/history","/admin/work-queue"):
++        for path in (self.path,self.path+"/history",self.path+"/check-in-requirements","/admin/work-queue"):
+             self.status(request(path,token=token),401)
+@@ -165,4 +165,17 @@ class FifthMilestone(unittest.TestCase):
+         self.status(request(self.path+"/reschedule","POST",
+             {"slotId":self.original_slot["id"],"version":1},token),401)
+         self.status(request("/admin"+self.path+"/validation","PATCH",{},token),401)
+ 
++    def test_06_check_in_requirements_are_disabled_and_scoped(self):
++        path=self.path+"/check-in-requirements"
++        requirements=self.status(request(path,token=self.patient),200)
++        self.assertEqual(requirements,{
++            "status":"NotConfigured","canProceed":False,"configurationVersion":None})
++        self.status(request(path,token=self.other["accessToken"]),404)
++        self.status(request(path,token=self.staff),200)
++        for role in ("Administrator","Practitioner","Support"):
++            self.status(request(path,token=self.actors[role]["accessToken"]),403)
++        self.status(request(path),401)
++
+ if __name__=="__main__": unittest.main()
+diff --git a/app/src/lib/features/appointments/data/appointment_repository.dart b/app/src/lib/features/appointments/data/appointment_repository.dart
+--- a/app/src/lib/features/appointments/data/appointment_repository.dart
++++ b/app/src/lib/features/appointments/data/appointment_repository.dart
+@@ -27,8 +27,19 @@ class AppointmentSnapshot {
+   final AppointmentRecord appointment;
+   final List<AppointmentHistoryEntry> history;
+-  const AppointmentSnapshot(this.appointment, this.history);
++  final CheckInRequirements checkInRequirements;
++  const AppointmentSnapshot(this.appointment, this.history, this.checkInRequirements);
++}
++class CheckInRequirements {
++  final String status;
++  final bool canProceed;
++  final int? configurationVersion;
++  const CheckInRequirements(this.status, this.canProceed, this.configurationVersion);
++  factory CheckInRequirements.fromJson(Map value) => CheckInRequirements(
++    value['status'] as String,
++    value['canProceed'] as bool,
++    value['configurationVersion'] as int?,
++  );
++  bool get disabled => status == 'NotConfigured' && !canProceed && configurationVersion == null;
+ }
+ class AppointmentFilters {
+@@ -81,10 +92,12 @@ class AppointmentRepository {
+     final values = await Future.wait([
+       api.request('GET', '/appointments/${Uri.encodeComponent(id)}'),
+       api.request('GET', '/appointments/${Uri.encodeComponent(id)}/history'),
++      api.request('GET', '/appointments/${Uri.encodeComponent(id)}/check-in-requirements'),
+     ]);
+     return AppointmentSnapshot(AppointmentRecord.fromJson(values[0] as Map),
+-      (values[1] as List).map((item) => AppointmentHistoryEntry.fromJson(item as Map)).toList());
++      (values[1] as List).map((item) => AppointmentHistoryEntry.fromJson(item as Map)).toList(),
++      CheckInRequirements.fromJson(values[2] as Map));
+   }
+diff --git a/app/src/lib/app/application/patient_controller.dart b/app/src/lib/app/application/patient_controller.dart
+--- a/app/src/lib/app/application/patient_controller.dart
++++ b/app/src/lib/app/application/patient_controller.dart
+@@ -55,6 +55,7 @@ class PatientController extends ChangeNotifier {
+   bool bookingNeedsProfile = false;
+   AppointmentFilters appointmentFilters = const AppointmentFilters();
+   JsonMap? appointmentDetail;
++  CheckInRequirements? appointmentCheckInRequirements;
+   List<JsonMap> appointmentHistory = [];
+@@ -140,6 +141,7 @@ class PatientController extends ChangeNotifier {
+     bookingNeedsProfile = false;
+     appointmentFilters = const AppointmentFilters();
+     appointmentDetail = null;
++    appointmentCheckInRequirements = null;
+     appointmentHistory = [];
+@@ -470,6 +472,7 @@ class PatientController extends ChangeNotifier {
+     // Clear a different resource immediately. Preserve the same detail on retry.
+     if (appointmentDetail?['id'] != id) {
+       appointmentDetail = null;
++      appointmentCheckInRequirements = null;
+       appointmentHistory = [];
+@@ -479,6 +482,7 @@ class PatientController extends ChangeNotifier {
+       final value = await appointmentRepository.snapshot(id);
+       if (!_currentSession(generation) || revision != _detailRevision) return;
+       appointmentDetail = value.appointment.toJson();
++      appointmentCheckInRequirements = value.checkInRequirements;
+       appointmentHistory = value.history.map((item) => item.toJson()).toList();
+diff --git a/app/src/lib/features/appointments/presentation/appointments_view.dart b/app/src/lib/features/appointments/presentation/appointments_view.dart
+--- a/app/src/lib/features/appointments/presentation/appointments_view.dart
++++ b/app/src/lib/features/appointments/presentation/appointments_view.dart
+@@ -13,6 +13,7 @@ class AppointmentsView extends StatefulWidget {
+   final List<JsonMap> appointments, history;
+   final JsonMap? detail;
++  final CheckInRequirements? checkInRequirements;
+   final bool busy, loading, detailLoading;
+@@ -27,7 +28,8 @@ class AppointmentsView extends StatefulWidget {
+     required this.onCancel, required this.onLoadOptions, required this.onReschedule,
+-    this.detail, this.history = const [], this.loading = false, this.detailLoading = false,
++    this.detail, this.checkInRequirements, this.history = const [],
++    this.loading = false, this.detailLoading = false,
+@@ -80,6 +82,11 @@ class _AppointmentsViewState extends State<AppointmentsView> {
+           Text('${value['serviceName']} · ${value['practitionerName']}'),
+           Text(localTime(value['startAt'] as String)),
+           Text('Cita: ${value['status']}'),
+           coverageText(value),
++          if (widget.checkInRequirements?.disabled == true)
++            const Semantics(
++              liveRegion: true,
++              child: Text('La admisión virtual aún no está disponible.'),
++            ),
+           Text('Afiliación: ••••${value['memberLast4']}'),
+diff --git a/app/src/lib/app/presentation/patient_shell.dart b/app/src/lib/app/presentation/patient_shell.dart
+--- a/app/src/lib/app/presentation/patient_shell.dart
++++ b/app/src/lib/app/presentation/patient_shell.dart
+@@ -95,6 +95,7 @@ class _PatientShellState extends State<PatientShell> {
+         loading: c.appointmentsLoading,
+         error: c.appointmentsError,
+         detail: c.appointmentDetail,
++        checkInRequirements: c.appointmentCheckInRequirements,
+         history: c.appointmentHistory,
+         detailLoading: c.appointmentDetailLoading,
+diff --git a/app/src/test/features/appointments/appointment_repository_test.dart b/app/src/test/features/appointments/appointment_repository_test.dart
+--- a/app/src/test/features/appointments/appointment_repository_test.dart
++++ b/app/src/test/features/appointments/appointment_repository_test.dart
+@@ -48,4 +48,26 @@ void main() {
+     expect(values.single.coverageStatus, 'Expired');
+     expect(manualCoverageLabel('Approved'), 'Revisión manual favorable');
+   });
++  test('Snapshot decodes disabled check-in requirements with separate DTO responses', () async {
++    final api = ApiClient(client: MockClient((request) async {
++      final path = request.url.path;
++      expect(request.method, 'GET');
++      if (path.endsWith('/appointments/appointment-one/history')) {
++        return http.Response(jsonEncode({'data': <dynamic>[]}), 200);
++      }
++      if (path.endsWith('/appointments/appointment-one/check-in-requirements')) {
++        return http.Response(jsonEncode({'data': {
++          'status': 'NotConfigured',
++          'canProceed': false,
++          'configurationVersion': null,
++        }}), 200);
++      }
++      if (path.endsWith('/appointments/appointment-one')) {
++        return http.Response(jsonEncode({'data': {
++          'id': 'appointment-one',
++          'version': 1,
++          'coverageStatus': 'ManualReview',
++        }}), 200);
++      }
++      throw StateError('Unexpected route: ${request.url.path}');
++    }));
++    addTearDown(api.close);
++    final snapshot = await AppointmentRepository(api).snapshot('appointment-one');
++    expect(snapshot.checkInRequirements.disabled, isTrue);
++    expect(snapshot.checkInRequirements.canProceed, isFalse);
++  });
+ }
+diff --git a/app/src/test/features/appointments/appointment_controller_test.dart b/app/src/test/features/appointments/appointment_controller_test.dart
+--- a/app/src/test/features/appointments/appointment_controller_test.dart
++++ b/app/src/test/features/appointments/appointment_controller_test.dart
+@@ -18,6 +18,9 @@ class Fixture extends catalog.Fixture {
+       final response = appointmentResponse;
+       if (response != null) return response(request);
+       return catalog.envelope({'id': 'appointment-one', 'version': 1, 'coverageStatus': 'ManualReview'});
+     }
++    if (request.url.path.endsWith('/appointments/appointment-one/check-in-requirements')) {
++      return catalog.envelope({'status': 'NotConfigured', 'canProceed': false, 'configurationVersion': null});
++    }
+     if (request.url.path.endsWith('/appointments/appointment-one/history')) {
+       return catalog.envelope([{'sequence': 1, 'newStatus': 'PendingValidation', 'newCoverage': 'ManualReview'}]);
+@@ -81,6 +84,7 @@ void main() {
+     await assertion;
+     expect(f.controller.appointmentDetail, isNull);
+     expect(f.controller.appointmentHistory, isEmpty);
++    expect(f.controller.appointmentCheckInRequirements, isNull);
+     expect(f.controller.pendingBooking, isNull);
+   });
++  test('Appointment detail loads disabled check-in requirements for the current session', () async {
++    final f = Fixture(); addTearDown(f.dispose); await f.login();
++    await f.controller.openAppointment({'id': 'appointment-one'});
++    expect(f.controller.appointmentCheckInRequirements?.disabled, isTrue);
++    expect(f.controller.appointmentCheckInRequirements?.canProceed, isFalse);
++  });
+ }
+diff --git a/app/src/test/features/appointments/appointments_view_test.dart b/app/src/test/features/appointments/appointments_view_test.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/test/features/appointments/appointments_view_test.dart
+@@ -0,0 +1,42 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:telemedicina_app/features/appointments/data/appointment_repository.dart';
++import 'package:telemedicina_app/features/appointments/domain/reschedule_options.dart';
++import 'package:telemedicina_app/features/appointments/presentation/appointments_view.dart';
++
++void main() {
++  testWidgets('NotConfigured shows notice without a continue action', (tester) async {
++    await tester.pumpWidget(MaterialApp(
++      home: Scaffold(body: SingleChildScrollView(child: AppointmentsView(
++        appointments: const [],
++        detail: {
++          'id': 'appointment-one',
++          'serviceName': 'Servicio sintético',
++          'practitionerName': 'Profesional sintético',
++          'startAt': '2026-11-10T14:00:00Z',
++          'status': 'PendingValidation',
++          'coverageStatus': 'ManualReview',
++          'coverageRequiresReview': false,
++          'memberLast4': '1234',
++          'evidence': null,
++          'validUntil': null,
++        },
++        checkInRequirements: const CheckInRequirements('NotConfigured', false, null),
++        busy: false,
++        run: (action) async { await action(); return true; },
++        onCancel: (_) async {},
++        onLoadOptions: (appointment) async => RescheduleOptions(appointment, const []),
++        onReschedule: (_, __) async {},
++      ))),
++    ));
++    expect(find.text('La admisión virtual aún no está disponible.'), findsOneWidget);
++    expect(find.text('Continuar'), findsNothing);
++    expect(find.text('Iniciar check-in'), findsNothing);
++  });
++}

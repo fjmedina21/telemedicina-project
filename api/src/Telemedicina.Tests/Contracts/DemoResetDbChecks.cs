@@ -15,7 +15,7 @@ public static class DemoResetDbChecks
         {
             var connection = Environment.GetEnvironmentVariable("DEMO_RESET_TEST_CONNECTION_STRING");
             if (Environment.GetEnvironmentVariable("DEMO_RESET_DB_TESTS") != "1" || string.IsNullOrWhiteSpace(connection) ||
-                !new NpgsqlConnectionStringBuilder(connection).Database.StartsWith("telemedicina_demo_reset_test", StringComparison.Ordinal))
+                !new NpgsqlConnectionStringBuilder(connection!).Database!.StartsWith("telemedicina_demo_reset_test", StringComparison.Ordinal))
                 throw new InvalidOperationException("DEMO_TEST_DATABASE_REQUIRED");
             var config = DemoResetUnitChecks.Configuration(new() { ["ConnectionStrings:Telemedicina"] = connection });
             var environment = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = "Development" }).Environment;
@@ -24,6 +24,8 @@ public static class DemoResetDbChecks
             var before = Snapshot(database, false);
             var preview = DemoDataReset.Run(database, config, environment, new(false, date));
             Require(!preview.Committed && preview.After is null && before == Snapshot(database, false), "DRYRUN_CHANGED_DATA");
+            Require(!string.IsNullOrWhiteSpace(preview.DatabaseName) && !string.IsNullOrWhiteSpace(preview.EndpointHost) &&
+                preview.EndpointPort > 0, "DRYRUN_DESTINATION_MISSING");
             try
             {
                 DemoDataReset.RunCore(database, config, environment, new(true, date),
@@ -34,7 +36,9 @@ public static class DemoResetDbChecks
             Require(before == Snapshot(database, false), "ROLLBACK_CHANGED_DATA_OR_TRIGGERS");
             var result = DemoDataReset.Run(database, config, environment, new(true, date));
             Require(result.Committed && result.After is not null &&
-                result.Planned.All(pair => result.After[pair.Key] == pair.Value), "SEED_COUNT_MISMATCH");
+                result.Planned.All(pair => result.After[pair.Key] == pair.Value) &&
+                result.After["appointments"] == 0 && result.After["appointment_history"] == 0 &&
+                result.After["notifications"] == 0, "SEED_COUNT_MISMATCH");
             var first = Snapshot(database, true);
             DemoDataReset.Run(database, config, environment, new(true, date));
             Require(first == Snapshot(database, true), "BUSINESS_DATA_NOT_REPRODUCIBLE");

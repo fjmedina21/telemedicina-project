@@ -1,4 +1,4 @@
-# App Flutter — primer hito
+# App Flutter para Android e iOS
 
 La app está organizada por responsabilidad:
 
@@ -19,8 +19,11 @@ Desde app/src:
 flutter pub get
 flutter analyze
 flutter test
-flutter run -d macos --dart-define=API_BASE_URL=http://127.0.0.1:5000/api/v1
+flutter devices
+flutter run -d <id-del-simulador-o-iphone> --dart-define=API_BASE_URL=http://127.0.0.1:5000/api/v1
 ```
+
+Para iPhone se requiere Xcode y un simulador iOS o un dispositivo conectado. Abre Simulator, lista los destinos con `flutter devices` y usa el identificador del simulador. En un iPhone físico, configura `API_BASE_URL` con la IP de red de la máquina que ejecuta la API; `127.0.0.1` apunta al propio iPhone. En el emulador Android, usa `http://10.0.2.2:5000/api/v1`.
 
 Configurar primero la API según [su guía](../../api/src/README.md).
 El cliente HTTP conserva tokens solo en memoria y preserva la clave de idempotencia al reintentar.
@@ -28,6 +31,5 @@ El perfil muestra sus datos como autodeclarados. Los avisos de cita y sus prefer
 El registro solicita el código de seis letras o números recibido por correo. La app lo verifica junto al correo del paciente.
 El proveedor de correo depende de la configuración del backend; las pruebas usan SMTP local.
 
-La refactorización se verifica con pruebas unitarias/widgets y análisis estático.
-La validación Android/iOS fue retirada de los pendientes por instrucción del usuario.
+La app contiene únicamente los scaffolds móviles Android e iOS. La compilación y ejecución iOS requieren Xcode.
 Resultados: [validación del primer hito](../../hitos/app/primer-hito-app/validaciones/01-base_completado.md).

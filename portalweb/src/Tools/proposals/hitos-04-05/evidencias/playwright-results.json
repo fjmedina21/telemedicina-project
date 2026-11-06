@@ -1,0 +1,336 @@
+{
+  "config": {
+    "argv": [
+      "/Users/franciscomedinamatos/.nvm/versions/node/v24.18.0/bin/node",
+      "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/node_modules/.bin/playwright",
+      "test",
+      "--config",
+      "playwright.h04.config.ts"
+    ],
+    "configFile": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/playwright.h04.config.ts",
+    "rootDir": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/Tools/proposals/hitos-04-05/evidencias/resultados",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "chromium",
+        "name": "chromium",
+        "testDir": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 90000
+      }
+    ],
+    "filteredProjects": [
+      {
+        "grep": {},
+        "grepInvert": null,
+        "outputDir": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/Tools/proposals/hitos-04-05/evidencias/resultados",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "name": "chromium",
+        "testDir": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone",
+        "snapshotDir": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone",
+        "testIgnore": [],
+        "testMatch": "**/*.@(spec|test).?(c|m)[jt]s?(x)",
+        "timeout": 90000,
+        "use": {
+          "baseURL": "http://localhost:3000",
+          "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.4 Safari/537.36",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          },
+          "screen": {
+            "width": 1920,
+            "height": 1080
+          },
+          "deviceScaleFactor": 1,
+          "isMobile": false,
+          "hasTouch": false,
+          "defaultBrowserType": "chromium",
+          "trace": "off",
+          "video": "off",
+          "screenshot": "off",
+          "browserName": "chromium"
+        },
+        "dependencies": [],
+        "ignoreSnapshots": false,
+        "__projectId": "chromium"
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "list",
+        null
+      ],
+      [
+        "json",
+        {
+          "outputFile": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/Tools/proposals/hitos-04-05/evidencias/playwright-results.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "default",
+    "updateSourceMethod": "patch",
+    "version": "1.64.1",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "schedule.spec.ts",
+      "file": "schedule.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "associated selection, real pagination and versioned block/unblock",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [
+                {
+                  "type": "serial",
+                  "location": {
+                    "file": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone/schedule.spec.ts",
+                    "line": 0,
+                    "column": 0
+                  }
+                }
+              ],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 12191,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-11-06T03:22:10.016Z",
+                  "annotations": [
+                    {
+                      "type": "serial",
+                      "location": {
+                        "file": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone/schedule.spec.ts",
+                        "line": 0,
+                        "column": 0
+                      }
+                    }
+                  ],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0c763654641d7f9e8f11-0bef6be406527478122a",
+          "file": "schedule.spec.ts",
+          "line": 66,
+          "column": 5
+        },
+        {
+          "title": "stale version preserves creation draft until explicit table reload",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [
+                {
+                  "type": "serial",
+                  "location": {
+                    "file": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone/schedule.spec.ts",
+                    "line": 0,
+                    "column": 0
+                  }
+                }
+              ],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 7515,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-11-06T03:22:38.871Z",
+                  "annotations": [
+                    {
+                      "type": "serial",
+                      "location": {
+                        "file": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone/schedule.spec.ts",
+                        "line": 0,
+                        "column": 0
+                      }
+                    }
+                  ],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0c763654641d7f9e8f11-05385d36e9b5efab671c",
+          "file": "schedule.spec.ts",
+          "line": 89,
+          "column": 5
+        },
+        {
+          "title": "a delayed real response cannot reinstall results for abandoned filters",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [
+                {
+                  "type": "serial",
+                  "location": {
+                    "file": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone/schedule.spec.ts",
+                    "line": 0,
+                    "column": 0
+                  }
+                }
+              ],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2754,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-11-06T03:22:46.407Z",
+                  "annotations": [
+                    {
+                      "type": "serial",
+                      "location": {
+                        "file": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone/schedule.spec.ts",
+                        "line": 0,
+                        "column": 0
+                      }
+                    }
+                  ],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0c763654641d7f9e8f11-a4d53eb10146d00e710a",
+          "file": "schedule.spec.ts",
+          "line": 109,
+          "column": 5
+        },
+        {
+          "title": "uncertain creation requires a successful targeted reconciliation",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [
+                {
+                  "type": "serial",
+                  "location": {
+                    "file": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone/schedule.spec.ts",
+                    "line": 0,
+                    "column": 0
+                  }
+                }
+              ],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 4944,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-11-06T03:22:49.171Z",
+                  "annotations": [
+                    {
+                      "type": "serial",
+                      "location": {
+                        "file": "/Users/franciscomedinamatos/Workspace/telemedicina/portalweb/src/tests/browser/fourth-milestone/schedule.spec.ts",
+                        "line": 0,
+                        "column": 0
+                      }
+                    }
+                  ],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0c763654641d7f9e8f11-3c373c37358e55ba4156",
+          "file": "schedule.spec.ts",
+          "line": 130,
+          "column": 5
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-11-06T03:22:09.666Z",
+    "duration": 51634.607,
+    "expected": 4,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

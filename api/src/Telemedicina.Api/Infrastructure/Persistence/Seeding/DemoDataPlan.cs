@@ -20,27 +20,19 @@ public sealed record DemoService(string Id, string PractitionerId, string Name, 
     string PractitionerName, int Duration);
 public sealed record DemoSlot(string Id, string ServiceId, string PractitionerId, DateTime StartUtc,
     DateTime EndUtc, bool Blocked);
-public sealed record DemoAppointment(string Id, string UserId, DemoSlot Slot, string Status,
-    string Coverage, string Insurer, string MemberLast4, string? ReviewerId)
-{
-    public bool HasTransition => Status != "PendingValidation" || Coverage != "Pending";
-}
-
 public sealed class DemoDataPlan
 {
-    public const string Version = "SEED-REALISTA-v1";
+    public const string Version = "SEED-REALISTA-v2";
     public DateOnly BaseDate { get; }
     public IReadOnlyList<DemoUser> Users { get; }
     public IReadOnlyList<DemoPatient> Patients { get; }
     public IReadOnlyList<DemoService> Services { get; }
     public IReadOnlyList<DemoSlot> Slots { get; }
-    public IReadOnlyList<DemoAppointment> Appointments { get; }
 
     private DemoDataPlan(DateOnly date, List<DemoUser> users, List<DemoPatient> patients,
-        List<DemoService> services, List<DemoSlot> slots, List<DemoAppointment> appointments)
+        List<DemoService> services, List<DemoSlot> slots)
     {
         BaseDate = date; Users = users; Patients = patients; Services = services; Slots = slots;
-        Appointments = appointments;
     }
 
     public static string Id(string key)
@@ -131,26 +123,9 @@ public sealed class DemoDataPlan
                             service.Id, service.PractitionerId, start, start.AddMinutes(service.Duration),
                             startHour == 9 && minute == 0));
                     }
-        // Spread the 30 examples across six services and five days; avoid blocked slots.
-        var chosen = new List<DemoSlot>();
-        for (var dayIndex = 0; dayIndex < 5; dayIndex++)
-            foreach (var service in services)
-                chosen.Add(slots.First(s => s.ServiceId == service.Id &&
-                    DateOnly.FromDateTime(s.StartUtc.AddHours(-4)) == days[dayIndex] && !s.Blocked));
-        var appointments = chosen.Select((slot, i) =>
-        {
-            var status = i < 12 ? "PendingValidation" : i < 20 ? "Confirmed" :
-                i < 26 ? "Cancelled" : "PendingValidation";
-            var coverage = i is >= 12 and < 20 ? "Approved" : i >= 26 ? "Denied" : "Pending";
-            return new DemoAppointment(Id($"appointment:{i + 1:00}"), patients[i % 24].UserId, slot, status,
-                coverage, new[] { "Aseguradora Demo Norte", "Aseguradora Demo Sur", "Aseguradora Demo Centro" }[i % 3],
-                (1000 + i).ToString(System.Globalization.CultureInfo.InvariantCulture),
-                coverage is "Approved" or "Denied" ? users[1 + i % 2].Id : null);
-        }).ToList();
-        if (slots.Count != 800 || slots.Count(s => s.Blocked) != 60 ||
-            appointments.Any(a => a.Slot.Blocked) || appointments.Select(a => a.Slot.Id).Distinct().Count() != 30)
+        if (slots.Count != 800 || slots.Count(s => s.Blocked) != 60)
             throw new DemoResetException("DEMO_PLAN_INVALID");
-        return new DemoDataPlan(date, users, patients, services, slots, appointments);
+        return new DemoDataPlan(date, users, patients, services, slots);
     }
 
     private static string Email(string? value)

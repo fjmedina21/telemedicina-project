@@ -1,5 +1,6 @@
 """Reproducible synthetic API, SMTP and Playwright checks; credentials stay in child environments."""
 import argparse
+import base64
 import os
 from pathlib import Path
 import secrets
@@ -34,6 +35,8 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--configuration",choices=["Debug","Release"],default="Debug")
     parser.add_argument("--skip-browser",action="store_true")
+    parser.add_argument("--h04",action="store_true")
+    parser.add_argument("--h05",action="store_true")
     args=parser.parse_args()
     if not os.environ.get("ConnectionStrings__Telemedicina"):
         raise RuntimeError("Configure the private connection to a synthetic test database.")
@@ -52,16 +55,34 @@ def main():
         "MILESTONE_TEST_SYNTHETIC":"1","MILESTONE_TEST_URL":"http://127.0.0.1:5091/api/v1",
         "MILESTONE_CONFIGURATION":args.configuration,"MILESTONE_PORTAL_TEST_URL":"http://localhost:3000",
         "API_INTERNAL_URL":"http://127.0.0.1:5091/api/v1"})
+    if args.h04 or args.h05:
+        env.update({"Milestone__AdministratorEmail":"synthetic-h04-admin-"+secrets.token_hex(8)+"@example.invalid","Milestone__AdministratorPassword":secrets.token_urlsafe(32)})
+        for role in ("Support","Practitioner"):
+            env.pop("Milestone__"+role+"Email",None);env.pop("Milestone__"+role+"Password",None)
     base=["dotnet","run","--no-build","--no-launch-profile","--configuration",args.configuration,"--project",str(PROJECT)]
-    for action in ["--migrate","--seed-synthetic"]:
+    for action in ["--migrate","--seed-synthetic"]+(["--seed-staff-synthetic"] if (args.h04 or args.h05) else []):
         subprocess.run(base+["--",action],cwd=ROOT,env=env,check=True)
     api=None;portal=None
     try:
         api=subprocess.Popen(base+["--","--urls","http://127.0.0.1:5091"],cwd=ROOT,env=env,
             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
         wait_ready(api,"http://127.0.0.1:5091/api/v1/health")
-        subprocess.run([sys.executable,str(ROOT/"api/src/Telemedicina.Tests/Integration/milestone_e2e.py")],
-            cwd=ROOT,env=env,check=True)
+        scripts=[]
+        if args.h04 or args.h05:
+            scripts.append("fourth_milestone_e2e.py")
+        if args.h05:
+            scripts.extend(["fifth_milestone_e2e.py","third_milestone_e2e.py"])
+        scripts.append("milestone_e2e.py")
+        for index,script in enumerate(scripts):
+            if index and args.h05:
+                # Each suite gets a fresh IP limiter while DB session revocation remains persisted.
+                stop(api);api=None
+                api=subprocess.Popen(base+["--","--urls","http://127.0.0.1:5091"],cwd=ROOT,env=env,
+                    stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+                wait_ready(api,"http://127.0.0.1:5091/api/v1/health")
+            print("Running synthetic HTTP suite: "+script,flush=True)
+            subprocess.run([sys.executable,str(ROOT/"api/src/Telemedicina.Tests/Integration"/script)],
+                cwd=ROOT,env=env,check=True)
         subprocess.run([sys.executable,str(ROOT/"api/src/Telemedicina.Tests/Integration/smtp_fixture_test.py")],
             cwd=ROOT,env=env,check=True)
         if not args.skip_browser:

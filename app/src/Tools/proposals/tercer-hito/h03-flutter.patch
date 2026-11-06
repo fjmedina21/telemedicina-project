@@ -1,0 +1,1246 @@
+diff --git a/app/src/lib/core/errors/api_failure.dart b/app/src/lib/core/errors/api_failure.dart
+--- a/app/src/lib/core/errors/api_failure.dart
++++ b/app/src/lib/core/errors/api_failure.dart
+@@ -1,7 +1,9 @@
+ class ApiFailure implements Exception {
+   final int status;
+   final String message;
+-  ApiFailure(this.status, this.message);
++  final String? code;
++  final List<String> errors;
++  ApiFailure(this.status, this.message, {this.code, this.errors = const []});
+   @override
+   String toString() => message;
+ }
+diff --git a/app/src/lib/core/network/api_client.dart b/app/src/lib/core/network/api_client.dart
+--- a/app/src/lib/core/network/api_client.dart
++++ b/app/src/lib/core/network/api_client.dart
+@@ -26,6 +26,7 @@
+   }) : _client = client ?? http.Client();
+ 
+   bool get authenticated => _access != null;
++  int get sessionGeneration => _sessionGeneration;
+   void clearSession() {
+     _sessionGeneration++;
+     _access = null;
+@@ -53,6 +54,8 @@
+     Map<String, String> extraHeaders = const {},
+     bool retry = true,
+   }) async {
++    final generation = _sessionGeneration;
++    final hadSession = authenticated;
+     try {
+       final request = http.Request(method, Uri.parse('$baseUrl$path'));
+       request.headers.addAll({
+@@ -65,6 +68,12 @@
+       final response = await http.Response.fromStream(
+         await _client.send(request).timeout(const Duration(seconds: 15)),
+       ).timeout(const Duration(seconds: 15));
++      if (hadSession && generation != _sessionGeneration) {
++        throw ApiFailure(
++          401,
++          'La sesión ya no está disponible. Inicia sesión nuevamente.',
++        );
++      }
+       if (response.statusCode == 401 &&
+           retry &&
+           _refresh != null &&
+@@ -94,6 +103,10 @@
+               ? (parsed['title'] ?? parsed['detail'] ?? 'Solicitud rechazada')
+                     .toString()
+               : 'Solicitud rechazada (${response.statusCode})',
++          code: parsed is Map ? parsed['code'] as String? : null,
++          errors: parsed is Map && parsed['errors'] is List
++              ? (parsed['errors'] as List).whereType<String>().toList()
++              : const [],
+         );
+       }
+       return parsed is Map ? parsed['data'] : null;
+@@ -135,7 +148,10 @@
+         retry: false,
+       );
+       if (generation != _sessionGeneration) {
+-        throw ApiFailure(401, 'La sesión ya no está disponible. Inicia sesión nuevamente.');
++        throw ApiFailure(
++          401,
++          'La sesión ya no está disponible. Inicia sesión nuevamente.',
++        );
+       }
+       _access = data['accessToken'];
+       _refresh = data['refreshToken'];
+diff --git a/app/src/lib/features/patient_profile/data/profile_repository.dart b/app/src/lib/features/patient_profile/data/profile_repository.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/lib/features/patient_profile/data/profile_repository.dart
+@@ -0,0 +1,110 @@
++import '../../../core/network/api_client.dart';
++
++class ProfileCompleteness {
++  final String status;
++  final List<String> missingFields;
++  const ProfileCompleteness(this.status, this.missingFields);
++  factory ProfileCompleteness.fromJson(Map data) => ProfileCompleteness(
++    data['status'] as String,
++    List<String>.unmodifiable((data['missingFields'] as List).cast<String>()),
++  );
++}
++
++class DeclarationMetadata {
++  final String source;
++  final DateTime? updatedAt;
++  const DeclarationMetadata(this.source, this.updatedAt);
++  factory DeclarationMetadata.fromJson(Map data) => DeclarationMetadata(
++    data['source'] as String,
++    data['updatedAt'] == null
++        ? null
++        : DateTime.parse(data['updatedAt'] as String).toUtc(),
++  );
++}
++
++class ProfileSnapshot {
++  final JsonMap? profile;
++  final int version;
++  final Map<String, DeclarationMetadata> metadata;
++  final ProfileCompleteness completeness;
++  const ProfileSnapshot(
++    this.profile,
++    this.version,
++    this.metadata,
++    this.completeness,
++  );
++}
++
++class ProfileRepository {
++  final ApiClient api;
++  ProfileRepository(this.api);
++  static const fields = [
++    'firstName',
++    'lastName',
++    'birthDate',
++    'phone',
++    'address',
++    'emergencyName',
++    'emergencyPhone',
++  ];
++  static const categories = ['allergies', 'medications', 'conditions'];
++
++  // Copy only editable fields. Identity and server metadata are never submitted.
++  static JsonMap draft(JsonMap? profile) => {
++    for (final key in fields) key: profile?[key] is String ? profile![key] : '',
++    for (final key in categories)
++      key: profile?[key] is List
++          ? List<String>.from((profile![key] as List).whereType<String>())
++          : <String>[],
++  };
++
++  Future<ProfileSnapshot> load() async {
++    final data = await api.request('GET', '/patients/me') as Map?;
++    final completeness = data == null
++        ? await api.request('GET', '/patients/me/completeness') as Map
++        : data['completeness'] as Map;
++    return ProfileSnapshot(
++      data == null ? null : Map<String, dynamic>.from(data['profile'] as Map),
++      data?['version'] as int? ?? 0,
++      {
++        for (final key in categories)
++          key:
++              data != null &&
++                  data['declarationMetadata'] is Map &&
++                  (data['declarationMetadata'] as Map)[key] is Map
++              ? DeclarationMetadata.fromJson(
++                  (data['declarationMetadata'] as Map)[key] as Map,
++                )
++              : const DeclarationMetadata('SelfDeclared', null),
++      },
++      ProfileCompleteness.fromJson(completeness),
++    );
++  }
++
++  Future<void> save(JsonMap body, int version) async {
++    await api.request(
++      'PATCH',
++      '/patients/me',
++      body: {...draft(body), 'version': version},
++    );
++  }
++
++  static Map<String, String> fieldErrors(List<String> errors) {
++    const messages = {
++      'REQUIRED': 'Completa este campo.',
++      'INVALID': 'Revisa el formato de este campo.',
++      'MAX_LENGTH': 'El texto supera el límite permitido.',
++      'MAX_ITEMS': 'Se permiten hasta 20 elementos.',
++    };
++    final result = <String, String>{};
++    for (final error in errors) {
++      final parts = error.split(':');
++      if (parts.length == 2 &&
++          [...fields, ...categories, 'version'].contains(parts[0]) &&
++          messages.containsKey(parts[1])) {
++        result[parts[0]] = messages[parts[1]]!;
++      }
++    }
++    return result;
++  }
++}
+diff --git a/app/src/lib/app/application/patient_controller.dart b/app/src/lib/app/application/patient_controller.dart
+--- a/app/src/lib/app/application/patient_controller.dart
++++ b/app/src/lib/app/application/patient_controller.dart
+@@ -5,6 +5,7 @@
+ import '../../core/network/api_client.dart';
+ import '../../features/auth/data/auth_repository.dart';
+ import '../../features/appointments/domain/reschedule_options.dart';
++import '../../features/patient_profile/data/profile_repository.dart';
+ 
+ class PatientController extends ChangeNotifier {
+   final ApiClient api;
+@@ -15,6 +16,20 @@
+   JsonMap? identity;
+   JsonMap? profile;
+   int profileVersion = 0;
++  late final ProfileRepository profileRepository = ProfileRepository(api);
++  JsonMap profileDraft = ProfileRepository.draft(null);
++  int profileDraftVersion = 0;
++  int profileDraftRevision = 0;
++  bool profileDirty = false;
++  bool profileConflict = false;
++  Map<String, String> profileErrors = {};
++  Map<String, DeclarationMetadata> declarationMetadata = {};
++  ProfileCompleteness profileCompleteness = const ProfileCompleteness(
++    'Incomplete',
++    [],
++  );
++  bool get profileChangedElsewhere =>
++      profileDirty && profileVersion != profileDraftVersion;
+   int preferencesVersion = 0;
+   bool emailEnabled = false;
+   String? selectedServiceId;
+@@ -44,6 +59,14 @@
+     identity = null;
+     profile = null;
+     profileVersion = 0;
++    profileDraft = ProfileRepository.draft(null);
++    profileDraftVersion = 0;
++    profileDraftRevision++;
++    profileDirty = false;
++    profileConflict = false;
++    profileErrors = {};
++    declarationMetadata = {};
++    profileCompleteness = const ProfileCompleteness('Incomplete', []);
+     preferencesVersion = 0;
+     emailEnabled = false;
+     services = [];
+@@ -73,7 +96,10 @@
+   }
+ 
+   Future<void> load() async {
+-    final me = Map<String, dynamic>.from(await api.request('GET', '/auth/me') as Map);
++    final generation = api.sessionGeneration;
++    final me = Map<String, dynamic>.from(
++      await api.request('GET', '/auth/me') as Map,
++    );
+     if (me['role'] != 'Patient') {
+       try {
+         await auth.logout();
+@@ -83,19 +109,16 @@
+       throw ApiFailure(403, 'Utiliza una cuenta de paciente en esta app.');
+     }
+     final results = await Future.wait([
+-      api.request('GET', '/patients/me'),
++      profileRepository.load(),
+       api.request('GET', '/services'),
+       api.request('GET', '/appointments/me'),
+       api.request('GET', '/notifications/me'),
+       api.request('GET', '/notifications/preferences'),
+     ]);
+-    if (_disposed || !authenticated) return;
++    if (_disposed || !authenticated || generation != api.sessionGeneration)
++      return;
+     identity = me;
+-    final data = results[0] as Map?;
+-    profile = data == null
+-        ? null
+-        : Map<String, dynamic>.from(data['profile'] as Map);
+-    profileVersion = data?['version'] as int? ?? 0;
++    _acceptProfile(results[0] as ProfileSnapshot);
+     services = _records(results[1]);
+     appointments = _records(results[2]);
+     notifications = _records(results[3]);
+@@ -120,14 +143,54 @@
+     }
+   }
+ 
++  void updateProfileDraft(JsonMap body) {
++    profileDraft = ProfileRepository.draft(body);
++    profileDirty = true;
++    profileErrors = {};
++  }
++
++  void _acceptProfile(ProfileSnapshot snapshot, {bool discardDraft = false}) {
++    profile = snapshot.profile;
++    profileVersion = snapshot.version;
++    profileCompleteness = snapshot.completeness;
++    if (!profileDirty || discardDraft) {
++      profileDraft = ProfileRepository.draft(snapshot.profile);
++      profileDraftVersion = snapshot.version;
++      profileDraftRevision++;
++      profileDirty = false;
++      profileConflict = false;
++      profileErrors = {};
++      declarationMetadata = snapshot.metadata;
++    }
++  }
++
++  Future<void> reloadProfile() async {
++    final generation = api.sessionGeneration;
++    final snapshot = await profileRepository.load();
++    if (_disposed || !authenticated || generation != api.sessionGeneration)
++      return;
++    _acceptProfile(snapshot, discardDraft: true);
++    message = 'Perfil recargado.';
++  }
++
+   Future<void> saveProfile(JsonMap body) async {
+-    await api.request(
+-      'PATCH',
+-      '/patients/me',
+-      body: {...body, 'version': profileVersion},
+-    );
+-    await load();
+-    message = 'Perfil guardado.';
++    updateProfileDraft(body);
++    profileErrors = {};
++    final generation = api.sessionGeneration;
++    try {
++      await profileRepository.save(profileDraft, profileDraftVersion);
++      final snapshot = await profileRepository.load();
++      if (_disposed || !authenticated || generation != api.sessionGeneration)
++        return;
++      _acceptProfile(snapshot, discardDraft: true);
++      message = 'Perfil guardado.';
++    } on ApiFailure catch (error) {
++      if (!_disposed && authenticated && generation == api.sessionGeneration) {
++        profileErrors = ProfileRepository.fieldErrors(error.errors);
++        if (error.status == 409) profileConflict = true;
++      }
++      rethrow;
++    }
+   }
+ 
+   void selectService(String? id) {
+@@ -216,6 +279,7 @@
+   @override
+   void dispose() {
+     _disposed = true;
++    _clearPrivateState();
+     api.close();
+     super.dispose();
+   }
+diff --git a/app/src/lib/app/presentation/patient_shell.dart b/app/src/lib/app/presentation/patient_shell.dart
+--- a/app/src/lib/app/presentation/patient_shell.dart
++++ b/app/src/lib/app/presentation/patient_shell.dart
+@@ -39,8 +39,14 @@
+     }
+     return switch (tab) {
+       0 => PatientProfileForm(
+-        profile: c.profile,
+-        version: c.profileVersion,
++        profile: c.profileDraft,
++        version: c.profileDraftRevision,
++        metadata: c.declarationMetadata,
++        completeness: c.profileCompleteness,
++        errors: c.profileErrors,
++        conflict: c.profileConflict || c.profileChangedElsewhere,
++        onChanged: c.updateProfileDraft,
++        onReload: () => c.execute(c.reloadProfile),
+         busy: c.busy,
+         onSave: (body) => c.execute(() => c.saveProfile(body)),
+       ),
+diff --git a/app/src/lib/features/patient_profile/presentation/patient_profile_form.dart b/app/src/lib/features/patient_profile/presentation/patient_profile_form.dart
+--- a/app/src/lib/features/patient_profile/presentation/patient_profile_form.dart
++++ b/app/src/lib/features/patient_profile/presentation/patient_profile_form.dart
+@@ -1,19 +1,32 @@
+ import 'package:flutter/material.dart';
+ 
+ import '../../../core/models/json_map.dart';
+-import '../../../shared/widgets/labeled_text_field.dart';
++import '../data/profile_repository.dart';
+ 
+ class PatientProfileForm extends StatefulWidget {
+   final JsonMap? profile;
++  // This revision changes only after accepting a reload/save, never during a draft.
+   final int version;
+   final bool busy;
+   final Future<bool> Function(JsonMap) onSave;
++  final void Function(JsonMap)? onChanged;
++  final Future<bool> Function()? onReload;
++  final Map<String, DeclarationMetadata> metadata;
++  final ProfileCompleteness? completeness;
++  final Map<String, String> errors;
++  final bool conflict;
+   const PatientProfileForm({
+     super.key,
+     required this.profile,
+     required this.version,
+     required this.busy,
+     required this.onSave,
++    this.onChanged,
++    this.onReload,
++    this.metadata = const {},
++    this.completeness,
++    this.errors = const {},
++    this.conflict = false,
+   });
+   @override
+   State<PatientProfileForm> createState() => _PatientProfileFormState();
+@@ -28,20 +41,60 @@
+     'address': 'Dirección',
+     'emergencyName': 'Contacto de emergencia',
+     'emergencyPhone': 'Teléfono de emergencia',
+-    'allergies': 'Alergias (separadas por comas)',
+-    'medications': 'Medicamentos habituales (separados por comas)',
+-    'conditions': 'Antecedentes (separados por comas)',
++    'allergies': 'Alergias',
++    'medications': 'Medicamentos habituales',
++    'conditions': 'Antecedentes',
+   };
++  static const limits = {
++    'firstName': 80,
++    'lastName': 80,
++    'phone': 30,
++    'address': 250,
++    'emergencyName': 100,
++    'emergencyPhone': 30,
++  };
++  final _form = GlobalKey<FormState>();
+   late final fields = {
+-    for (final key in labels.keys) key: TextEditingController(),
++    for (final key in ProfileRepository.fields) key: TextEditingController(),
+   };
++  final lists = <String, List<TextEditingController>>{};
++  bool _reading = false;
++  bool _submitting = false;
++  final _edited = <String>{};
++
+   void readProfile() {
++    _reading = true;
++    _edited.clear();
+     for (final entry in fields.entries) {
+-      final value = widget.profile?[entry.key];
+-      entry.value.text = value is List
+-          ? value.join(', ')
+-          : (value ?? '').toString();
+-    }
++      entry.value.text = (widget.profile?[entry.key] ?? '').toString();
++    }
++    for (final controllers in lists.values) {
++      for (final controller in controllers) {
++        controller.dispose();
++      }
++    }
++    lists.clear();
++    for (final category in ProfileRepository.categories) {
++      final values = widget.profile?[category];
++      lists[category] = [
++        if (values is List)
++          for (final value in values.whereType<String>())
++            TextEditingController(text: value),
++      ];
++    }
++    _reading = false;
++  }
++
++  JsonMap body() => {
++    for (final entry in fields.entries) entry.key: entry.value.text.trim(),
++    for (final entry in lists.entries)
++      entry.key: entry.value.map((c) => c.text.trim()).toList(),
++  };
++
++  void changed(String key) {
++    if (_reading) return;
++    setState(() => _edited.add(key));
++    widget.onChanged?.call(body());
+   }
+ 
+   @override
+@@ -53,82 +106,250 @@
+   @override
+   void didUpdateWidget(covariant PatientProfileForm oldWidget) {
+     super.didUpdateWidget(oldWidget);
+-    if (oldWidget.version != widget.version ||
+-        oldWidget.profile != widget.profile) {
++    if (oldWidget.version != widget.version) {
+       readProfile();
+     }
+   }
+ 
+   @override
+   void dispose() {
+-    for (final field in fields.values) {
+-      field.dispose();
++    for (final controller in fields.values) {
++      controller.dispose();
++    }
++    for (final controllers in lists.values) {
++      for (final controller in controllers) {
++        controller.dispose();
++      }
+     }
+     super.dispose();
+   }
+ 
+-  @override
+-  Widget build(BuildContext context) => Column(
+-    crossAxisAlignment: CrossAxisAlignment.stretch,
+-    children: [
+-      const Text(
+-        'Mi perfil',
+-        style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
++  String? validate(String key, String? value) {
++    if (!_edited.contains(key) && widget.errors[key] != null)
++      return widget.errors[key];
++    final text = value?.trim() ?? '';
++    if (text.isEmpty) return 'Completa este campo.';
++    if (text.length > (limits[key] ?? 200))
++      return 'El texto supera el límite permitido.';
++    if (key == 'birthDate') {
++      final date = DateTime.tryParse(text);
++      final today = DateTime.now().toUtc();
++      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(text) ||
++          date == null ||
++          date.year < 1900 ||
++          date.month.toString().padLeft(2, '0') != text.substring(5, 7) ||
++          date.day.toString().padLeft(2, '0') != text.substring(8, 10) ||
++          !DateTime.utc(
++            date.year,
++            date.month,
++            date.day,
++          ).isBefore(DateTime.utc(today.year, today.month, today.day))) {
++        return 'Usa una fecha válida anterior a hoy (AAAA-MM-DD).';
++      }
++    }
++    return null;
++  }
++
++  String dateLabel(String category) {
++    final date = widget.metadata[category]?.updatedAt;
++    if (date == null) return 'Autodeclarado · Fecha no disponible';
++    final local = date.toUtc().subtract(const Duration(hours: 4));
++    String two(int n) => n.toString().padLeft(2, '0');
++    return 'Autodeclarado · ${local.year}-${two(local.month)}-${two(local.day)} ${two(local.hour)}:${two(local.minute)} (America/Santo_Domingo)';
++  }
++
++  Future<void> reload() async {
++    final confirmed = await showDialog<bool>(
++      context: context,
++      builder: (context) => AlertDialog(
++        title: const Text('¿Descartar el borrador?'),
++        content: const Text(
++          'La recarga reemplazará tus cambios por el perfil guardado.',
++        ),
++        actions: [
++          TextButton(
++            onPressed: () => Navigator.pop(context, false),
++            child: const Text('Conservar borrador'),
++          ),
++          FilledButton(
++            onPressed: () => Navigator.pop(context, true),
++            child: const Text('Descartar y recargar'),
++          ),
++        ],
+       ),
+-      const Text(
+-        'Alergias, medicamentos y antecedentes son datos autodeclarados, no diagnósticos confirmados.',
++    );
++    if (confirmed == true && mounted) await widget.onReload?.call();
++  }
++
++  Future<void> save() async {
++    if (_submitting || widget.busy || !_form.currentState!.validate()) return;
++    setState(() => _submitting = true);
++    try {
++      final success = await widget.onSave(body());
++      if (!success && mounted) {
++        // Backend errors arrive on the next parent rebuild; the draft stays intact.
++        setState(() => _edited.clear());
++      }
++    } finally {
++      if (mounted) setState(() => _submitting = false);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final disabled = widget.busy || _submitting;
++    return Form(
++      key: _form,
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.stretch,
++        children: [
++          const Text(
++            'Mi perfil',
++            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
++          ),
++          const Text(
++            'Alergias, medicamentos y antecedentes son datos autodeclarados, no diagnósticos confirmados.',
++          ),
++          const SizedBox(height: 12),
++          if (widget.completeness != null)
++            Semantics(
++              liveRegion: true,
++              child: Text(
++                widget.completeness!.status == 'Complete'
++                    ? 'Perfil completo'
++                    : 'Información pendiente: ${widget.completeness!.missingFields.map((f) => labels[f] ?? f).join(', ')}',
++              ),
++            ),
++          if (widget.conflict)
++            const Padding(
++              padding: EdgeInsets.symmetric(vertical: 12),
++              child: Text(
++                'Existe otra versión del perfil. Tu borrador se conserva; recarga antes de volver a guardar.',
++              ),
++            ),
++          if (widget.onReload != null)
++            Align(
++              alignment: Alignment.centerLeft,
++              child: TextButton(
++                onPressed: disabled ? null : reload,
++                child: const Text('Recargar perfil'),
++              ),
++            ),
++          for (final key in ProfileRepository.fields) ...[
++            if (key == 'firstName' || key == 'emergencyName') ...[
++              const Divider(),
++              Text(
++                key == 'firstName'
++                    ? 'Datos personales'
++                    : 'Contacto de emergencia',
++                style: const TextStyle(fontWeight: FontWeight.w600),
++              ),
++            ],
++            Padding(
++              padding: const EdgeInsets.symmetric(vertical: 8),
++              child: TextFormField(
++                key: ValueKey(key),
++                controller: fields[key],
++                enabled: !disabled,
++                maxLength: limits[key] ?? 10,
++                keyboardType: key.toLowerCase().contains('phone')
++                    ? TextInputType.phone
++                    : null,
++                onChanged: (_) => changed(key),
++                validator: (value) => validate(key, value),
++                autovalidateMode: AutovalidateMode.onUserInteraction,
++                decoration: InputDecoration(
++                  labelText: labels[key],
++                  errorText: _edited.contains(key) ? null : widget.errors[key],
++                ),
++              ),
++            ),
++          ],
++          const Divider(),
++          const Text(
++            'Información autodeclarada',
++            style: TextStyle(fontWeight: FontWeight.w600),
++          ),
++          for (final category in ProfileRepository.categories) ...[
++            const SizedBox(height: 12),
++            Text(
++              labels[category]!,
++              style: const TextStyle(fontWeight: FontWeight.w600),
++            ),
++            Text(dateLabel(category)),
++            if (lists[category]!.isEmpty) const Text('Sin datos registrados'),
++            if (!_edited.contains(category) && widget.errors[category] != null)
++              Semantics(
++                liveRegion: true,
++                child: Text(
++                  widget.errors[category]!,
++                  style: TextStyle(color: Theme.of(context).colorScheme.error),
++                ),
++              ),
++            for (final controller in lists[category]!)
++              Padding(
++                key: ObjectKey(controller),
++                padding: const EdgeInsets.symmetric(vertical: 8),
++                child: Row(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    Expanded(
++                      child: TextFormField(
++                        controller: controller,
++                        enabled: !disabled,
++                        maxLength: 200,
++                        decoration: InputDecoration(
++                          labelText:
++                              'Elemento de ${labels[category]!.toLowerCase()}',
++                        ),
++                        onChanged: (_) => changed(category),
++                        validator: (value) => validate(category, value),
++                        autovalidateMode: AutovalidateMode.onUserInteraction,
++                      ),
++                    ),
++                    IconButton(
++                      tooltip:
++                          'Eliminar elemento de ${labels[category]!.toLowerCase()}',
++                      onPressed: disabled
++                          ? null
++                          : () {
++                              setState(
++                                () => lists[category]!.remove(controller),
++                              );
++                              // Removed text fields unmount on the next frame.
++                              WidgetsBinding.instance.addPostFrameCallback(
++                                (_) => controller.dispose(),
++                              );
++                              changed(category);
++                            },
++                      icon: const Icon(Icons.delete_outline),
++                    ),
++                  ],
++                ),
++              ),
++            Align(
++              alignment: Alignment.centerLeft,
++              child: TextButton.icon(
++                onPressed: disabled || lists[category]!.length >= 20
++                    ? null
++                    : () {
++                        setState(
++                          () => lists[category]!.add(TextEditingController()),
++                        );
++                        changed(category);
++                      },
++                icon: const Icon(Icons.add),
++                label: Text('Añadir ${labels[category]!.toLowerCase()}'),
++              ),
++            ),
++          ],
++          const SizedBox(height: 16),
++          FilledButton(
++            onPressed: disabled || widget.conflict ? null : save,
++            child: const Text('Guardar perfil'),
++          ),
++        ],
+       ),
+-      const SizedBox(height: 20),
+-      for (final entry in labels.entries) ...[
+-        if ([
+-          'firstName',
+-          'emergencyName',
+-          'allergies',
+-        ].contains(entry.key)) ...[
+-          if (entry.key != 'firstName') const Divider(),
+-          Text(
+-            {
+-              'firstName': 'Datos personales',
+-              'emergencyName': 'Contacto de emergencia',
+-              'allergies': 'Información autodeclarada',
+-            }[entry.key]!,
+-            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+-          ),
+-          const SizedBox(height: 8),
+-        ],
+-        LabeledTextField(
+-          controller: fields[entry.key]!,
+-          label: entry.value,
+-          enabled: !widget.busy,
+-          keyboardType: entry.key.toLowerCase().contains('phone')
+-              ? TextInputType.phone
+-              : null,
+-        ),
+-      ],
+-      const SizedBox(height: 16),
+-      FilledButton(
+-        onPressed: widget.busy
+-            ? null
+-            : () {
+-                final body = <String, dynamic>{};
+-                for (final entry in fields.entries) {
+-                  body[entry.key] =
+-                      [
+-                        'allergies',
+-                        'medications',
+-                        'conditions',
+-                      ].contains(entry.key)
+-                      ? entry.value.text
+-                            .split(',')
+-                            .map((value) => value.trim())
+-                            .where((value) => value.isNotEmpty)
+-                            .toList()
+-                      : entry.value.text.trim();
+-                }
+-                widget.onSave(body);
+-              },
+-        child: const Text('Guardar perfil'),
+-      ),
+-    ],
+-  );
++    );
++  }
+ }
+diff --git a/app/src/test/features/patient_profile/profile_repository_test.dart b/app/src/test/features/patient_profile/profile_repository_test.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/test/features/patient_profile/profile_repository_test.dart
+@@ -0,0 +1,154 @@
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:http/testing.dart';
++import 'package:telemedicina_app/core/network/api_client.dart';
++import 'package:telemedicina_app/features/patient_profile/data/profile_repository.dart';
++
++http.Response response(dynamic data) =>
++    http.Response(jsonEncode({'data': data}), 200);
++
++void main() {
++  test(
++    'DTO uses outer version, declaration timestamps and completeness',
++    () async {
++      final api = ApiClient(
++        client: MockClient(
++          (r) async => response({
++            'profile': {'firstName': 'Sintético', 'version': 1},
++            'version': 7,
++            'declarationMetadata': {
++              'allergies': {
++                'source': 'SelfDeclared',
++                'updatedAt': '2026-11-05T14:30:00Z',
++              },
++            },
++            'completeness': {
++              'status': 'Incomplete',
++              'missingFields': ['address'],
++            },
++          }),
++        ),
++      );
++      addTearDown(api.close);
++      final snapshot = await ProfileRepository(api).load();
++      expect(snapshot.version, 7);
++      expect(
++        snapshot.metadata['allergies']!.updatedAt,
++        DateTime.utc(2026, 11, 5, 14, 30),
++      );
++      expect(snapshot.metadata['conditions']!.updatedAt, isNull);
++      expect(snapshot.completeness.missingFields, ['address']);
++    },
++  );
++
++  test('No profile loads completeness from its protected endpoint', () async {
++    final paths = <String>[];
++    final api = ApiClient(
++      client: MockClient((r) async {
++        paths.add(r.url.path);
++        return response(
++          r.url.path.endsWith('/completeness')
++              ? {
++                  'status': 'Incomplete',
++                  'missingFields': ProfileRepository.fields,
++                }
++              : null,
++        );
++      }),
++    );
++    addTearDown(api.close);
++    final snapshot = await ProfileRepository(api).load();
++    expect(snapshot.profile, isNull);
++    expect(snapshot.version, 0);
++    expect(paths, ['/api/v1/patients/me', '/api/v1/patients/me/completeness']);
++  });
++
++  test(
++    'PATCH preserves commas, strips protected fields and never retries 409',
++    () async {
++      var calls = 0;
++      final api = ApiClient(
++        client: MockClient((r) async {
++          calls++;
++          final body = jsonDecode(r.body) as Map;
++          expect(body['version'], 4);
++          expect(body['allergies'], ['Sintético, elemento único']);
++          expect(body.containsKey('patientId'), isFalse);
++          expect(body.containsKey('declarationMetadata'), isFalse);
++          return http.Response(
++            jsonEncode({
++              'code': 'VERSION_CONFLICT',
++              'detail': 'Conflicto',
++              'errors': <String>[],
++            }),
++            409,
++          );
++        }),
++      );
++      addTearDown(api.close);
++      await expectLater(
++        ProfileRepository(api).save({
++          'patientId': 'protected',
++          'declarationMetadata': {},
++          'allergies': ['Sintético, elemento único'],
++        }, 4),
++        throwsA(
++          isA<ApiFailure>().having((e) => e.code, 'code', 'VERSION_CONFLICT'),
++        ),
++      );
++      expect(calls, 1);
++    },
++  );
++
++  test('Field error mapping accepts only known names and safe codes', () {
++    expect(
++      ProfileRepository.fieldErrors([
++        'phone:INVALID',
++        'allergies:MAX_ITEMS',
++        'address:REQUIRED',
++        'unexpected:REQUIRED',
++        'phone:sensitive text',
++        'birthDate:INVALID:extra',
++      ]),
++      {
++        'phone': 'Revisa el formato de este campo.',
++        'allergies': 'Se permiten hasta 20 elementos.',
++        'address': 'Completa este campo.',
++      },
++    );
++  });
++
++  test(
++    'A late response from an earlier session cannot clear a newer session',
++    () async {
++      final pending = Completer<http.Response>();
++      final api = ApiClient(
++        client: MockClient((r) async {
++          if (r.url.path.endsWith('/auth/login'))
++            return response({
++              'role': 'Patient',
++              'accessToken': 'synthetic',
++              'refreshToken': 'synthetic-refresh',
++            });
++          return pending.future;
++        }),
++      );
++      addTearDown(api.close);
++      await api.login('synthetic@example.invalid', 'synthetic-password');
++      final late = api.request('GET', '/patients/me');
++      await Future<void>.delayed(Duration.zero);
++      api.clearSession();
++      await api.login('another@example.invalid', 'synthetic-password');
++      final rejected = expectLater(
++        late,
++        throwsA(isA<ApiFailure>().having((e) => e.status, 'status', 401)),
++      );
++      pending.complete(http.Response('{}', 401));
++      await rejected;
++      expect(api.authenticated, isTrue);
++    },
++  );
++}
+diff --git a/app/src/test/features/patient_profile/profile_controller_test.dart b/app/src/test/features/patient_profile/profile_controller_test.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/test/features/patient_profile/profile_controller_test.dart
+@@ -0,0 +1,129 @@
++import 'dart:convert';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:http/testing.dart';
++import 'package:telemedicina_app/app/application/patient_controller.dart';
++import 'package:telemedicina_app/core/network/api_client.dart';
++
++void main() {
++  test('Draft survives external refresh, 400, 409 and clears only after explicit reload/logout', () async {
++    var version = 1;
++    var patchStatus = 400;
++    final sentVersions = <int>[];
++    final api = ApiClient(
++      client: MockClient((r) async {
++        dynamic data;
++        final path = r.url.path;
++        if (path.endsWith('/auth/login')) {
++          data = {
++            'role': 'Patient',
++            'accessToken': 'synthetic',
++            'refreshToken': 'synthetic-refresh',
++          };
++        } else if (path.endsWith('/auth/me')) {
++          data = {'role': 'Patient'};
++        } else if (path.endsWith('/patients/me') && r.method == 'PATCH') {
++          sentVersions.add((jsonDecode(r.body) as Map)['version'] as int);
++          return http.Response(
++            jsonEncode({
++              'code': patchStatus == 409
++                  ? 'VERSION_CONFLICT'
++                  : 'INVALID_PROFILE',
++              'detail': 'Solicitud rechazada',
++              'errors': patchStatus == 400 ? ['phone:INVALID'] : <String>[],
++            }),
++            patchStatus,
++          );
++        } else if (path.endsWith('/patients/me')) {
++          data = {
++            'profile': {
++              'firstName': 'Versión $version',
++              'phone': '+18095550100',
++            },
++            'version': version,
++            'declarationMetadata': {},
++            'completeness': {
++              'status': 'Incomplete',
++              'missingFields': ['address'],
++            },
++          };
++        } else if (path.endsWith('/notifications/preferences')) {
++          data = {'emailEnabled': false, 'version': 0};
++        } else {
++          data = <dynamic>[];
++        }
++        return http.Response(jsonEncode({'data': data}), 200);
++      }),
++    );
++    final c = PatientController(api);
++    addTearDown(c.dispose);
++    await c.login('synthetic@example.invalid', 'synthetic-password');
++    c.updateProfileDraft({
++      ...c.profileDraft,
++      'firstName': 'Borrador sintético',
++      'allergies': ['Uno, con coma'],
++    });
++    final revision = c.profileDraftRevision;
++    version = 2;
++    await c.load();
++    expect(c.profileDraft['firstName'], 'Borrador sintético');
++    expect(c.profileDraftVersion, 1);
++    expect(c.profileVersion, 2);
++    expect(c.profileDraftRevision, revision);
++    expect(c.profileChangedElsewhere, isTrue);
++    expect(await c.execute(() => c.saveProfile(c.profileDraft)), isFalse);
++    expect(c.profileErrors['phone'], 'Revisa el formato de este campo.');
++    expect(c.profileDraft['allergies'], ['Uno, con coma']);
++    patchStatus = 409;
++    expect(await c.execute(() => c.saveProfile(c.profileDraft)), isFalse);
++    expect(c.profileConflict, isTrue);
++    expect(sentVersions, [1, 1]);
++    await c.reloadProfile();
++    expect(c.profileDraft['firstName'], 'Versión 2');
++    expect(c.profileDraftVersion, 2);
++    expect(c.profileConflict, isFalse);
++    expect(c.profileDirty, isFalse);
++    await c.logout();
++    expect(c.profile, isNull);
++    expect(c.profileDraft['firstName'], '');
++    expect(c.profileDraft['allergies'], isEmpty);
++    expect(c.declarationMetadata, isEmpty);
++    expect(c.authenticated, isFalse);
++  });
++
++  test('Network failure preserves draft and original version', () async {
++    final api = ApiClient(
++      client: MockClient((r) async {
++        if (r.url.path.endsWith('/auth/login')) {
++          return http.Response(
++            jsonEncode({
++              'data': {
++                'role': 'Patient',
++                'accessToken': 'synthetic',
++                'refreshToken': 'synthetic-refresh',
++              },
++            }),
++            200,
++          );
++        }
++        throw http.ClientException('offline');
++      }),
++    );
++    final c = PatientController(api);
++    addTearDown(c.dispose);
++    await api.login('synthetic@example.invalid', 'synthetic-password');
++    c.profileDraftVersion = 3;
++    final saved = await c.execute(
++      () => c.saveProfile({
++        'phone': 'synthetic-phone',
++        'allergies': ['Uno, dos'],
++      }),
++    );
++    expect(saved, isFalse);
++    expect(c.profileDraft['phone'], 'synthetic-phone');
++    expect(c.profileDraft['allergies'], ['Uno, dos']);
++    expect(c.profileDraftVersion, 3);
++    expect(c.profileDirty, isTrue);
++  });
++}
+diff --git a/app/src/test/features/patient_profile/profile_form_test.dart b/app/src/test/features/patient_profile/profile_form_test.dart
+new file mode 100644
+--- /dev/null
++++ b/app/src/test/features/patient_profile/profile_form_test.dart
+@@ -0,0 +1,138 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:telemedicina_app/core/models/json_map.dart';
++import 'package:telemedicina_app/features/patient_profile/presentation/patient_profile_form.dart';
++
++JsonMap fixture() => {
++  'firstName': 'Paciente',
++  'lastName': 'Sintético',
++  'birthDate': '1990-01-01',
++  'phone': '+18095550100',
++  'address': 'Dirección sintética',
++  'emergencyName': 'Contacto sintético',
++  'emergencyPhone': '+18095550101',
++  'allergies': <String>[],
++  'medications': <String>[],
++  'conditions': <String>[],
++};
++Widget page(Widget child) => MaterialApp(
++  home: Scaffold(body: SingleChildScrollView(child: child)),
++);
++
++void main() {
++  testWidgets(
++    'Individual declarations preserve commas and show unknown dates',
++    (tester) async {
++      JsonMap? saved;
++      await tester.pumpWidget(
++        page(
++          PatientProfileForm(
++            profile: fixture(),
++            version: 1,
++            busy: false,
++            onSave: (body) async {
++              saved = body;
++              return false;
++            },
++          ),
++        ),
++      );
++      expect(
++        find.text('Autodeclarado · Fecha no disponible'),
++        findsNWidgets(3),
++      );
++      expect(find.text('Sin datos registrados'), findsNWidgets(3));
++      await tester.ensureVisible(find.text('Añadir alergias'));
++      await tester.tap(find.text('Añadir alergias'));
++      await tester.pumpAndSettle();
++      final allergy = find.widgetWithText(
++        TextFormField,
++        'Elemento de alergias',
++      );
++      await tester.ensureVisible(allergy);
++      await tester.enterText(allergy, 'Un elemento, con coma');
++      await tester.ensureVisible(find.text('Guardar perfil'));
++      await tester.tap(find.text('Guardar perfil'));
++      await tester.pumpAndSettle();
++      expect(saved?['allergies'], ['Un elemento, con coma']);
++      expect(saved?['medications'], isEmpty);
++    },
++  );
++
++  testWidgets('External rebuild keeps draft; confirmed reload is explicit', (
++    tester,
++  ) async {
++    var reloaded = 0;
++    Widget form(JsonMap data, {int revision = 1}) => page(
++      PatientProfileForm(
++        profile: data,
++        version: revision,
++        busy: false,
++        onSave: (_) async => false,
++        onReload: () async {
++          reloaded++;
++          return true;
++        },
++      ),
++    );
++    await tester.pumpWidget(form(fixture()));
++    await tester.enterText(find.byKey(const ValueKey('firstName')), 'Borrador');
++    await tester.pumpWidget(
++      form({...fixture(), 'firstName': 'Cambio externo'}),
++    );
++    expect(find.text('Borrador'), findsOneWidget);
++    await tester.ensureVisible(find.text('Recargar perfil'));
++    await tester.tap(find.text('Recargar perfil'));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Conservar borrador'));
++    await tester.pumpAndSettle();
++    expect(reloaded, 0);
++    expect(find.text('Borrador'), findsOneWidget);
++    await tester.tap(find.text('Recargar perfil'));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Descartar y recargar'));
++    await tester.pumpAndSettle();
++    expect(reloaded, 1);
++    await tester.pumpWidget(
++      form({...fixture(), 'firstName': 'Perfil recargado'}, revision: 2),
++    );
++    await tester.pumpAndSettle();
++    expect(find.text('Perfil recargado'), findsOneWidget);
++    expect(find.text('Borrador'), findsNothing);
++  });
++
++  testWidgets(
++    'Required fields block submission and profile fits scaled narrow display',
++    (tester) async {
++      var calls = 0;
++      await tester.binding.setSurfaceSize(const Size(390, 844));
++      addTearDown(() => tester.binding.setSurfaceSize(null));
++      await tester.pumpWidget(
++        MaterialApp(
++          home: MediaQuery(
++            data: const MediaQueryData(textScaler: TextScaler.linear(1.5)),
++            child: Scaffold(
++              body: SingleChildScrollView(
++                child: PatientProfileForm(
++                  profile: {...fixture(), 'firstName': ''},
++                  version: 1,
++                  busy: false,
++                  onSave: (_) async {
++                    calls++;
++                    return true;
++                  },
++                ),
++              ),
++            ),
++          ),
++        ),
++      );
++      await tester.ensureVisible(find.text('Guardar perfil'));
++      await tester.tap(find.text('Guardar perfil'));
++      await tester.pumpAndSettle();
++      expect(calls, 0);
++      expect(find.text('Completa este campo.'), findsOneWidget);
++      expect(tester.takeException(), isNull);
++    },
++  );
++}
+diff --git a/app/src/test/features/notifications/notifications_view_test.dart b/app/src/test/features/notifications/notifications_view_test.dart
+--- a/app/src/test/features/notifications/notifications_view_test.dart
++++ b/app/src/test/features/notifications/notifications_view_test.dart
+@@ -28,7 +28,11 @@
+           'userId': 'synthetic-patient',
+           'email': 'synthetic@example.invalid',
+           'role': 'Patient',
+-          'permissions': ['identity.self', 'profile.self', 'notifications.self'],
++          'permissions': [
++            'identity.self',
++            'profile.self',
++            'notifications.self',
++          ],
+           'accountVersion': 1,
+         };
+       } else if (path.endsWith('/notifications/preferences')) {
+@@ -49,6 +53,11 @@
+             'readAt': read ? '2026-11-05T12:05:00Z' : null,
+           },
+         ];
++      } else if (path.endsWith('/patients/me/completeness')) {
++        data = {
++          'status': 'Incomplete',
++          'missingFields': ['firstName'],
++        };
+       } else if (path.endsWith('/patients/me')) {
+         data = null;
+       } else {

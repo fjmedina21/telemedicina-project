@@ -1,0 +1,370 @@
+--- /dev/null
++++ b/portalweb/src/src/features/admission/data/admission-repository.ts
+@@ -0,0 +1,29 @@
++import {api,Item} from "@/shared/api/client";
++export type QueueFilters={from:string;to:string;status:string;coverageStatus:string};
++export type Appointment=Item&{id:string;version:number;startAt:string;endAt:string;status:string;coverageStatus:string;coverageMethod:"Manual";coverageRequiresReview:boolean;coverageValidityReason:string|null};
++export type HistoryEntry={sequence:number;oldStatus:string|null;newStatus:string;oldCoverage:string|null;newCoverage:string;version:number;occurredAt:string};
++export const emptyFilters:QueueFilters={from:"",to:"",status:"",coverageStatus:""};
++export function queuePath(filters:QueueFilters){
++  const query=new URLSearchParams();
++  if(Boolean(filters.from)!==Boolean(filters.to))throw new Error("Indica ambas fechas para consultar el intervalo.");
++  if(filters.from&&filters.to){
++    const from=new Date(filters.from+"-04:00"),to=new Date(filters.to+"-04:00");
++    if(!Number.isFinite(from.getTime())||!Number.isFinite(to.getTime())||to<=from||to.getTime()-from.getTime()>366*86400000)
++      throw new Error("El intervalo debe ser positivo y de hasta 366 días.");
++    query.set("from",from.toISOString());query.set("to",to.toISOString());
++  }
++  if(filters.status)query.set("status",filters.status);
++  if(filters.coverageStatus)query.set("coverageStatus",filters.coverageStatus);
++  return "/admin/work-queue"+(query.size?"?"+query:"");
++}
++export const admissionRepository={
++  list:(filters:QueueFilters)=>api<Appointment[]>(queuePath(filters)),
++  detail:(id:string)=>api<Appointment>("/appointments/"+encodeURIComponent(id)),
++  history:(id:string)=>api<HistoryEntry[]>("/appointments/"+encodeURIComponent(id)+"/history"),
++  review:(id:string,body:{status:string;evidence:string;version:number;validUntil:string|null})=>
++    api("/admin/appointments/"+encodeURIComponent(id)+"/validation","PATCH",body),
++};
++const coverageLabels:Record<string,string>={Approved:"Revisión manual favorable",Denied:"Revisión manual desfavorable",Expired:"Revisión manual vencida",ManualReview:"En revisión manual",Pending:"Revisión pendiente"};
++export const coverageLabel=(value:unknown)=>coverageLabels[String(value)]??String(value??"Sin revisión");
++const validityLabels:Record<string,string>={MissingValidity:"Falta vigencia de la revisión.",Expired:"La revisión manual venció; requiere nueva revisión.",OutsideAppointment:"La vigencia no cubre el final de la cita."};
++export const validityLabel=(reason:string|null)=>validityLabels[reason??""]??"";
+--- a/portalweb/src/src/features/admission/components/admission-queue.tsx
++++ b/portalweb/src/src/features/admission/components/admission-queue.tsx
+@@ -1,63 +1,120 @@
+ "use client";
+ import {useEffect,useRef,useState} from "react";
+-import {ClipboardList} from "lucide-react";
+ import StatusBadge from "@/shared/components/status-badge";
+-import {api,Item} from "@/shared/api/client";
++import {ApiError,StaleResponse} from "@/shared/api/client";
+ import {localTime} from "@/shared/formatting/date-time";
+-import type {OperationRunner} from "@/shared/api/operation";
++import {admissionRepository,coverageLabel,emptyFilters,validityLabel,type Appointment,type HistoryEntry,type QueueFilters} from "../data/admission-repository";
+ 
+-type Props={items:Item[];busy:boolean;run:OperationRunner;onRefresh:()=>Promise<void>};
+-export default function AdmissionQueue({items,busy,run,onRefresh:load}:Props){
+-  const [selectedAppointment,setSelected]=useState<Item|null>(null);
+-  const selected=selectedAppointment;
+-  const [evidence,setEvidence]=useState(""),[until,setUntil]=useState("");
+-  const [query,setQuery]=useState(""),[statusFilter,setStatusFilter]=useState("");
++const appointmentStates=[["PendingValidation","Pendiente"],["Confirmed","Confirmada"],["Cancelled","Cancelada"],["Rejected","Rechazada"]];
++const coverageStates=["Pending","ManualReview","Approved","Denied","Expired"];
++const editable=(a:Appointment)=>["PendingValidation","Confirmed"].includes(a.status)&&new Date(a.startAt).getTime()>Date.now();
++const localInput=(value:unknown)=>value?new Date(new Date(String(value)).getTime()-4*3600000).toISOString().slice(0,16):"";
++
++export default function AdmissionQueue(){
++  const [items,setItems]=useState<Appointment[]>([]),[filters,setFilters]=useState<QueueFilters>({...emptyFilters});
++  const [queried,setQueried]=useState(false),[loading,setLoading]=useState(false),[working,setWorking]=useState(false),[error,setError]=useState("");
++  const [selected,setSelected]=useState<Appointment|null>(null),[history,setHistory]=useState<HistoryEntry[]>([]);
++  const [evidence,setEvidence]=useState(""),[until,setUntil]=useState(""),[dirty,setDirty]=useState(false),[conflict,setConflict]=useState(false);
++  const alive=useRef(true),epoch=useRef(0),listSequence=useRef(0),detailSequence=useRef(0),sending=useRef(false);
+   const evidenceRef=useRef<HTMLInputElement>(null);
+-  useEffect(()=>{if(selected) evidenceRef.current?.focus();},[selected]);
+-  const visible=items.filter(item=>(!statusFilter||item.status===statusFilter)&&
+-    [item.patientEmail,item.serviceName,item.practitionerName].some(value=>String(value??"").toLocaleLowerCase("es").includes(query.toLocaleLowerCase("es"))));
+-  return <><section className="surface" aria-label="Solicitudes de cita">
+-    <div className="panel-toolbar"><div><h2>Solicitudes de cita</h2><p>{visible.length} de {items.length} citas cargadas</p></div>
+-      <div className="table-filters"><label className="sr-only" htmlFor="queue-search">Buscar citas</label><input id="queue-search" type="search" placeholder="Paciente, servicio o profesional" value={query} onChange={e=>setQuery(e.target.value)}/>
+-        <select aria-label="Filtrar por estado" value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option value="">Todos los estados</option><option value="PendingValidation">Pendientes</option><option value="Confirmed">Confirmadas</option><option value="Cancelled">Canceladas</option><option value="Rejected">Rechazadas</option></select></div>
+-    </div>
+-    {visible.length===0?<div className="empty-state"><ClipboardList size={28} aria-hidden="true"/><strong>{items.length===0?"No hay citas registradas.":"No hay coincidencias."}</strong><p>{items.length===0?"Las nuevas solicitudes aparecerán aquí.":"Prueba con otro filtro o término de búsqueda."}</p></div>:
+-      <><div className="admission-desktop overflow-x-auto"><table className="data-table">
+-        <thead><tr>{["Paciente","Servicio / profesional","Fecha","Cita","Cobertura","Acción"].map(t=><th key={t} className="p-2">{t}</th>)}</tr></thead>
+-        <tbody>{visible.map(a=><tr key={String(a.id)} className="border-t">
+-          <td className="max-w-xs break-words p-2 align-top">{String(a.patientEmail)}</td><td className="p-2 align-top"><span className="cell-primary">{String(a.serviceName)}</span><span className="cell-secondary">{String(a.practitionerName)}</span></td>
+-          <td className="p-2 align-top">{localTime(a.startAt)}</td><td className="p-2 align-top"><StatusBadge value={a.status}/></td><td className="p-2 align-top"><StatusBadge value={a.coverageStatus}/></td>
+-          <td className="p-2 align-top"><button className="button-secondary" disabled={busy || !["PendingValidation","Confirmed"].includes(String(a.status))}
+-            onClick={()=>{setSelected(a);setEvidence("");setUntil("");}}>Revisar</button></td>
+-        </tr>)}</tbody>
+-      </table></div><div className="admission-mobile">{visible.map(a=><article key={String(a.id)} className="appointment-mobile-card">
+-        <span className="cell-secondary">Paciente</span><p className="cell-primary">{String(a.patientEmail)}</p>
+-        <h3>{String(a.serviceName)}</h3><p className="cell-secondary">{String(a.practitionerName)}</p>
+-        <p className="appointment-date">{localTime(a.startAt)}</p>
+-        <div className="mobile-statuses"><div><span className="cell-secondary">Cita</span><StatusBadge value={a.status}/></div><div><span className="cell-secondary">Cobertura</span><StatusBadge value={a.coverageStatus}/></div></div>
+-        <button className="button-secondary" disabled={busy||!["PendingValidation","Confirmed"].includes(String(a.status))}
+-          onClick={()=>{setSelected(a);setEvidence("");setUntil("");}}>Revisar</button>
+-      </article>)}</div></>}</section>
+-      {selected && <form className="space-y-3 rounded-xl border bg-white p-5" onSubmit={e=>e.preventDefault()}>
+-        <h2 className="font-bold">Revisión manual · {String(selected.patientEmail)}</h2>
+-        <p>Aseguradora: {String(selected.insurer)} · Afiliación: ****{String(selected.memberLast4)}</p>
+-        <label className="block">Referencia de evidencia (sin texto clínico)
+-          <input ref={evidenceRef} className="block w-full rounded border p-2" required maxLength={250} value={evidence}
+-            onChange={e=>setEvidence(e.target.value)}/></label>
+-        <label className="block">Vigencia hasta (hora de Santo Domingo)
+-          <input className="block rounded border p-2" type="datetime-local" value={until}
+-            onChange={e=>setUntil(e.target.value)}/></label>
+-        <p>Una aprobación requiere evidencia y vigencia que cubra la cita. Una denegación no autoriza atención particular.</p>
+-        <div className="flex flex-wrap gap-3">{[
+-          ["ManualReview","Mantener en revisión"],["Approved","Aprobar cobertura y confirmar"],["Denied","Denegar cobertura"]
+-        ].map(([status,label])=><button key={status} disabled={busy||!evidence.trim()||(status==="Approved"&&!until)}
+-          className={status==="Approved"?"button-primary":status==="Denied"?"button-danger":"button-secondary"}
+-          onClick={()=>run(async()=>{
+-            await api("/admin/appointments/"+selected.id+"/validation","PATCH",{
+-              status,evidence,version:selected.version,validUntil:until?new Date(until+"-04:00").toISOString():null
+-            });
+-            setSelected(null); await load();
+-          })}>{label}</button>)}</div>
+-        <button onClick={()=>setSelected(null)} className="underline">Cerrar</button>
+-      </form>}</>;
++  const current=(generation:number)=>alive.current&&epoch.current===generation;
++  const failure=(reason:unknown)=>{if(!(reason instanceof StaleResponse))setError(reason instanceof Error?reason.message:"Error de conexión.");};
++  async function loadQueue(snapshot:QueueFilters){
++    const generation=epoch.current,request=++listSequence.current;
++    setLoading(true);setError("");
++    try{
++      const data=await admissionRepository.list(snapshot);
++      if(current(generation)&&request===listSequence.current){setItems(data);setQueried(true);}
++    }catch(reason){if(current(generation)&&request===listSequence.current)failure(reason);}
++    finally{if(current(generation)&&request===listSequence.current)setLoading(false);}
++  }
++  useEffect(()=>{
++    alive.current=true;void loadQueue({...emptyFilters});
++    return ()=>{alive.current=false;epoch.current++;listSequence.current++;detailSequence.current++;};
++    // The authenticated parent remounts this feature on session changes.
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  },[]);
++  useEffect(()=>{if(selected)evidenceRef.current?.focus();},[selected]);
++  function changeFilter(key:keyof QueueFilters,value:string){
++    listSequence.current++;setLoading(false);setQueried(false);setItems([]);setFilters(old=>({...old,[key]:value}));
++  }
++  function discard(message="¿Descartar el borrador de revisión para abrir otra cita?"){
++    return !dirty||window.confirm(message);
++  }
++  async function open(id:string,force=false){
++    if(sending.current||working)return;
++    if(force?!window.confirm("¿Descartar el borrador y cargar la versión actual de esta cita?"):!discard())return;
++    const generation=epoch.current,request=++detailSequence.current;
++    setWorking(true);setError("");
++    try{
++      const [detail,events]=await Promise.all([admissionRepository.detail(id),admissionRepository.history(id)]);
++      if(!current(generation)||request!==detailSequence.current)return;
++      setSelected({...detail});setHistory(events);setEvidence(String(detail.evidence??""));setUntil(localInput(detail.validUntil));
++      setDirty(false);setConflict(false);
++    }catch(reason){if(current(generation)&&request===detailSequence.current)failure(reason);}
++    finally{if(current(generation)&&request===detailSequence.current)setWorking(false);}
++  }
++  function close(){
++    if(working||!discard("¿Descartar el borrador de revisión y cerrar la cita?"))return;
++    detailSequence.current++;setSelected(null);setHistory([]);setEvidence("");setUntil("");setDirty(false);setConflict(false);
++  }
++  async function review(status:string){
++    if(!selected||sending.current||working||conflict||!editable(selected))return;
++    const generation=epoch.current,base={...selected},draft=evidence;
++    sending.current=true;setWorking(true);setError("");
++    try{
++      const validUntil=status==="Approved"&&until?new Date(until+"-04:00").toISOString():null;
++      await admissionRepository.review(base.id,{status,evidence:draft,validUntil,version:base.version});
++      if(!current(generation))return;
++      setSelected(null);setHistory([]);setEvidence("");setUntil("");setDirty(false);setConflict(false);
++      await loadQueue({...filters});
++    }catch(reason){
++      if(current(generation)){
++        failure(reason);
++        if(reason instanceof ApiError&&(reason.status===409||reason.status>=500))setConflict(true);
++      }
++    }finally{sending.current=false;if(current(generation))setWorking(false);}
++  }
++  return <div className="space-y-6" aria-busy={loading||working}>
++    {error&&<p role="alert" className="notice error-notice">{error} Tu borrador se conserva.</p>}
++    <section className="surface" aria-label="Solicitudes de cita">
++      <h2>Solicitudes de cita</h2><p>Hasta 200 citas por consulta. Acota fechas y estados para consultar más resultados.</p>
++      <form className="table-filters" onSubmit={event=>{event.preventDefault();void loadQueue({...filters});}}>
++        <label>Desde (hora de Santo Domingo)<input disabled={working} type="datetime-local" value={filters.from} onChange={e=>changeFilter("from",e.target.value)}/></label>
++        <label>Hasta (hora de Santo Domingo)<input disabled={working} type="datetime-local" value={filters.to} onChange={e=>changeFilter("to",e.target.value)}/></label>
++        <label>Estado de cita<select disabled={working} value={filters.status} onChange={e=>changeFilter("status",e.target.value)}><option value="">Todas las citas</option>{appointmentStates.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
++        <label>Estado de revisión manual<select disabled={working} value={filters.coverageStatus} onChange={e=>changeFilter("coverageStatus",e.target.value)}><option value="">Todas las revisiones</option>{coverageStates.map(value=><option key={value} value={value}>{coverageLabel(value)}</option>)}</select></label>
++        <button className="button-secondary" disabled={loading||working}>Consultar citas</button>
++      </form>
++      {loading?<p role="status">Consultando citas…</p>:!queried?<p>Consulta los filtros seleccionados.</p>:!items.length?<p>No hay citas que coincidan con estos filtros.</p>:
++      <div className="overflow-x-auto"><table className="data-table" aria-label="Cola de admisión">
++        <thead><tr>{["Paciente","Servicio / profesional","Fecha","Cita","Revisión manual","Acción"].map(label=><th key={label}>{label}</th>)}</tr></thead>
++        <tbody>{items.map(a=><tr key={a.id} data-appointment-id={a.id}>
++          <td>{String(a.patientEmail??"")}</td><td>{String(a.serviceName??"")}<br/>{String(a.practitionerName??"")}</td>
++          <td>{localTime(a.startAt)}</td><td><StatusBadge value={a.status}/></td>
++          <td>{coverageLabel(a.coverageStatus)}{a.coverageRequiresReview&&<span className="cell-secondary">Requiere revisión</span>}</td>
++          <td><button className="button-secondary" disabled={working} onClick={()=>void open(a.id)}>Ver detalle y revisar</button></td>
++        </tr>)}</tbody></table></div>}
++    </section>
++    {selected&&<section className="surface space-y-3" aria-label="Detalle de cita">
++      <h2>Detalle de cita · {String(selected.patientEmail??"")}</h2>
++      <p>{String(selected.serviceName??"")} · {String(selected.practitionerName??"")} · {localTime(selected.startAt)}</p>
++      <p>Estado de cita: <StatusBadge value={selected.status}/></p>
++      <p>Revisión de cobertura: {coverageLabel(selected.coverageStatus)}. Método: manual.</p>
++      {validityLabel(selected.coverageValidityReason)&&<p>{validityLabel(selected.coverageValidityReason)}</p>}
++      <p>El estado de la cita y la revisión de cobertura son independientes. Una revisión vencida requiere nueva gestión administrativa.</p>
++      <p>Aseguradora: {String(selected.insurer??"")} · Afiliación: ****{String(selected.memberLast4??"")}</p>
++      {Boolean(selected.reviewedAt)&&<p>Última revisión: {localTime(selected.reviewedAt)}</p>}
++      <h3>Historial de cita</h3>
++      {!history.length?<p>No hay eventos disponibles.</p>:<ol aria-label="Historial de cita">{history.map(h=><li key={h.sequence}>{localTime(h.occurredAt)} · Cita: <StatusBadge value={h.newStatus}/> · {coverageLabel(h.newCoverage)} · Versión {h.version}</li>)}</ol>}
++      {editable(selected)?<form className="space-y-3" aria-label="Revisión manual" onSubmit={event=>event.preventDefault()}>
++        <label className="block">Referencia de evidencia (sin texto clínico)<input ref={evidenceRef} className="block w-full rounded border p-2" required maxLength={250} value={evidence} disabled={working} onChange={e=>{setEvidence(e.target.value);setDirty(true);}}/></label>
++        <label className="block">Vigencia hasta (hora de Santo Domingo)<input type="datetime-local" value={until} disabled={working} onChange={e=>{setUntil(e.target.value);setDirty(true);}}/></label>
++        <p>La revisión manual favorable exige evidencia y vigencia hasta el final de la cita. No constituye una autorización recibida de ARS ni determina copago. La revisión desfavorable no autoriza atención particular.</p>
++        {conflict&&<p role="status">Comprueba la versión actual antes de volver a registrar una revisión.</p>}
++        <div className="flex flex-wrap gap-3">{[["ManualReview","Mantener en revisión"],["Approved","Registrar revisión favorable y confirmar cita"],["Denied","Registrar revisión desfavorable"]].map(([status,label])=><button key={status} type="button" className="button-secondary" disabled={working||conflict||!evidence.trim()||(status==="Approved"&&!until)} onClick={()=>void review(status)}>{label}</button>)}</div>
++      </form>:<p>Esta cita ya no admite cambios de revisión.</p>}
++      <div className="flex flex-wrap gap-3"><button className="button-secondary" disabled={working} onClick={()=>void open(selected.id,true)}>Recargar cita y descartar borrador</button><button className="button-secondary" disabled={working} onClick={close}>Cerrar detalle</button></div>
++    </section>}
++  </div>;
+ }
+--- /dev/null
++++ b/portalweb/src/tests/browser/fifth-milestone/admission.spec.ts
+@@ -0,0 +1,86 @@
++import {test,expect,type Page} from "@playwright/test";
++test.skip(process.env.MILESTONE_TEST_SYNTHETIC!=="1","Explicit synthetic H05 checks required");
++const id="50000000-0000-4000-8000-000000000001";
++const start=new Date(Date.now()+3*86400000).toISOString();
++const appointment=(version=1)=>({id,version,startAt:start,endAt:new Date(new Date(start).getTime()+1800000).toISOString(),patientEmail:"synthetic-h05@example.invalid",serviceName:"Servicio sintético H05",practitionerName:"Profesional sintético",insurer:"Seguro sintético",memberLast4:"0000",status:"Confirmed",coverageStatus:"Expired",coverageMethod:"Manual",coverageRequiresReview:true,coverageValidityReason:"Expired",evidence:null,validUntil:null});
++async function mock(page:Page){
++  await page.route("**/api/backend/**",async route=>{
++    const path=new URL(route.request().url()).pathname;
++    const data=path.endsWith("/auth/me")?{userId:"synthetic-admission",email:"synthetic-admission@example.invalid",role:"Admission",permissions:["admission.manage"],accountVersion:1}:
++      path.includes("/admin/work-queue")?[appointment()]:path.endsWith("/history")?[{sequence:1,newStatus:"Confirmed",newCoverage:"Approved",version:1,occurredAt:new Date().toISOString()}]:
++      path.endsWith("/appointments/"+id)?appointment():{};
++    await route.fulfill({status:200,json:{success:true,status:200,data}});
++  });
++  await page.goto("/admision");
++  await expect(page.getByRole("table",{name:"Cola de admisión"})).toBeVisible();
++}
++test.beforeEach(async({baseURL})=>{expect(baseURL&&["localhost","127.0.0.1","[::1]"].includes(new URL(baseURL).hostname)).toBe(true);});
++test("queue filters go to server and discarded responses cannot restore old results",async({page})=>{
++  await mock(page);
++  let release!:()=>void,ready!:()=>void;
++  const held=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{ready=resolve;});
++  await page.route("**/api/backend/admin/work-queue?**",async route=>{
++    const url=new URL(route.request().url());
++    if(url.searchParams.get("status")==="PendingValidation"){ready();await held;await route.fulfill({json:{data:[{...appointment(),serviceName:"Respuesta abandonada"}]}});}
++    else await route.fulfill({json:{data:[{...appointment(),serviceName:"Resultado actual"}]}});
++  });
++  await page.getByLabel("Estado de cita",{exact:true}).selectOption("PendingValidation");
++  await page.getByRole("button",{name:"Consultar citas",exact:true}).click();await started;
++  await page.getByLabel("Estado de cita",{exact:true}).selectOption("Confirmed");
++  await page.getByLabel("Estado de revisión manual",{exact:true}).selectOption("Expired");
++  await page.getByLabel("Desde (hora de Santo Domingo)",{exact:true}).fill("2040-01-01T00:00");
++  await page.getByLabel("Hasta (hora de Santo Domingo)",{exact:true}).fill("2040-01-03T00:00");
++  const response=page.waitForRequest(request=>request.url().includes("/admin/work-queue?")&&request.url().includes("coverageStatus=Expired"));
++  await page.getByRole("button",{name:"Consultar citas",exact:true}).click();
++  const url=new URL((await response).url());
++  expect(url.searchParams.get("from")).toBe("2040-01-01T04:00:00.000Z");
++  expect(url.searchParams.get("to")).toBe("2040-01-03T04:00:00.000Z");
++  await expect(page.getByRole("table",{name:"Cola de admisión"})).toContainText("Resultado actual");
++  release();
++  await expect(page.getByRole("table",{name:"Cola de admisión"})).not.toContainText("Respuesta abandonada");
++});
++for(const failure of [400,409,"network"] as const)test("review preserves draft on "+failure+" and only confirmed reload replaces base version",async({page})=>{
++  await mock(page);
++  let version=1,sent=0;const versions:number[]=[];
++  await page.route("**/api/backend/appointments/"+id,route=>route.fulfill({json:{data:appointment(version)}}));
++  await page.route("**/api/backend/admin/appointments/"+id+"/validation",async route=>{
++    sent++;versions.push(route.request().postDataJSON().version);
++    if(sent===1){
++      if(failure==="network")await route.abort("failed");
++      else await route.fulfill({status:failure,json:{status:failure,code:failure===409?"INVALID_TRANSITION":"EVIDENCE_REQUIRED",detail:"Rechazo sintético"}});
++    }else await route.fulfill({json:{data:{status:"Confirmed",coverageStatus:"Approved",version:3}}});
++  });
++  await page.getByRole("button",{name:"Ver detalle y revisar",exact:true}).click();
++  await expect(page.getByRole("region",{name:"Detalle de cita"})).toContainText("Revisión manual vencida");
++  const evidence=page.getByLabel("Referencia de evidencia (sin texto clínico)",{exact:true});
++  await evidence.fill("Referencia sintética conservada");
++  const until=page.getByLabel("Vigencia hasta (hora de Santo Domingo)",{exact:true});
++  await until.fill("2040-01-03T00:00");
++  const save=page.getByRole("button",{name:"Registrar revisión favorable y confirmar cita",exact:true});
++  await save.click();await expect(page.getByRole("alert")).toBeVisible();
++  await expect(evidence).toHaveValue("Referencia sintética conservada");await expect(until).toHaveValue("2040-01-03T00:00");
++  expect(versions).toEqual([1]);
++  if(failure!==400)await expect(save).toBeDisabled();
++  version=2;
++  page.once("dialog",dialog=>dialog.dismiss());
++  await page.getByRole("button",{name:"Recargar cita y descartar borrador",exact:true}).click();
++  await expect(evidence).toHaveValue("Referencia sintética conservada");expect(sent).toBe(1);
++  page.once("dialog",dialog=>dialog.accept());
++  await page.getByRole("button",{name:"Recargar cita y descartar borrador",exact:true}).click();
++  await expect(evidence).toHaveValue("");expect(sent).toBe(1);
++  await evidence.fill("Nueva referencia revisada");await until.fill("2040-01-03T00:00");await save.click();
++  await expect(page.getByRole("region",{name:"Detalle de cita"})).toHaveCount(0);
++  expect(versions).toEqual([1,2]);
++});
++test("logout discards a pending detail response and private draft",async({page})=>{
++  await mock(page);
++  let release!:()=>void,ready!:()=>void;
++  const held=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{ready=resolve;});
++  await page.route("**/api/backend/appointments/"+id,async route=>{ready();await held;await route.fulfill({json:{data:appointment()}});});
++  await page.getByRole("button",{name:"Ver detalle y revisar",exact:true}).click();await started;
++  await page.getByRole("button",{name:"Salir",exact:true}).click();
++  await expect(page).toHaveURL(/\/login$/);
++  release();
++  await expect(page.getByRole("region",{name:"Detalle de cita"})).toHaveCount(0);
++  await expect(page.getByText("Referencia sintética conservada",{exact:true})).toHaveCount(0);
++});
+--- /dev/null
++++ b/portalweb/src/playwright.h05.config.ts
+@@ -0,0 +1,8 @@
++import {defineConfig} from "@playwright/test";
++import path from "node:path";
++import base from "./playwright.config";
++const evidence=path.resolve(__dirname,"Tools/proposals/hitos-05/evidencias");
++export default defineConfig({...base,testDir:"./tests/browser/fifth-milestone",
++  outputDir:path.join(evidence,"resultados"),
++  reporter:[["list"],["json",{outputFile:path.join(evidence,"playwright-results.json")}]],
++});
+--- a/portalweb/src/src/shared/components/portal-console.tsx
++++ b/portalweb/src/src/shared/components/portal-console.tsx
+@@ -25,7 +25,7 @@
+       if(!me.permissions?.includes(permission))throw new ApiError(403,"No tiene permiso para acceder a esta sección.");
+       let records:Item[]=[],s:Item[]=[],p:Item[]=[];
+       if(view==="audit")records=await api<Item[]>("/admin/audit-events");
+-      else if(view==="queue")records=await api<Item[]>("/admin/work-queue");
++      else if(view==="queue")records=[];
+       else if(view==="delivery")records=await api<Item[]>("/admin/email-delivery");
+       else [s,p]=await Promise.all([api<Item[]>("/admin/catalog/services"),api<Item[]>("/admin/catalog/practitioners")]);
+       if(!alive.current||epoch!==generation.current||request!==loadSequence.current)return;
+@@ -77,17 +77,12 @@
+         })}><LogOut size={15} aria-hidden="true"/>Salir</button></div>
+     </div>
+     {error&&<p role="alert" className="notice error-notice">{error}</p>}
+-    {view==="queue"&&<div className="stats-grid" aria-label="Resumen de las citas cargadas">{[
+-      ["Por revisar",items.filter(item=>item.status==="PendingValidation").length],
+-      ["Confirmadas",items.filter(item=>item.status==="Confirmed").length],
+-      ["Citas cargadas",items.length],
+-    ].map(([label,count])=><div className="stat-card" key={String(label)}><span>{label}</span><strong>{count}</strong><small>En esta vista</small></div>)}</div>}
+-    <div className="flex justify-end"><button disabled={busy} className="button-secondary" onClick={()=>run(load)}>
+-      <RefreshCw size={15} aria-hidden="true"/>{busy?"Procesando…":"Actualizar"}</button></div>
++    {view!=="queue"&&<div className="flex justify-end"><button disabled={busy} className="button-secondary" onClick={()=>run(load)}>
++      <RefreshCw size={15} aria-hidden="true"/>{busy?"Procesando…":"Actualizar"}</button></div>}
+ 
+     {view==="catalog" && <CatalogPanel services={services} practitioners={practitioners} busy={busy}
+       onSave={async(path,method,body)=>run(async()=>{await api(path,method,body);await load();})}/>}
+-    {view==="queue" && <AdmissionQueue items={items} busy={busy} run={run} onRefresh={load}/>}
++    {view==="queue" && <AdmissionQueue key={user.userId}/>}
+     {view==="audit" && <AuditEvents items={items} busy={busy} run={run} onItemsChange={setItems}/>}
+     {view==="schedule" && <SchedulePanel services={services} practitioners={practitioners} busy={busy}
+       run={run} onMessage={setError}/>}
+--- a/portalweb/src/tests/browser/first-milestone/flow.spec.ts
++++ b/portalweb/src/tests/browser/first-milestone/flow.spec.ts
+@@ -80,17 +80,21 @@
+   expect(created.status()).toBe(201);
+   appointmentId=(await created.json()).data.id;
+   await page.goto("/admision");
++  const localInput=(date:Date)=>new Date(date.getTime()-4*3600000).toISOString().slice(0,16);
++  await page.getByLabel("Desde (hora de Santo Domingo)",{exact:true}).fill(localInput(new Date(new Date(slot.startAt).getTime()-60000)));
++  await page.getByLabel("Hasta (hora de Santo Domingo)",{exact:true}).fill(localInput(new Date(new Date(slot.startAt).getTime()+60000)));
++  await page.getByRole("button",{name:"Consultar citas",exact:true}).click();
+   const row=page.getByRole("row").filter({hasText:patientEmail});
+   await expect(row).toContainText("Pendiente");
+-  await row.getByRole("button",{name:"Revisar",exact:true}).click();
++  await row.getByRole("button",{name:"Ver detalle y revisar",exact:true}).click();
+   await page.getByLabel("Referencia de evidencia (sin texto clínico)").fill("Evidencia sintética de Playwright");
+   const valid=new Date(new Date(slot.endAt).getTime()+2*3600000-4*3600000).toISOString().slice(0,16);
+   await page.getByLabel("Vigencia hasta (hora de Santo Domingo)").fill(valid);
+   const reviewed=page.waitForResponse(r=>r.url().includes("/validation")&&r.request().method()==="PATCH");
+-  await page.getByRole("button",{name:"Aprobar cobertura y confirmar",exact:true}).click();
++  await page.getByRole("button",{name:"Registrar revisión favorable y confirmar cita",exact:true}).click();
+   expect((await reviewed).status()).toBe(200);
+   await expect(row).toContainText("Confirmada");
+-  await expect(row).toContainText("Aprobada");
++  await expect(row).toContainText("Revisión manual favorable");
+   const persisted=(await (await patient.get("/api/backend/appointments/"+appointmentId)).json()).data;
+   expect(persisted.status).toBe("Confirmed");
+   expect(persisted.coverageStatus).toBe("Approved");

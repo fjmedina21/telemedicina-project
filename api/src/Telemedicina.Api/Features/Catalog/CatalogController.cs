@@ -76,18 +76,25 @@ public sealed class CatalogController(Database database) : ApiControllerBase(dat
     public IActionResult UpdatePractitioner(Guid id, CatalogPractitionerRequest request) => SavePractitioner(id.ToString(), request);
     private IActionResult SavePractitioner(string? id, CatalogPractitionerRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.Name) || request.ServiceIds is null || request.ServiceIds.Any(x => !Guid.TryParse(x, out _)))
+        if (string.IsNullOrWhiteSpace(request.Name) || request.ServiceIds is null || request.ServiceIds.Any(x => !Guid.TryParse(x, out var parsed) || parsed == Guid.Empty))
             return Fail(400, "CATALOG_VALIDATION", "Revise nombre y servicios asignados.");
         var ids = request.ServiceIds.Select(x => Guid.Parse(x).ToString()).Distinct().ToArray();
         using var c = Database.Open(); using var t = Begin(c);
+        var created = id is null; id ??= Guid.NewGuid().ToString(); var version = 1;
+        var observedVersion = created ? null : Scalar(c, t, "SELECT version FROM practitioners WHERE id=@id", ("id", id));
+        if (!created && observedVersion is null) return NotFound();
+        string[] Links() => Rows(c, t, "SELECT service_id FROM practitioner_services WHERE practitioner_id=@id ORDER BY service_id", ("id", id))
+            .Select(row => (string)row["service_id"]!).ToArray();
+        var observedLinks = created ? Array.Empty<string>() : Links();
+        OfferPolicy.LockServices(c, t, ids.Concat(observedLinks));
         if (Convert.ToInt64(Scalar(c, t, "SELECT count(*) FROM services WHERE id=ANY(@ids)", ("ids", ids))) != ids.Length)
             return Fail(400, "UNKNOWN_SERVICE", "Uno de los servicios no existe.");
-        var created = id is null; id ??= Guid.NewGuid().ToString(); var version = 1;
         if (!created)
         {
             var old = Scalar(c, t, "SELECT version FROM practitioners WHERE id=@id FOR UPDATE", ("id", id));
             if (old is null) return NotFound();
-            if ((int)old != request.Version) return Fail(409, "VERSION_CONFLICT", "El profesional cambió. Actualice la lista.");
+            if ((int)old != request.Version || !Equals(old, observedVersion) || !observedLinks.SequenceEqual(Links(), StringComparer.Ordinal))
+                return Fail(409, "VERSION_CONFLICT", "El profesional cambió. Actualice la lista.");
             version = request.Version + 1;
             Execute(c, t, "UPDATE practitioners SET name=@name,license_ref=@license,active=@active,version=@version WHERE id=@id",
                 ("name", request.Name.Trim()), ("license", request.LicenseRef?.Trim()), ("active", request.Active), ("version", version), ("id", id));

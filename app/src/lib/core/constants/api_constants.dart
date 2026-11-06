@@ -1,7 +1,7 @@
 class ApiConstants {
   ApiConstants._();
 
-  // Para Android Emulator se usa 10.0.2.2; para iOS Simulator o macOS Desktop localhost
+  // Android Emulator usa 10.0.2.2; iOS Simulator puede usar localhost.
   static const String baseUrl = 'http://127.0.0.1:5000/api/v1';
   static const String healthEndpoint = '/health';
   static const String authLogin = '/auth/login';

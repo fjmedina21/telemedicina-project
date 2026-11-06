@@ -1,0 +1,702 @@
+diff --git a/portalweb/src/src/features/scheduling/data/schedule-repository.ts b/portalweb/src/src/features/scheduling/data/schedule-repository.ts
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/src/features/scheduling/data/schedule-repository.ts
+@@ -0,0 +1,41 @@
++import {api,ApiError} from "@/shared/api/client";
++
++export type ScheduleSlot={
++  id:string;serviceId:string;serviceName:string;practitionerId:string;practitionerName:string;
++  startAt:string;endAt:string;blocked:boolean;reserved:boolean;version:number;
++  serviceActive:boolean;practitionerActive:boolean;assignmentActive:boolean;servicePublishable:boolean;
++};
++export type SchedulePage={items:ScheduleSlot[];totalCount:number;offset:number;limit:number;hasMore:boolean};
++export type BooleanFilter=""|"true"|"false";
++export type ScheduleFilters={serviceId:string;practitionerId:string;from:string;to:string;
++  blocked:BooleanFilter;reserved:BooleanFilter;limit:number};
++export function santoDomingoInput(value:Date){
++  return new Date(value.getTime()-4*3600000).toISOString().slice(0,16);
++}
++export function scheduleInstant(value:string){
++  if(!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value))
++    throw new ApiError(400,"Indique fecha y hora válidas de Santo Domingo.");
++  const date=new Date(value+"-04:00");
++  if(!Number.isFinite(date.getTime())||santoDomingoInput(date)!==value)
++    throw new ApiError(400,"Indique fecha y hora válidas de Santo Domingo.");
++  return date.toISOString();
++}
++export function scheduleQuery(filters:ScheduleFilters,offset:number){
++  const from=scheduleInstant(filters.from),to=scheduleInstant(filters.to);
++  const span=Date.parse(to)-Date.parse(from);
++  if(span<=0||span>31*24*3600000)
++    throw new ApiError(400,"El rango debe ser positivo y no superar 31 días.");
++  const query=new URLSearchParams({from,to,offset:String(offset),limit:String(filters.limit)});
++  if(filters.serviceId)query.set("serviceId",filters.serviceId);
++  if(filters.practitionerId)query.set("practitionerId",filters.practitionerId);
++  if(filters.blocked!=="")query.set("blocked",filters.blocked);
++  if(filters.reserved!=="")query.set("reserved",filters.reserved);
++  return query;
++}
++export const scheduleRepository={
++  list:(filters:ScheduleFilters,offset=0)=>api<SchedulePage>("/admin/slots?"+scheduleQuery(filters,offset)),
++  create:(serviceId:string,practitionerId:string,start:string)=>api<{id:string;version:number}>(
++    "/admin/slots","POST",{serviceId,practitionerId,startAt:scheduleInstant(start)}),
++  block:(slot:ScheduleSlot)=>api<{blocked:boolean;version:number}>(
++    "/admin/slots/"+slot.id+"/block","PATCH",{blocked:!slot.blocked,version:slot.version}),
++};
+diff --git a/portalweb/src/src/features/scheduling/components/schedule-panel.tsx b/portalweb/src/src/features/scheduling/components/schedule-panel.tsx
+--- a/portalweb/src/src/features/scheduling/components/schedule-panel.tsx
++++ b/portalweb/src/src/features/scheduling/components/schedule-panel.tsx
+@@ -1,40 +1,223 @@
+ "use client";
+-import {useEffect,useState} from "react";
+-import {api,Item} from "@/shared/api/client";
++import {useEffect,useRef,useState} from "react";
++import {ApiError,Item,StaleResponse} from "@/shared/api/client";
+ import {localTime} from "@/shared/formatting/date-time";
+ import type {OperationRunner} from "@/shared/api/operation";
++import {scheduleRepository,santoDomingoInput,scheduleInstant,type BooleanFilter,type ScheduleFilters,
++  type SchedulePage,type ScheduleSlot} from "../data/schedule-repository";
+ 
+ type Props={services:Item[];practitioners:Item[];busy:boolean;run:OperationRunner;onMessage:(message:string)=>void};
+-export default function SchedulePanel({services,practitioners,busy,run,onMessage:setError}:Props){
++const emptyPage:SchedulePage={items:[],totalCount:0,offset:0,limit:100,hasMore:false};
++function publicService(service:Item){
++  return service.active===true&&(service.isSynthetic===true||String(service.approvalReference??"").trim()!=="");
++}
++function assigned(person:Item,serviceId:string){
++  return person.active===true&&Array.isArray(person.serviceIds)&&person.serviceIds.includes(serviceId);
++}
++export default function SchedulePanel({services,practitioners,busy,run,onMessage}:Props){
+   const [service,setService]=useState(""),[practitioner,setPractitioner]=useState(""),[start,setStart]=useState("");
+-  const [slots,setSlots]=useState<Item[]>([]);
++  const [from,setFrom]=useState(()=>santoDomingoInput(new Date()));
++  const [to,setTo]=useState(()=>santoDomingoInput(new Date(Date.now()+14*24*3600000)));
++  const [blocked,setBlocked]=useState<BooleanFilter>(""),[reserved,setReserved]=useState<BooleanFilter>("");
++  const [limit,setLimit]=useState(100),[page,setPage]=useState<SchedulePage>(emptyPage);
++  const [loaded,setLoaded]=useState(false),[conflict,setConflict]=useState(false);
++  const [message,setMessage]=useState(""),[mutating,setMutating]=useState(false);
++  const [uncertain,setUncertain]=useState<{
++    serviceId:string;practitionerId:string;start:string;
++  }|null>(null);
++  const alive=useRef(true),session=useRef(0),revision=useRef(0),initialized=useRef(false);
++  const chosenService=services.find(s=>String(s.id)===service);
++  const people=service?practitioners.filter(p=>assigned(p,service)):[];
++  const canCreate=Boolean(chosenService&&publicService(chosenService)&&people.some(p=>String(p.id)===practitioner));
++  function invalidate(){
++    revision.current++;setPage(emptyPage);setLoaded(false);setConflict(false);setMessage("");
++  }
+   useEffect(()=>{
+-    setService(current=>current||String(services[0]?.id??""));
+-    setPractitioner(current=>current||String(practitioners[0]?.id??""));
+-  },[services,practitioners]);
+-  return (<div className="space-y-3 rounded-xl border bg-white p-5">
+-      <label className="block">Servicio<select className="ml-2 rounded border p-2" value={service}
+-        onChange={e=>{setService(e.target.value);setSlots([]);}}>
+-        {services.map(s=><option key={String(s.id)} value={String(s.id)}>{String(s.name)}</option>)}</select></label>
+-      <label className="block">Profesional<select className="ml-2 rounded border p-2" value={practitioner}
+-        onChange={e=>{setPractitioner(e.target.value);setSlots([]);}}>
+-        {practitioners.map(p=><option key={String(p.id)} value={String(p.id)}>{String(p.name)}</option>)}</select></label>
+-      <label className="block">Inicio (hora de Santo Domingo)<input className="ml-2 rounded border p-2"
+-        type="datetime-local" value={start} onChange={e=>setStart(e.target.value)}/></label>
+-      <button disabled={busy||!start||!service||!practitioner} className="rounded border p-2"
+-        onClick={()=>run(async()=>{
+-          await api("/admin/slots","POST",{serviceId:service,practitionerId:practitioner,
+-            startAt:new Date(start+"-04:00").toISOString()}); setStart("");setError("Horario creado.");
+-        })}>Crear horario</button>
+-      <button disabled={busy||!service||!practitioner} className="ml-2 rounded border p-2"
+-        onClick={()=>run(async()=>setSlots(await api<Item[]>(
+-          "/availability?serviceId="+service+"&practitionerId="+practitioner)))}>Consultar horarios libres</button>
+-      {slots.map(s=><div key={String(s.id)} className="flex justify-between rounded border p-2">
+-        {localTime(s.startAt)}
+-        <button disabled={busy} className="underline" onClick={()=>run(async()=>{
+-          await api("/admin/slots/"+s.id+"/block","PATCH",{blocked:true});
+-          setSlots(current=>current.filter(slot=>slot.id!==s.id));
+-        })}>Bloquear</button>
+-      </div>)}
+-    </div>);
++    alive.current=true;
++    const clear=()=>{
++      session.current++;revision.current++;setPage(emptyPage);setLoaded(false);setConflict(false);
++      setService("");setPractitioner("");setStart("");setMessage("");setUncertain(null);
++    };
++    window.addEventListener("tm-session-invalidated",clear);
++    return ()=>{alive.current=false;session.current++;revision.current++;window.removeEventListener("tm-session-invalidated",clear);};
++  },[]);
++  useEffect(()=>{
++    if(!initialized.current&&services.length){
++      initialized.current=true;
++      const first=services.find(publicService);
++      const id=first?String(first.id):"";
++      setService(id);setPractitioner(String(practitioners.find(p=>assigned(p,id))?.id??""));
++      invalidate();return;
++    }
++    if(service&&!services.some(s=>String(s.id)===service)){
++      setService("");setPractitioner("");invalidate();
++    }else if(practitioner&&!practitioners.some(p=>String(p.id)===practitioner&&assigned(p,service))){
++      setPractitioner("");invalidate();
++    }
++  },[services,practitioners,service,practitioner]);
++  const filters:ScheduleFilters={serviceId:service,practitionerId:practitioner,from,to,blocked,reserved,limit};
++  function current(s:number,r:number){return alive.current&&s===session.current&&r===revision.current;}
++  async function fetchPage(offset:number,s=session.current,r=revision.current){
++    const result=await scheduleRepository.list(filters,offset);
++    if(!current(s,r))return;
++    setPage(result);setLoaded(true);setConflict(false);
++  }
++  async function consult(offset=0){
++    const s=session.current,r=revision.current;
++    await run(async()=>{
++      try{await fetchPage(offset,s,r);}
++      catch(error){if(current(s,r)&&!(error instanceof StaleResponse))throw error;}
++    });
++  }
++  async function create(){
++    if(!canCreate||!start||mutating||uncertain)return;
++    const s=session.current,r=revision.current,sent=start;
++    const intention={serviceId:service,practitionerId:practitioner,start:sent};
++    await run(async()=>{
++      setMutating(true);
++      let confirmed=false;
++      try{
++        await scheduleRepository.create(service,practitioner,sent);
++        confirmed=true;
++        if(!current(s,r))return;
++        setStart(value=>value===sent?"":value);setMessage("Horario creado.");onMessage("");
++        setLoaded(false);setPage(emptyPage);await fetchPage(0,s,r);
++      }catch(error){
++        if(!current(s,r)||error instanceof StaleResponse)return;
++        if(!confirmed&&(!(error instanceof ApiError)||error.status>=500||
++            (error.status>=200&&error.status<300))){
++          setUncertain(intention);
++          setMessage("No se pudo confirmar la creación. Comprueba el horario antes de repetirla.");
++        }
++        if(error instanceof ApiError&&error.status===409)setConflict(true);
++        throw error;
++      }finally{if(alive.current)setMutating(false);}
++    });
++  }
++  async function reconcileCreation(){
++    const pending=uncertain,s=session.current;
++    if(!pending)return;
++    await run(async()=>{
++      try{
++        const instant=scheduleInstant(pending.start);
++        const result=await scheduleRepository.list({
++          serviceId:pending.serviceId,practitionerId:pending.practitionerId,
++          from:pending.start,
++          to:santoDomingoInput(new Date(Date.parse(instant)+60000)),
++          blocked:"",reserved:"",limit:100
++        });
++        if(!alive.current||s!==session.current)return;
++        const found=result.items.some(slot=>
++          slot.serviceId===pending.serviceId&&
++          slot.practitionerId===pending.practitionerId&&
++          Date.parse(slot.startAt)===Date.parse(instant));
++        setUncertain(value=>value===pending?null:value);
++        if(found){
++          setStart(value=>value===pending.start?"":value);
++          setMessage("La consulta confirma que el horario ya existe. No repitas la creación.");
++        }else{
++          setMessage("La consulta no encontró el horario. Puedes revisar el formulario y volver a crear.");
++        }
++        onMessage("");
++      }catch(error){
++        if(!alive.current||s!==session.current||error instanceof StaleResponse)return;
++        throw error;
++      }
++    });
++  }
++  async function toggle(slot:ScheduleSlot){
++    const s=session.current,r=revision.current;
++    await run(async()=>{
++      setMutating(true);
++      try{
++        await scheduleRepository.block(slot);
++        if(!current(s,r))return;
++        setMessage(slot.blocked?"Horario desbloqueado.":"Horario bloqueado.");onMessage("");
++        setLoaded(false);setPage(emptyPage);await fetchPage(page.offset,s,r);
++      }catch(error){
++        if(!current(s,r)||error instanceof StaleResponse)return;
++        if(error instanceof ApiError&&error.status===409)setConflict(true);
++        throw error;
++      }finally{if(alive.current)setMutating(false);}
++    });
++  }
++  return <div className="space-y-5 rounded-xl border bg-white p-5">
++    <p>Agenda manual · Hora de America/Santo_Domingo. La disponibilidad no garantiza una reserva.</p>
++    <div className="grid gap-3 md:grid-cols-2">
++      <label className="block">Servicio<select className="ml-2 max-w-full rounded border p-2" value={service} disabled={mutating}
++        onChange={e=>{setService(e.target.value);setPractitioner("");invalidate();}}>
++        <option value="">Todos los servicios</option>
++        {services.map(s=><option key={String(s.id)} value={String(s.id)}>{String(s.name)}{s.active?"":" · Inactivo"}</option>)}
++      </select></label>
++      <label className="block">Profesional<select className="ml-2 max-w-full rounded border p-2" value={practitioner} disabled={mutating||!service}
++        onChange={e=>{setPractitioner(e.target.value);invalidate();}}>
++        <option value="">Todos los profesionales asociados</option>
++        {people.map(p=><option key={String(p.id)} value={String(p.id)}>{String(p.name)}</option>)}
++      </select></label>
++      <label className="block">Desde (hora de Santo Domingo)<input className="ml-2 rounded border p-2" type="datetime-local"
++        value={from} disabled={mutating} onChange={e=>{setFrom(e.target.value);invalidate();}}/></label>
++      <label className="block">Hasta (hora de Santo Domingo)<input className="ml-2 rounded border p-2" type="datetime-local"
++        value={to} disabled={mutating} onChange={e=>{setTo(e.target.value);invalidate();}}/></label>
++      <label className="block">Bloqueo<select className="ml-2 rounded border p-2" value={blocked} disabled={mutating}
++        onChange={e=>{setBlocked(e.target.value as BooleanFilter);invalidate();}}>
++        <option value="">Todos</option><option value="false">No bloqueados</option><option value="true">Bloqueados</option>
++      </select></label>
++      <label className="block">Reserva<select className="ml-2 rounded border p-2" value={reserved} disabled={mutating}
++        onChange={e=>{setReserved(e.target.value as BooleanFilter);invalidate();}}>
++        <option value="">Todos</option><option value="false">Sin reserva</option><option value="true">Reservados</option>
++      </select></label>
++      <label className="block">Horarios por página<select className="ml-2 rounded border p-2" value={limit} disabled={mutating}
++        onChange={e=>{setLimit(Number(e.target.value));invalidate();}}>
++        <option value={5}>5</option><option value={25}>25</option><option value={100}>100</option>
++      </select></label>
++    </div>
++    <p>Consulta un rango de hasta 31 días. Los horarios reservados se muestran sin datos de pacientes.</p>
++    <button disabled={busy||mutating} className="button-secondary" onClick={()=>consult()}>Consultar horarios</button>
++    {conflict&&<div role="alert" className="space-y-2">
++      <p>El horario cambió o la operación ya no está permitida. Tu formulario se conserva; recarga los horarios antes de continuar.</p>
++      <button className="button-secondary" disabled={busy} onClick={()=>consult(page.offset)}>Recargar horarios</button>
++    </div>}
++    {message&&<p role="status">{message}</p>}
++    {!loaded&&<p role="status">{busy?"Consultando horarios…":"Todavía no se han consultado estos filtros."}</p>}
++    {loaded&&<>
++      <p role="status">{page.totalCount===0?"No hay horarios que coincidan con estos filtros.":
++        `Mostrando ${page.offset+1}–${page.offset+page.items.length} de ${page.totalCount} horarios.`}</p>
++      {page.items.length===0&&page.totalCount>0&&<p>Esta página no contiene horarios. Vuelve a la página anterior.</p>}
++      <div className="overflow-x-auto"><table className="data-table" aria-label="Agenda administrativa">
++        <thead><tr>{["Servicio / profesional","Inicio y fin","Estado","Acción"].map(label=><th key={label}>{label}</th>)}</tr></thead>
++        <tbody>{page.items.map(slot=>{
++          const future=Date.parse(slot.startAt)>Date.now();
++          const offer=slot.servicePublishable&&slot.practitionerActive&&slot.assignmentActive;
++          const allowed=future&&!slot.reserved&&(!slot.blocked||offer);
++          return <tr key={slot.id} data-slot-id={slot.id}>
++            <td><span className="cell-primary">{slot.serviceName}</span><span className="cell-secondary">{slot.practitionerName}</span></td>
++            <td>{localTime(slot.startAt)}<br/>{localTime(slot.endAt)}</td>
++            <td>{slot.reserved?"Reservado":"Sin reserva"} · {slot.blocked?"Bloqueado":"No bloqueado"}
++              {!offer&&<span className="cell-secondary">Oferta no disponible</span>}</td>
++            <td><button className="button-secondary" disabled={busy||conflict||!allowed} onClick={()=>toggle(slot)}>
++              {slot.blocked?"Desbloquear":"Bloquear"}</button></td>
++          </tr>;
++        })}</tbody>
++      </table></div>
++      <div className="flex flex-wrap gap-3" aria-label="Paginación de horarios">
++        <button className="button-secondary" disabled={busy||page.offset===0} onClick={()=>consult(Math.max(0,page.offset-page.limit))}>Página anterior de horarios</button>
++        <button className="button-secondary" disabled={busy||!page.hasMore} onClick={()=>consult(page.offset+page.limit)}>Página siguiente de horarios</button>
++      </div>
++    </>}
++    <section className="space-y-3 border-t pt-4" aria-label="Crear horario manual">
++      <h2 className="text-lg font-bold">Crear horario manual</h2>
++      {services.length===0&&<p>No hay servicios cargados para crear horarios.</p>}
++      {service&&!people.length&&<p>No hay profesionales activos asociados a este servicio.</p>}
++      <label className="block">Inicio (hora de Santo Domingo)<input className="ml-2 rounded border p-2" type="datetime-local"
++        value={start} disabled={mutating} onChange={e=>setStart(e.target.value)}/></label>
++      <button disabled={busy||mutating||Boolean(uncertain)||!start||!canCreate} className="button-primary" onClick={create}>Crear horario</button>
++      {uncertain&&<div role="alert">
++        <p>Hay una creación sin confirmar. El formulario se conserva.</p>
++        <button disabled={busy||mutating} className="button-secondary" onClick={reconcileCreation}>
++          Comprobar creación pendiente
++        </button>
++      </div>}
++      <p>Selecciona un servicio publicable y un profesional asociado. Si la respuesta tarda o falla, consulta los horarios antes de repetir la creación.</p>
++    </section>
++  </div>;
+ }
+diff --git a/portalweb/src/src/shared/api/client.ts b/portalweb/src/src/shared/api/client.ts
+--- a/portalweb/src/src/shared/api/client.ts
++++ b/portalweb/src/src/shared/api/client.ts
+@@ -2,8 +2,15 @@
+ export class ApiError extends Error {
+   constructor(public status: number, message: string, public code?: string) { super(message); }
+ }
++export class StaleResponse extends Error {
++  constructor(){super("La respuesta pertenece a una consulta de sesión anterior.");}
++}
++let sessionGeneration=0;
+ let refreshing: Promise<unknown> | null = null;
+ export async function api<T>(path: string, method = "GET", body?: unknown, retry = true): Promise<T> {
++  // This only guards UI results; browser cookie application remains server-controlled.
++  if(path==="/auth/login"||path==="/auth/logout")sessionGeneration++;
++  const generation=sessionGeneration;
+   let response: Response;
+   try {
+     response = await fetch("/api/backend" + path, {
+@@ -11,18 +18,29 @@
+       headers: {"Content-Type":"application/json","X-Telemedicina-Client":"milestone","X-Session-Mode":"cookie"},
+       body: body === undefined ? undefined : JSON.stringify(body),
+     });
+-  } catch { throw new ApiError(503,"No se pudo conectar con la API."); }
++  } catch {
++    if(generation!==sessionGeneration)throw new StaleResponse();
++    throw new ApiError(503,"No se pudo conectar con la API.");
++  }
++  if(generation!==sessionGeneration)throw new StaleResponse();
+   if (response.status === 401 && retry && (path==="/auth/me" || !path.startsWith("/auth/"))) {
+     refreshing ??= api("/auth/refresh","POST",{},false).finally(() => {refreshing=null;});
+     await refreshing;
++    if(generation!==sessionGeneration)throw new StaleResponse();
+     return api<T>(path,method,body,false);
+   }
+   let parsed: {data?: T; title?: string; detail?: string; code?: string};
+   try { parsed=await response.json(); }
+-  catch { throw new ApiError(response.status,"Respuesta del servidor no válida."); }
++  catch {
++    if(generation!==sessionGeneration)throw new StaleResponse();
++    throw new ApiError(response.status,"Respuesta del servidor no válida.");
++  }
++  if(generation!==sessionGeneration)throw new StaleResponse();
+   if (!response.ok) {
+-    if (response.status===401 && typeof window!=="undefined")
+-      window.dispatchEvent(new Event("tm-session-invalidated"));
++    if(response.status===401){
++      sessionGeneration++;
++      if(typeof window!=="undefined")window.dispatchEvent(new Event("tm-session-invalidated"));
++    }
+     const message=response.status===401 && path!=="/auth/login" ? "La sesión ya no está disponible." :
+       response.status===403 ? "No tiene permiso para realizar esta acción." :
+       response.status===409 ? "La cuenta cambió o la operación no está permitida. Recargue antes de continuar." :
+diff --git a/portalweb/src/src/shared/components/portal-console.tsx b/portalweb/src/src/shared/components/portal-console.tsx
+--- a/portalweb/src/src/shared/components/portal-console.tsx
++++ b/portalweb/src/src/shared/components/portal-console.tsx
+@@ -1,8 +1,8 @@
+ "use client";
+-import {useCallback,useEffect,useState} from "react";
++import {useCallback,useEffect,useRef,useState} from "react";
+ import {RefreshCw,LogOut} from "lucide-react";
+ import {useRouter} from "next/navigation";
+-import {api,ApiError,Item} from "@/shared/api/client";
++import {api,ApiError,Item,StaleResponse} from "@/shared/api/client";
+ import type {Identity} from "@/shared/api/identity";
+ import CatalogPanel from "@/features/catalog/components/catalog-panel";
+ import AdmissionQueue from "@/features/admission/components/admission-queue";
+@@ -16,46 +16,53 @@
+   const [items,setItems]=useState<Item[]>([]),[busy,setBusy]=useState(true),[error,setError]=useState("");
+   const [services,setServices]=useState<Item[]>([]),[practitioners,setPractitioners]=useState<Item[]>([]);
+ 
++  const alive=useRef(true),generation=useRef(0),loadSequence=useRef(0),running=useRef(false);
+   const load=useCallback(async()=>{
+-    const me=await api<Identity>("/auth/me");
+-    const permission={queue:"admission.manage",audit:"audit.read",schedule:"schedule.manage",catalog:"catalog.manage",delivery:"delivery.read"}[view];
+-    if(!me.permissions?.includes(permission)) throw new ApiError(403,"No tiene permiso para acceder a esta sección.");
+-    setUser(me);
+-    if(view==="audit") setItems(await api<Item[]>("/admin/audit-events"));
+-    else if(view==="queue") setItems(await api<Item[]>("/admin/work-queue"));
+-    else if(view==="delivery") setItems(await api<Item[]>("/admin/email-delivery"));
+-    else if(view==="catalog"){
+-      const [s,p]=await Promise.all([api<Item[]>("/admin/catalog/services"),api<Item[]>("/admin/catalog/practitioners")]);
+-      setServices(s);setPractitioners(p);
+-    }
+-    else {
+-      const [s,p]=await Promise.all([api<Item[]>("/services"),api<Item[]>("/practitioners")]);
+-      setServices(s); setPractitioners(p);
++    const epoch=generation.current,request=++loadSequence.current;
++    try{
++      const me=await api<Identity>("/auth/me");
++      const permission={queue:"admission.manage",audit:"audit.read",schedule:"schedule.manage",catalog:"catalog.manage",delivery:"delivery.read"}[view];
++      if(!me.permissions?.includes(permission))throw new ApiError(403,"No tiene permiso para acceder a esta sección.");
++      let records:Item[]=[],s:Item[]=[],p:Item[]=[];
++      if(view==="audit")records=await api<Item[]>("/admin/audit-events");
++      else if(view==="queue")records=await api<Item[]>("/admin/work-queue");
++      else if(view==="delivery")records=await api<Item[]>("/admin/email-delivery");
++      else [s,p]=await Promise.all([api<Item[]>("/admin/catalog/services"),api<Item[]>("/admin/catalog/practitioners")]);
++      if(!alive.current||epoch!==generation.current||request!==loadSequence.current)return;
++      setUser(me);setItems(records);setServices(s);setPractitioners(p);
++    }catch(error){
++      if(alive.current&&epoch===generation.current&&request===loadSequence.current&&!(error instanceof StaleResponse))throw error;
+     }
+   },[view]);
+   const failure=useCallback((e:unknown)=>{
++    if(!alive.current||e instanceof StaleResponse)return;
+     if(e instanceof ApiError && e.status===401) {
++      generation.current++;loadSequence.current++;
+       setUser(null); setItems([]); setServices([]); setPractitioners([]); router.replace("/login");
+     } else if(e instanceof ApiError && e.status===403) {
++      generation.current++;loadSequence.current++;
+       setUser(null); setItems([]); setServices([]); setPractitioners([]); setError(e.message);
+     } else setError(e instanceof Error?e.message:"Error de conexión");
+   },[router]);
+   useEffect(()=>{
+-    const clear=()=>{setUser(null);setItems([]);setServices([]);setPractitioners([]);router.replace("/login");};
++    const clear=()=>{generation.current++;loadSequence.current++;setUser(null);setItems([]);setServices([]);setPractitioners([]);router.replace("/login");};
+     window.addEventListener("tm-session-invalidated",clear);
+     return ()=>window.removeEventListener("tm-session-invalidated",clear);
+   },[router]);
+   useEffect(()=>{
++    alive.current=true;
+     let mounted=true;
+     load().catch(e=>{if(mounted) failure(e);}).finally(()=>{if(mounted) setBusy(false);});
+-    return ()=>{mounted=false;};
++    return ()=>{mounted=false;alive.current=false;generation.current++;loadSequence.current++;};
+   },[load,failure]);
+   async function run(action:()=>Promise<void>) {
+-    if(busy) return false;
+-    setBusy(true); setError("");
+-    try {await action();return true;}
+-    catch(e) {failure(e);return false;}
+-    finally {setBusy(false);}
++    if(busy||running.current||!alive.current)return false;
++    running.current=true;
++    const epoch=generation.current;
++    setBusy(true);setError("");
++    try{await action();return alive.current&&epoch===generation.current;}
++    catch(e){if(alive.current&&epoch===generation.current)failure(e);return false;}
++    finally{running.current=false;if(alive.current)setBusy(false);}
+   }
+   if(!user) return <p role="status">{busy?"Verificando sesión…":error||"Se requiere iniciar sesión."}</p>;
+   const titles={queue:"Admisión y cobertura",audit:"Auditoría",catalog:"Catálogo",delivery:"Entregas de correo",schedule:"Horarios"};
+@@ -64,7 +71,10 @@
+     <div className="page-header">
+       <div><span className="eyebrow">TU ESPACIO DE TRABAJO</span><h1>{titles[view]}</h1><p className="page-description">{descriptions[view]}</p></div>
+       <div className="account-actions"><span>{user.email}<br/>Admisión</span><button className="button-secondary" disabled={busy}
+-        onClick={()=>run(async()=>{await api("/auth/logout","POST",{});setUser(null);router.replace("/login");})}><LogOut size={15} aria-hidden="true"/>Salir</button></div>
++        onClick={()=>run(async()=>{
++          try{await api("/auth/logout","POST",{});}
++          finally{generation.current++;loadSequence.current++;setUser(null);setItems([]);setServices([]);setPractitioners([]);router.replace("/login");}
++        })}><LogOut size={15} aria-hidden="true"/>Salir</button></div>
+     </div>
+     {error&&<p role="alert" className="notice error-notice">{error}</p>}
+     {view==="queue"&&<div className="stats-grid" aria-label="Resumen de las citas cargadas">{[
+diff --git a/portalweb/src/tests/browser/first-milestone/flow.spec.ts b/portalweb/src/tests/browser/first-milestone/flow.spec.ts
+--- a/portalweb/src/tests/browser/first-milestone/flow.spec.ts
++++ b/portalweb/src/tests/browser/first-milestone/flow.spec.ts
+@@ -112,8 +112,8 @@
+   await page.screenshot({path:path.join(artifacts,"auditoria.png"),fullPage:false});
+   await page.goto("/agenda");
+   await expect(page.getByRole("heading",{name:"Horarios",exact:true})).toBeVisible();
+-  const available=page.waitForResponse(r=>r.url().includes("/availability?"));
+-  await page.getByRole("button",{name:"Consultar horarios libres",exact:true}).click();
++  const available=page.waitForResponse(r=>r.url().includes("/admin/slots?"));
++  await page.getByRole("button",{name:"Consultar horarios",exact:true}).click();
+   expect((await available).status()).toBe(200);
+   await expect(page.getByRole("button",{name:"Bloquear",exact:true}).first()).toBeVisible();
+   const blocked=page.waitForResponse(r=>r.url().includes("/block")&&r.request().method()==="PATCH");
+diff --git a/portalweb/src/tests/browser/fourth-milestone/schedule.spec.ts b/portalweb/src/tests/browser/fourth-milestone/schedule.spec.ts
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/tests/browser/fourth-milestone/schedule.spec.ts
+@@ -0,0 +1,161 @@
++import {test,expect,type APIRequestContext,type BrowserContext} from "@playwright/test";
++import {randomUUID} from "node:crypto";
++
++test.describe.configure({mode:"serial"});
++test.skip(process.env.MILESTONE_TEST_SYNTHETIC!=="1","Requires explicit synthetic H04 execution");
++const headers={"X-Telemedicina-Client":"milestone","X-Session-Mode":"cookie"};
++let admin:APIRequestContext;
++let cookies:Awaited<ReturnType<BrowserContext["cookies"]>>=[];
++let serviceA="",serviceB="",personA="",personB="";
++let serviceNameA="",serviceNameB="",personNameA="",personNameB="";
++let slotIds:string[]=[];
++const begins=new Date(Date.now()+2*24*3600000);
++begins.setUTCHours(13,0,0,0);
++const from=new Date(begins.getTime()-24*3600000).toISOString();
++const to=new Date(begins.getTime()+2*24*3600000).toISOString();
++function localInput(date:Date){return new Date(date.getTime()-4*3600000).toISOString().slice(0,16);}
++
++test.beforeAll(async({playwright,baseURL})=>{
++  expect(baseURL&&["localhost","127.0.0.1","[::1]"].includes(new URL(baseURL).hostname)).toBe(true);
++  for(const key of ["Milestone__AdmissionEmail","Milestone__AdmissionPassword"])
++    if(!process.env[key])throw new Error("Missing private environment variable: "+key);
++  admin=await playwright.request.newContext({baseURL,extraHTTPHeaders:headers});
++  expect((await admin.post("/api/backend/auth/login",{data:{
++    email:process.env.Milestone__AdmissionEmail,password:process.env.Milestone__AdmissionPassword}})).status()).toBe(200);
++  // Cookie metadata is used only in memory, never persisted as storageState or traces.
++  cookies=(await admin.storageState()).cookies;
++  const suffix=randomUUID();
++  serviceNameA="Servicio H04 A "+suffix;serviceNameB="Servicio H04 B "+suffix;
++  personNameA="Profesional H04 A "+suffix;personNameB="Profesional H04 B "+suffix;
++  async function service(name:string){
++    const r=await admin.post("/api/backend/admin/catalog/services",{data:{name,specialty:"Pruebas H04",
++      durationMinutes:30,active:true,isSynthetic:true,approvalReference:"",version:0}});
++    expect(r.status()).toBe(201);return (await r.json()).data.id as string;
++  }
++  serviceA=await service(serviceNameA);serviceB=await service(serviceNameB);
++  async function person(name:string,serviceId:string){
++    const r=await admin.post("/api/backend/admin/catalog/practitioners",{data:{name,licenseRef:"SYNTHETIC",
++      active:true,serviceIds:[serviceId],version:0}});
++    expect(r.status()).toBe(201);return (await r.json()).data.id as string;
++  }
++  personA=await person(personNameA,serviceA);personB=await person(personNameB,serviceB);
++  for(let index=0;index<6;index++){
++    const r=await admin.post("/api/backend/admin/slots",{data:{serviceId:serviceA,practitionerId:personA,
++      startAt:new Date(begins.getTime()+index*3600000).toISOString()}});
++    expect(r.status()).toBe(201);slotIds.push((await r.json()).data.id);
++  }
++});
++test.afterAll(async()=>{
++  if(!admin)return;
++  for(const [id,name] of [[personA,personNameA],[personB,personNameB]])if(id)
++    await admin.patch("/api/backend/admin/catalog/practitioners/"+id,{data:{name,licenseRef:"SYNTHETIC",active:false,serviceIds:[],version:1}});
++  for(const [id,name] of [[serviceA,serviceNameA],[serviceB,serviceNameB]])if(id)
++    await admin.patch("/api/backend/admin/catalog/services/"+id,{data:{name,specialty:"Pruebas H04",durationMinutes:30,
++      active:false,isSynthetic:true,approvalReference:"",version:1}});
++  await admin.post("/api/backend/auth/logout",{data:{}});await admin.dispose();
++});
++test.beforeEach(async({page,context})=>{
++  await context.addCookies(cookies);await page.goto("/agenda");
++  await expect(page.getByRole("heading",{name:"Horarios",exact:true})).toBeVisible();
++  await page.getByLabel("Servicio",{exact:true}).selectOption(serviceA);
++  await page.getByLabel("Profesional",{exact:true}).selectOption(personA);
++  await page.getByLabel("Desde (hora de Santo Domingo)",{exact:true}).fill(localInput(new Date(from)));
++  await page.getByLabel("Hasta (hora de Santo Domingo)",{exact:true}).fill(localInput(new Date(to)));
++});
++
++test("associated selection, real pagination and versioned block/unblock",async({page})=>{
++  const people=page.getByLabel("Profesional",{exact:true});
++  await expect(people.getByRole("option",{name:personNameA,exact:true})).toHaveCount(1);
++  await expect(people.getByRole("option",{name:personNameB,exact:true})).toHaveCount(0);
++  await page.getByLabel("Horarios por página",{exact:true}).selectOption("5");
++  await page.getByRole("button",{name:"Consultar horarios",exact:true}).click();
++  await expect(page.getByRole("table",{name:"Agenda administrativa"}).locator("tbody tr")).toHaveCount(5);
++  await page.getByRole("button",{name:"Página siguiente de horarios",exact:true}).click();
++  await expect(page.getByRole("table",{name:"Agenda administrativa"}).locator("tbody tr")).toHaveCount(1);
++  const row=page.getByRole("table",{name:"Agenda administrativa"}).locator("tbody tr").first();
++  const response=page.waitForResponse(r=>r.url().includes("/block")&&r.request().method()==="PATCH");
++  await row.getByRole("button",{name:"Bloquear",exact:true}).click();
++  const blocked=await response;expect(blocked.status()).toBe(200);
++  expect(Number(blocked.request().postDataJSON().version)).toBeGreaterThan(0);
++  await page.getByLabel("Bloqueo",{exact:true}).selectOption("true");
++  await page.getByRole("button",{name:"Consultar horarios",exact:true}).click();
++  await expect(row).toContainText("Bloqueado");
++  const unblocked=page.waitForResponse(r=>r.url().includes("/block")&&r.request().method()==="PATCH");
++  await row.getByRole("button",{name:"Desbloquear",exact:true}).click();
++  expect((await unblocked).status()).toBe(200);
++  await expect(page.getByText("No hay horarios que coincidan con estos filtros.",{exact:true})).toBeVisible();
++});
++
++test("stale version preserves creation draft until explicit table reload",async({page})=>{
++  await page.getByRole("button",{name:"Consultar horarios",exact:true}).click();
++  const row=page.locator('[data-slot-id="'+slotIds[0]+'"]');
++  await expect(row.getByRole("button",{name:"Bloquear",exact:true})).toBeEnabled();
++  const query=new URLSearchParams({from,to,serviceId:serviceA,practitionerId:personA});
++  const result=await admin.get("/api/backend/admin/slots?"+query);expect(result.status()).toBe(200);
++  const slot=(await result.json()).data.items.find((s:{id:string})=>s.id===slotIds[0]);
++  expect((await admin.patch("/api/backend/admin/slots/"+slot.id+"/block",{data:{blocked:true,version:slot.version}})).status()).toBe(200);
++  const draft=localInput(new Date(begins.getTime()+9*3600000));
++  await page.getByLabel("Inicio (hora de Santo Domingo)",{exact:true}).fill(draft);
++  const rejected=page.waitForResponse(r=>r.url().includes("/block")&&r.request().method()==="PATCH");
++  await row.getByRole("button",{name:"Bloquear",exact:true}).click();
++  expect((await rejected).status()).toBe(409);
++  await expect(page.getByLabel("Inicio (hora de Santo Domingo)",{exact:true})).toHaveValue(draft);
++  await expect(page.getByText(/Tu formulario se conserva/)).toBeVisible();
++  await page.getByRole("button",{name:"Recargar horarios",exact:true}).click();
++  await expect(row.getByRole("button",{name:"Desbloquear",exact:true})).toBeEnabled();
++  await expect(page.getByLabel("Inicio (hora de Santo Domingo)",{exact:true})).toHaveValue(draft);
++});
++
++test("a delayed real response cannot reinstall results for abandoned filters",async({page})=>{
++  let release!:()=>void;const held=new Promise<void>(resolve=>{release=resolve;});
++  let fetched!:()=>void;const ready=new Promise<void>(resolve=>{fetched=resolve;});
++  let first=true;
++  await page.route("**/api/backend/admin/slots?**",async route=>{
++    if(!first){await route.continue();return;}first=false;
++    const response=await route.fetch();fetched();await held;await route.fulfill({response});
++  });
++  try{
++    await page.getByRole("button",{name:"Consultar horarios",exact:true}).click();await ready;
++    await page.getByLabel("Servicio",{exact:true}).selectOption(serviceB);
++    release();
++    await expect(page.getByRole("button",{name:"Consultar horarios",exact:true})).toBeEnabled();
++    await expect(page.locator('[data-slot-id]')).toHaveCount(0);
++    await expect(page.getByText("Todavía no se han consultado estos filtros.",{exact:true})).toBeVisible();
++    await expect(page.getByLabel("Profesional",{exact:true}).getByRole("option",{name:personNameA,exact:true})).toHaveCount(0);
++    await page.getByRole("button",{name:"Consultar horarios",exact:true}).click();
++    await expect(page.getByText("No hay horarios que coincidan con estos filtros.",{exact:true})).toBeVisible();
++  }finally{release();await page.unroute("**/api/backend/admin/slots?**");}
++});
++
++test("uncertain creation requires a successful targeted reconciliation",async({page})=>{
++  const draft=localInput(new Date(begins.getTime()+10*3600000));
++  await page.getByLabel("Inicio (hora de Santo Domingo)",{exact:true}).fill(draft);
++  let sent=0;
++  await page.route("**/api/backend/admin/slots",async route=>{
++    if(route.request().method()!=="POST"){await route.continue();return;}
++    sent++;
++    const response=await route.fetch();
++    expect(response.status()).toBe(201);
++    await route.abort("failed");
++  });
++  await page.getByRole("button",{name:"Crear horario",exact:true}).click();
++  const verify=page.getByRole("button",{name:"Comprobar creación pendiente",exact:true});
++  await expect(verify).toBeVisible();
++  await expect(page.getByRole("button",{name:"Crear horario",exact:true})).toBeDisabled();
++  await expect(page.getByLabel("Inicio (hora de Santo Domingo)",{exact:true})).toHaveValue(draft);
++  expect(sent).toBe(1);
++  let failOnce=true;
++  await page.route("**/api/backend/admin/slots?**",async route=>{
++    if(failOnce){failOnce=false;await route.abort("failed");}
++    else await route.continue();
++  });
++  await verify.click();
++  await expect(verify).toBeEnabled();
++  await expect(page.getByRole("button",{name:"Crear horario",exact:true})).toBeDisabled();
++  await expect(page.getByLabel("Inicio (hora de Santo Domingo)",{exact:true})).toHaveValue(draft);
++  await verify.click();
++  await expect(page.getByText("La consulta confirma que el horario ya existe. No repitas la creación.",{exact:true})).toBeVisible();
++  await expect(verify).toHaveCount(0);
++  await expect(page.getByLabel("Inicio (hora de Santo Domingo)",{exact:true})).toHaveValue("");
++  expect(sent).toBe(1);
++});
+diff --git a/portalweb/src/playwright.h04.config.ts b/portalweb/src/playwright.h04.config.ts
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/playwright.h04.config.ts
+@@ -0,0 +1,10 @@
++import {defineConfig} from "@playwright/test";
++import path from "node:path";
++import base from "./playwright.config";
++const evidence=path.resolve(__dirname,"Tools/proposals/hitos-04-05/evidencias");
++export default defineConfig({
++  ...base,
++  testDir:"./tests/browser/fourth-milestone",
++  outputDir:path.join(evidence,"resultados"),
++  reporter:[["list"],["json",{outputFile:path.join(evidence,"playwright-results.json")}]],
++});
+diff --git a/portalweb/src/tests/unit/session-generation.test.cjs b/portalweb/src/tests/unit/session-generation.test.cjs
+new file mode 100644
+--- /dev/null
++++ b/portalweb/src/tests/unit/session-generation.test.cjs
+@@ -0,0 +1,43 @@
++const {test}=require("node:test");
++const assert=require("node:assert/strict");
++const fs=require("node:fs");
++const path=require("node:path");
++const vm=require("node:vm");
++const ts=require("typescript");
++const client=fs.readFileSync(path.resolve(__dirname,"../../src/shared/api/client.ts"),"utf8");
++const code=ts.transpileModule(client,{
++  compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}
++}).outputText;
++for(const scenario of [200,401,"invalid-json"]){
++  test("delayed "+scenario+" body cannot affect a new session",async()=>{
++    let release,ready;
++    const started=new Promise(resolve=>{ready=resolve;});
++    let invalidations=0;
++    const context={
++      exports:{},AbortSignal,Event,
++      window:{dispatchEvent(){invalidations++;}},
++      fetch:async(url)=>url.endsWith("/auth/login")?{
++        status:200,ok:true,json:async()=>({data:{user:"new"}})
++      }:{
++        status:scenario===200?200:401,ok:scenario===200,
++        json:()=>{
++          ready();
++          return new Promise((resolve,reject)=>{
++            release=()=>scenario==="invalid-json"
++              ?reject(new Error("Invalid JSON"))
++              :resolve({data:{user:"old"}});
++          });
++        }
++      }
++    };
++    vm.runInNewContext(code,context);
++    const previous=context.exports.api("/auth/refresh","POST",{},false)
++      .then(value=>({value}),error=>({error}));
++    await started;
++    const current=await context.exports.api("/auth/login","POST",{});
++    assert.equal(current.user,"new");
++    release();
++    assert.equal((await previous).error.constructor.name,"StaleResponse");
++    assert.equal(invalidations,0);
++  });
++}

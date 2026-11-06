@@ -1,0 +1,90 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:telemedicina_app/core/network/api_client.dart';
+import 'package:telemedicina_app/features/appointments/domain/reschedule_options.dart';
+import 'package:telemedicina_app/features/appointments/presentation/appointments_view.dart';
+
+JsonMap appointment(int version) => {
+  'id': 'appointment-one', 'slotId': 'slot-old', 'serviceId': 'service-one',
+  'serviceName': 'Servicio sintético', 'practitionerName': 'Profesional sintético',
+  'startAt': '2035-11-01T13:00:00Z', 'endAt': '2035-11-01T13:30:00Z',
+  'version': version, 'status': 'PendingValidation', 'coverageStatus': 'ManualReview',
+};
+JsonMap target() => {
+  'id': 'slot-new', 'serviceId': 'service-one', 'practitionerName': 'Profesional destino',
+  'startAt': '2035-11-02T13:00:00Z', 'endAt': '2035-11-02T13:30:00Z',
+};
+Future<bool> run(Future<void> Function() action) async {
+  try { await action(); return true; } on ApiFailure { return false; }
+}
+Widget screen({
+  required Future<void> Function(JsonMap) cancel,
+  required Future<void> Function(JsonMap, String) reschedule,
+  required Future<RescheduleOptions> Function(JsonMap) options,
+}) => MaterialApp(home: Scaffold(body: SingleChildScrollView(child: AppointmentsView(
+  appointments: [appointment(1)], busy: false, run: run,
+  onCancel: cancel, onLoadOptions: options, onReschedule: reschedule,
+))));
+void main() {
+  testWidgets('Reprogramming409 preserves chosen slot/version and reload requires explicit discard', (tester) async {
+    final submitted = <JsonMap>[];
+    var loads = 0;
+    var accept = false;
+    await tester.pumpWidget(screen(cancel: (_) async {}, reschedule: (base, slot) async {
+      submitted.add({'version': base['version'], 'slotId': slot});
+      if (!accept) throw ApiFailure(409, 'Conflicto sintético');
+    }, options: (_) async {
+      loads++;
+      return RescheduleOptions(appointment(loads == 1 ? 1 : 2), [target()]);
+    }));
+    await tester.ensureVisible(find.text('Reprogramar'));
+    await tester.tap(find.text('Reprogramar')); await tester.pumpAndSettle();
+    await tester.tap(find.byType(RadioListTile<String>)); await tester.pump();
+    await tester.tap(find.text('Confirmar reprogramación')); await tester.pumpAndSettle();
+    expect(submitted, [{'version': 1, 'slotId': 'slot-new'}]);
+    expect(tester.widget<RadioListTile<String>>(find.byType(RadioListTile<String>)).groupValue, 'slot-new');
+    expect(find.textContaining('Conservamos la selección'), findsOneWidget);
+    await tester.tap(find.text('Confirmar reprogramación')); await tester.pumpAndSettle();
+    expect(submitted.last['version'], 1);
+    await tester.tap(find.text('Recargar cita y horarios')); await tester.pumpAndSettle();
+    await tester.tap(find.text('Conservar selección')); await tester.pumpAndSettle();
+    expect(loads, 1);
+    expect(tester.widget<RadioListTile<String>>(find.byType(RadioListTile<String>)).groupValue, 'slot-new');
+    await tester.tap(find.text('Recargar cita y horarios')); await tester.pumpAndSettle();
+    await tester.tap(find.text('Recargar')); await tester.pumpAndSettle();
+    expect(loads, 2);
+    expect(submitted, hasLength(2)); // reload never submits a mutation
+    expect(tester.widget<RadioListTile<String>>(find.byType(RadioListTile<String>)).groupValue, isNull);
+    expect(tester.widget<FilledButton>(find.widgetWithText(FilledButton, 'Confirmar reprogramación')).onPressed, isNull);
+    accept = true;
+    await tester.tap(find.byType(RadioListTile<String>)); await tester.pump();
+    await tester.tap(find.text('Confirmar reprogramación')); await tester.pumpAndSettle();
+    expect(submitted.last, {'version': 2, 'slotId': 'slot-new'});
+    expect(find.text('Confirmar nuevo horario'), findsNothing);
+  });
+  testWidgets('Cancel409 retains original version; confirmed reload updates base without automatic retry', (tester) async {
+    final versions = <int>[];
+    var accept = false, loads = 0;
+    await tester.pumpWidget(screen(cancel: (base) async {
+      versions.add(base['version'] as int);
+      if (!accept) throw ApiFailure(409, 'Conflicto sintético');
+    }, reschedule: (_, _) async {}, options: (_) async {
+      loads++; return RescheduleOptions(appointment(2), [target()]);
+    }));
+    await tester.ensureVisible(find.text('Cancelar'));
+    await tester.tap(find.text('Cancelar')); await tester.pumpAndSettle();
+    await tester.tap(find.text('Confirmar cancelación')); await tester.pumpAndSettle();
+    expect(versions, [1]);
+    expect(find.text('¿Cancelar esta cita?'), findsOneWidget);
+    await tester.tap(find.text('Confirmar cancelación')); await tester.pumpAndSettle();
+    expect(versions, [1, 1]);
+    await tester.tap(find.text('Recargar cita y horarios')); await tester.pumpAndSettle();
+    await tester.tap(find.text('Recargar')); await tester.pumpAndSettle();
+    expect(loads, 1);
+    expect(versions, [1, 1]);
+    accept = true;
+    await tester.tap(find.text('Confirmar cancelación')); await tester.pumpAndSettle();
+    expect(versions, [1, 1, 2]);
+    expect(find.text('¿Cancelar esta cita?'), findsNothing);
+  });
+}
