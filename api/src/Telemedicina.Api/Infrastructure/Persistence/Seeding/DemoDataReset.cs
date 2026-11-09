@@ -19,7 +19,8 @@ public static class DemoDataReset
     {
         "users", "profiles", "sessions", "challenges", "dev_mailbox", "services", "practitioners",
         "slots", "appointments", "appointment_history", "idempotency", "audit", "practitioner_services",
-        "notification_preferences", "notifications", "email_outbox", "staff_invitations"
+        "notification_preferences", "notifications", "email_outbox", "staff_invitations",
+        "check_in_attempts"
     });
     private const string Schema = "telemedicina_m1";
     private const string AllowedRemoteHost = "pg-2db5ca83-telemedicina-iso910.l.aivencloud.com";
@@ -136,7 +137,7 @@ public static class DemoDataReset
         if (tables.Any(row => row["can_own"] is not true))
             throw new DemoResetException("DEMO_OWNER_REQUIRED");
         var versions = Rows(c, t, "SELECT version FROM telemedicina_m1.schema_versions ORDER BY version");
-        if (!versions.Select(row => (int)row["version"]!).SequenceEqual(new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 }))
+        if (!versions.Select(row => (int)row["version"]!).SequenceEqual(Enumerable.Range(1, 10)))
             throw new DemoResetException("DEMO_SCHEMA_VERSION_MISMATCH");
         // Reject references that would require CASCADE or truncate another schema/table.
         if (Convert.ToInt64(Scalar(c, t, """
@@ -183,7 +184,8 @@ public static class DemoDataReset
         Tables.ToDictionary(table => table, table => table switch
         {
             "users" => 30L, "profiles" => 24, "services" or "practitioners" or "practitioner_services" => 6,
-            "slots" => 800, "appointments" or "appointment_history" or "notifications" => 0,
+            "slots" => 800,
+            "appointments" or "appointment_history" or "notifications" or "check_in_attempts" => 0,
             "notification_preferences" => 24, "audit" => 1, _ => 0
         }, StringComparer.Ordinal);
 

@@ -149,9 +149,10 @@ public static class DemoResetUnitChecks
             }
             assert(plan.Patients.All(patient => patient.Profile.LastName.Contains("(DEMO)") &&
                 patient.Profile.BirthDate.AddYears(18) < date), "Synthetic adults with visible mark.");
-            assert(DemoDataReset.Tables.Count == 17 && DemoDataReset.Expected()["appointments"] == 0 &&
+            assert(DemoDataReset.Tables.Count == 18 && DemoDataReset.Expected()["appointments"] == 0 &&
                 DemoDataReset.Expected()["appointment_history"] == 0 && DemoDataReset.Expected()["notifications"] == 0 &&
-                DemoDataReset.Expected()["email_outbox"] == 0, "Closed replacement manifest and expected counts.");
+                DemoDataReset.Expected()["email_outbox"] == 0 && DemoDataReset.Expected()["check_in_attempts"] == 0,
+                "Closed replacement manifest and expected counts.");
         });
     }
 

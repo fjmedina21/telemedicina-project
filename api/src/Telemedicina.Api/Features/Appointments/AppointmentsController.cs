@@ -45,20 +45,6 @@ public sealed class AppointmentsController(Database database, NotificationServic
         Log(c, t, "appointment.read", id.ToString()); t.Commit(); return Data(rows[0]);
     }
 
-    [HttpGet("appointments/{id:guid}/check-in-requirements")]
-    [ProducesResponseType(typeof(ApiResponse<CheckInRequirementsSnapshot>),200)]
-    [ProducesResponseType(404)]
-    public IActionResult CheckInRequirements(Guid id)
-    {
-        using var c = Database.Open(); using var t = Begin(c);
-        var rows = Rows(c, t, "SELECT a.id FROM appointments a WHERE a.id=@id AND (@staff OR a.user_id=@u)",
-            ("id", id.ToString()), ("staff", User.IsInRole("Admission")), ("u", UserId(User)));
-        if (rows.Count == 0) return NotFound();
-        Log(c, t, "appointment.check_in_requirements.read", id.ToString());
-        t.Commit();
-        return Data(new CheckInRequirementsSnapshot("NotConfigured", false, null));
-    }
-
     [Authorize(Roles = "Patient"), HttpPost("appointments")]
     [ProducesResponseType(typeof(ApiResponse<AppointmentBooked>),200)]
     [ProducesResponseType(typeof(ApiResponse<AppointmentBooked>),201)]
@@ -134,6 +120,11 @@ public sealed class AppointmentsController(Database database, NotificationServic
         if ((int)row["version"]! != request.Version || (string)row["status"]! is not ("PendingValidation" or "Confirmed")
             || (DateTime)row["start_utc"]! <= DateTime.UtcNow)
             return Fail(409, "INVALID_TRANSITION", "La cita cambió o ya no permite cancelación.");
+        Execute(c, t, """
+            UPDATE check_in_attempts SET active=false,state='Rejected',version=version+1,
+                ready_at=NULL,invalidated_at=now(),updated_at=now()
+            WHERE appointment_id=@id AND active
+            """, ("id", id.ToString()));
         Execute(c, t, "UPDATE appointments SET status='Cancelled',version=version+1 WHERE id=@id", ("id", id.ToString()));
         notifications.AppointmentEvent(c, t, id.ToString(), "cancelled");
         Log(c, t, "appointment.cancelled", id.ToString()); t.Commit(); return Data(new { cancelled = true });
@@ -162,6 +153,11 @@ public sealed class AppointmentsController(Database database, NotificationServic
         if (s is null) return Fail(409, "SLOT_UNAVAILABLE", "Horario no disponible.");
         try
         {
+            Execute(c, t, """
+                UPDATE check_in_attempts SET active=false,state='Rejected',version=version+1,
+                    ready_at=NULL,invalidated_at=now(),updated_at=now()
+                WHERE appointment_id=@id AND active
+                """, ("id", id.ToString()));
             Execute(c, t, """
                 UPDATE appointments SET slot_id=@slot,practitioner_id=@p,start_utc=@start,end_utc=@end,
                 status='PendingValidation',coverage='ManualReview',evidence=NULL,coverage_valid_until=NULL,

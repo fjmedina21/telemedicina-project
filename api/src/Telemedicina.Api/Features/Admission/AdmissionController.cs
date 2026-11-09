@@ -55,6 +55,13 @@ public sealed class AdmissionController(Database database, NotificationService n
             (request.ValidUntil is null || request.ValidUntil.Value.UtcDateTime < (DateTime)a["end_utc"]! || request.ValidUntil.Value.UtcDateTime <= nowUtc)))
             return Fail(400, "EVIDENCE_REQUIRED", "Registre evidencia y una vigencia que cubra la cita.");
         var next = request.Status == "Approved" ? "Confirmed" : "PendingValidation";
+        // Coverage review does not reschedule the appointment. Advance the bound
+        // appointment version atomically so an existing check-in is not made stale.
+        Execute(c, t, """
+            UPDATE check_in_attempts SET appointment_version=@version,
+                version=version+1,updated_at=now()
+            WHERE appointment_id=@id AND active
+            """, ("version", request.Version + 1), ("id", id.ToString()));
         Execute(c, t, """
             UPDATE appointments SET coverage=@coverage,status=@status,evidence=@e,coverage_valid_until=@until,
             reviewed_by=@actor,reviewed_at=now(),version=version+1 WHERE id=@id

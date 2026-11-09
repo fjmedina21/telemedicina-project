@@ -9,6 +9,13 @@ import '../catalog/catalog_controller_test.dart' as catalog;
 class Fixture extends catalog.Fixture {
   String? profileCode;
   Future<http.Response> Function(http.Request)? appointmentResponse;
+  static Map<String,dynamic> checkIn({String status='NotStarted'})=>{
+    'status':status,'canProceed':true,'configurationVersion':1,'version':0,
+    'windowOpenAt':'2040-01-01T14:30:00Z','windowCloseAt':'2040-01-01T15:15:00Z',
+    'prepared':false,'privacyConfirmed':false,'connectivityConfirmed':false,
+    'technicalPreflightCompleted':false,
+    'consent':{'version':1,'hash':'synthetic','text':'demo','accepted':false},
+    'blockers':['ADMIN_CHECKLIST_INCOMPLETE']};
   @override
   Future<http.Response> handle(http.Request request) async {
     if (request.url.path.endsWith('/appointments') && profileCode != null) {
@@ -21,7 +28,7 @@ class Fixture extends catalog.Fixture {
       return catalog.envelope({'id': 'appointment-one', 'version': 1, 'coverageStatus': 'ManualReview'});
     }
     if (request.url.path.endsWith('/appointments/appointment-one/check-in-requirements')) {
-      return catalog.envelope({'status': 'NotConfigured', 'canProceed': false, 'configurationVersion': null});
+      return catalog.envelope(checkIn());
     }
     if (request.url.path.endsWith('/appointments/appointment-one/history')) {
       return catalog.envelope([{'sequence': 1, 'newStatus': 'PendingValidation', 'newCoverage': 'ManualReview'}]);
@@ -87,10 +94,10 @@ void main() {
     expect(f.controller.appointmentCheckInRequirements, isNull);
     expect(f.controller.pendingBooking, isNull);
   });
-  test('Appointment detail loads disabled check-in requirements for the current session', () async {
+  test('Appointment detail loads check-in requirements for the current session', () async {
     final f = Fixture(); addTearDown(f.dispose); await f.login();
     await f.controller.openAppointment({'id': 'appointment-one'});
-    expect(f.controller.appointmentCheckInRequirements?.disabled, isTrue);
-    expect(f.controller.appointmentCheckInRequirements?.canProceed, isFalse);
+    expect(f.controller.appointmentCheckInRequirements?.status, 'NotStarted');
+    expect(f.controller.appointmentCheckInRequirements?.canProceed, isTrue);
   });
 }

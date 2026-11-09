@@ -56,6 +56,7 @@ class PatientController extends ChangeNotifier {
   AppointmentFilters appointmentFilters = const AppointmentFilters();
   JsonMap? appointmentDetail;
   CheckInRequirements? appointmentCheckInRequirements;
+  String? _pendingCheckInKey;
   List<JsonMap> appointmentHistory = [];
   bool appointmentsLoading = false, appointmentDetailLoading = false;
   String appointmentsError = '', appointmentDetailError = '';
@@ -142,6 +143,7 @@ class PatientController extends ChangeNotifier {
     appointmentFilters = const AppointmentFilters();
     appointmentDetail = null;
     appointmentCheckInRequirements = null;
+    _pendingCheckInKey = null;
     appointmentHistory = [];
     appointmentsLoading = false;
     appointmentDetailLoading = false;
@@ -473,6 +475,7 @@ class PatientController extends ChangeNotifier {
     if (appointmentDetail?['id'] != id) {
       appointmentDetail = null;
       appointmentCheckInRequirements = null;
+      _pendingCheckInKey = null;
       appointmentHistory = [];
     }
     appointmentDetailLoading = true;
@@ -493,6 +496,26 @@ class PatientController extends ChangeNotifier {
         _notify();
       }
     }
+  }
+
+  Future<void> submitCheckIn(JsonMap declarations) async {
+    final detail = appointmentDetail;
+    final current = appointmentCheckInRequirements;
+    if (detail == null || current == null)
+      throw ApiFailure(409, 'Recarga el detalle de la cita.');
+    final generation = api.sessionGeneration;
+    final key = _pendingCheckInKey ??= ApiClient.uuid();
+    final result = await appointmentRepository.submitCheckIn(
+      detail['id'] as String, {
+        'version': current.version,
+        ...declarations,
+        'consentVersion': current.consent['version'],
+      }, key);
+    if (!_currentSession(generation)) return;
+    appointmentCheckInRequirements = result;
+    _pendingCheckInKey = null;
+    message = result.ready ? 'Check-in académico listo.' : 'Avance administrativo guardado.';
+    _notify();
   }
 
   Future<void> _refreshAppointmentChange(int generation, String? id) async {

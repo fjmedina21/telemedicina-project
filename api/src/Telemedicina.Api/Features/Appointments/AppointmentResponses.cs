@@ -15,4 +15,3 @@ public sealed record CoverageReviewed(string Status, string CoverageStatus, int 
 public sealed record AppointmentHistoryItem(long Sequence, string? OldSlotId, string NewSlotId,
     string? OldStatus, string NewStatus, string? OldCoverage, string NewCoverage,
     int Version, string ActorId, DateTime OccurredAt);
-public sealed record CheckInRequirementsSnapshot(string Status, bool CanProceed, int? ConfigurationVersion);

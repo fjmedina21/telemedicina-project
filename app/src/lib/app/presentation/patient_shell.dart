@@ -101,6 +101,7 @@ class _PatientShellState extends State<PatientShell> {
         detailLoading: c.appointmentDetailLoading,
         detailError: c.appointmentDetailError,
         onOpen: c.openAppointment,
+        onCheckIn: c.submitCheckIn,
         onFilter: (filters) => c.refreshAppointments(filters: filters),
         sessionChanges: c,
         sessionGeneration: c.api.sessionGeneration,

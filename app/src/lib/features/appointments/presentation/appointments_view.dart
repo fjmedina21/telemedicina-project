@@ -17,6 +17,7 @@ class AppointmentsView extends StatefulWidget {
   final AppointmentFilters filters;
   final AsyncActionRunner run;
   final Future<void> Function(JsonMap) onCancel;
+  final Future<void> Function(JsonMap)? onCheckIn;
   final Future<RescheduleOptions> Function(JsonMap) onLoadOptions;
   final Future<void> Function(JsonMap, String) onReschedule;
   final Future<void> Function(JsonMap)? onOpen;
@@ -28,6 +29,7 @@ class AppointmentsView extends StatefulWidget {
     super.key, required this.appointments, required this.busy, required this.run,
     required this.onCancel, required this.onLoadOptions, required this.onReschedule,
     this.detail, this.checkInRequirements, this.history = const [],
+    this.onCheckIn,
     this.loading = false, this.detailLoading = false,
     this.error = '', this.detailError = '', this.filters = const AppointmentFilters(),
     this.onOpen, this.onFilter, this.sessionChanges, this.isSessionCurrent, this.sessionGeneration = 0,
@@ -84,11 +86,26 @@ class _AppointmentsViewState extends State<AppointmentsView> {
           Text(localTime(value['startAt'] as String)),
           Text('Cita: ${value['status']}'),
           coverageText(value),
-          if (widget.checkInRequirements?.disabled == true)
-            Semantics(
-              liveRegion: true,
-              child: Text('La admisión virtual aún no está disponible.'),
-            ),
+          if (widget.checkInRequirements case final checkIn?)
+            Card(child: Padding(padding: const EdgeInsets.all(12), child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Check-in académico', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text('Estado: ${checkIn.status}'),
+                const Text('Solo preparación, privacidad y conectividad. No evalúa síntomas ni realiza atención médica.'),
+                if (checkIn.ready) const Text('Listo para continuar al siguiente módulo.'),
+                if (!checkIn.ready && checkIn.canProceed && widget.onCheckIn != null)
+                  FilledButton(onPressed: widget.busy ? null : () {
+                    final generation = widget.sessionGeneration;
+                    showDialog<void>(context: context, builder: (_) => guard(
+                      _CheckInDialog(requirements: checkIn, run: widget.run,
+                        submit: widget.onCheckIn!, active: () => mounted &&
+                          generation == widget.sessionGeneration &&
+                          (widget.isSessionCurrent?.call(generation) ?? true)), generation));
+                  }, child: const Text('Completar check-in')),
+                if (!checkIn.canProceed && !checkIn.ready)
+                  const Text('Disponible entre 30 minutos antes y 15 minutos después de la hora confirmada.'),
+              ],
+            ))),
           Text('Afiliación: ••••${value['memberLast4']}'),
           if (value['evidence'] != null) Text('Evidencia de revisión: ${value['evidence']}'),
           if (value['validUntil'] != null) Text('Vigencia: ${localTime(value['validUntil'] as String)}'),
@@ -226,4 +243,51 @@ class _AppointmentMutationDialogState extends State<_AppointmentMutationDialog> 
         child: Text(widget.reschedule ? 'Confirmar reprogramación' : 'Confirmar cancelación')),
     ],
   );
+}
+
+class _CheckInDialog extends StatefulWidget {
+  final CheckInRequirements requirements;
+  final AsyncActionRunner run;
+  final Future<void> Function(JsonMap) submit;
+  final bool Function() active;
+  const _CheckInDialog({required this.requirements, required this.run,
+    required this.submit, required this.active});
+  @override State<_CheckInDialog> createState() => _CheckInDialogState();
+}
+class _CheckInDialogState extends State<_CheckInDialog> {
+  late bool prepared=widget.requirements.prepared;
+  late bool privacy=widget.requirements.privacyConfirmed;
+  late bool connectivity=widget.requirements.connectivityConfirmed;
+  late bool consent=widget.requirements.consent['accepted']==true;
+  late bool preflight=widget.requirements.technicalPreflightCompleted;
+  bool sending=false;
+  Future<void> send() async {
+    if(sending || !widget.active()) return;
+    setState(()=>sending=true);
+    final saved=await widget.run(()=>widget.submit({'prepared':prepared,
+      'privacyConfirmed':privacy,'connectivityConfirmed':connectivity,
+      'consentAccepted':consent,'technicalPreflightCompleted':preflight}));
+    if(!mounted || !widget.active()) return;
+    if(saved) Navigator.pop(context); else setState(()=>sending=false);
+  }
+  @override Widget build(BuildContext context)=>AlertDialog(
+    title:const Text('Check-in académico'),
+    content:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,
+      crossAxisAlignment:CrossAxisAlignment.start,children:[
+        const Text('Cuestionario administrativo no clínico.'),
+        CheckboxListTile(value:prepared,onChanged:sending?null:(v)=>setState(()=>prepared=v??false),
+          title:const Text('Estoy preparado para la demostración')),
+        CheckboxListTile(value:privacy,onChanged:sending?null:(v)=>setState(()=>privacy=v??false),
+          title:const Text('Dispongo de un espacio con privacidad')),
+        CheckboxListTile(value:connectivity,onChanged:sending?null:(v)=>setState(()=>connectivity=v??false),
+          title:const Text('Declaro que tengo conectividad')),
+        CheckboxListTile(value:preflight,onChanged:sending?null:(v)=>setState(()=>preflight=v??false),
+          title:const Text('Completé la verificación técnica declarativa')),
+        const Divider(),Text(widget.requirements.consent['text'] as String),
+        CheckboxListTile(value:consent,onChanged:sending?null:(v)=>setState(()=>consent=v??false),
+          title:const Text('Acepto el consentimiento de demostración')),
+      ])),actions:[
+        TextButton(onPressed:sending?null:()=>Navigator.pop(context),child:const Text('Volver')),
+        FilledButton(onPressed:sending?null:send,child:const Text('Guardar progreso')),
+      ]);
 }

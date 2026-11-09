@@ -33,14 +33,36 @@ class AppointmentSnapshot {
 class CheckInRequirements {
   final String status;
   final bool canProceed;
-  final int? configurationVersion;
-  const CheckInRequirements(this.status, this.canProceed, this.configurationVersion);
+  final int configurationVersion, version;
+  final String windowOpenAt, windowCloseAt;
+  final bool prepared, privacyConfirmed, connectivityConfirmed;
+  final bool technicalPreflightCompleted;
+  final JsonMap consent;
+  final List<String> blockers;
+  const CheckInRequirements({required this.status, required this.canProceed,
+    required this.configurationVersion, required this.version,
+    required this.windowOpenAt, required this.windowCloseAt,
+    required this.prepared, required this.privacyConfirmed,
+    required this.connectivityConfirmed,
+    required this.technicalPreflightCompleted, required this.consent,
+    required this.blockers});
   factory CheckInRequirements.fromJson(Map value) => CheckInRequirements(
-    value['status'] as String,
-    value['canProceed'] as bool,
-    value['configurationVersion'] as int?,
+    status: value['status'] as String,
+    canProceed: value['canProceed'] as bool,
+    configurationVersion: value['configurationVersion'] as int,
+    version: value['version'] as int,
+    windowOpenAt: value['windowOpenAt'] as String,
+    windowCloseAt: value['windowCloseAt'] as String,
+    prepared: value['prepared'] as bool,
+    privacyConfirmed: value['privacyConfirmed'] as bool,
+    connectivityConfirmed: value['connectivityConfirmed'] as bool,
+    technicalPreflightCompleted: value['technicalPreflightCompleted'] as bool,
+    consent: Map<String, dynamic>.unmodifiable(
+      Map<String, dynamic>.from(value['consent'] as Map)),
+    blockers: List<String>.unmodifiable(
+      (value['blockers'] as List).whereType<String>()),
   );
-  bool get disabled => status == 'NotConfigured' && !canProceed && configurationVersion == null;
+  bool get ready => status == 'Ready';
 }
 class AppointmentFilters {
   final String fromDate, toDate;
@@ -112,4 +134,8 @@ class AppointmentRepository {
     await api.request('POST', '/appointments/${Uri.encodeComponent(appointment['id'] as String)}/reschedule',
       body: {'slotId': slotId, 'version': appointment['version']});
   }
+  Future<CheckInRequirements> submitCheckIn(
+      String id, JsonMap body, String key) async => CheckInRequirements.fromJson(
+    await api.request('POST', '/appointments/${Uri.encodeComponent(id)}/check-in',
+      body: body, extraHeaders: {'Idempotency-Key': key}) as Map);
 }

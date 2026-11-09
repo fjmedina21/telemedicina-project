@@ -49,7 +49,7 @@ void main() {
     expect(values.single.coverageStatus, 'Expired');
     expect(manualCoverageLabel('Approved'), 'Revisión manual favorable');
   });
-  test('Snapshot decodes disabled check-in requirements with separate DTO responses', () async {
+  test('Snapshot decodes versioned academic check-in requirements', () async {
     final api = ApiClient(client: MockClient((request) async {
       final path = request.url.path;
       expect(request.method, 'GET');
@@ -58,9 +58,16 @@ void main() {
       }
       if (path.endsWith('/appointments/appointment-one/check-in-requirements')) {
         return http.Response(jsonEncode({'data': {
-          'status': 'NotConfigured',
-          'canProceed': false,
-          'configurationVersion': null,
+          'status': 'InProgress', 'canProceed': true,
+          'configurationVersion': 1, 'version': 2,
+          'windowOpenAt': '2040-01-01T14:30:00Z',
+          'windowCloseAt': '2040-01-01T15:15:00Z',
+          'prepared': true, 'privacyConfirmed': false,
+          'connectivityConfirmed': false,
+          'technicalPreflightCompleted': false,
+          'consent': {'version': 1, 'hash': 'synthetic',
+            'text': 'Demostración académica', 'accepted': false},
+          'blockers': ['ADMIN_CHECKLIST_INCOMPLETE'],
         }}), 200);
       }
       if (path.endsWith('/appointments/appointment-one')) {
@@ -74,7 +81,24 @@ void main() {
     }));
     addTearDown(api.close);
     final snapshot = await AppointmentRepository(api).snapshot('appointment-one');
-    expect(snapshot.checkInRequirements.disabled, isTrue);
-    expect(snapshot.checkInRequirements.canProceed, isFalse);
+    expect(snapshot.checkInRequirements.status, 'InProgress');
+    expect(snapshot.checkInRequirements.version, 2);
+    expect(snapshot.checkInRequirements.prepared, isTrue);
+  });
+  test('Partial progress uses idempotency key and decodes Ready', () async {
+    late http.Request sent;
+    final api=ApiClient(client:MockClient((request) async { sent=request;
+      return http.Response(jsonEncode({'data': {
+        'status':'Ready','canProceed':true,'configurationVersion':1,'version':3,
+        'windowOpenAt':'2040-01-01T14:30:00Z','windowCloseAt':'2040-01-01T15:15:00Z',
+        'prepared':true,'privacyConfirmed':true,'connectivityConfirmed':true,
+        'technicalPreflightCompleted':true,
+        'consent':{'version':1,'hash':'synthetic','text':'demo','accepted':true},
+        'blockers':<dynamic>[]} }),200); }));
+    addTearDown(api.close);
+    final result=await AppointmentRepository(api).submitCheckIn('appointment-one',
+      {'version':2,'prepared':true},'10000000-0000-4000-8000-000000000001');
+    expect(sent.headers['Idempotency-Key'],'10000000-0000-4000-8000-000000000001');
+    expect(result.ready,isTrue);
   });
 }

@@ -19,6 +19,7 @@ public class Program
         if (args.Contains("--demo-reset-db-tests", StringComparer.Ordinal)) return DemoResetDbChecks.Run();
         if (args.Contains("--h03-db-tests", StringComparer.Ordinal)) return ProfileDbChecks.Run();
         if (args.Contains("--h05-db-tests", StringComparer.Ordinal)) return H05DbChecks.Run();
+        if (args.Contains("--h06-db-tests", StringComparer.Ordinal)) return H06DbChecks.Run();
         if (args.Contains("--h04-db-tests", StringComparer.Ordinal)) return H04DbChecks.Run();
         if (args.Contains("--h04-history-migration-test", StringComparer.Ordinal)) return H04SchemaInspect.Run(true);
         if (args.Contains("--h04-schema-inspect", StringComparer.Ordinal)) return H04SchemaInspect.Run();
@@ -210,6 +211,7 @@ public class Program
         ProfileUnitChecks.Register(Test, Assert);
         H04UnitChecks.Register(Test, Assert);
         H05UnitChecks.Register(Test, Assert);
+        H06UnitChecks.Register(Test, Assert);
 
         Console.WriteLine("-------------------------------------------------");
         Console.WriteLine($" Summary: {_passedCount} passed, {_failedCount} failed.");
