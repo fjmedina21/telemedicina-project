@@ -81,7 +81,8 @@ export default function StaffPanel(){
     await action(async()=>{
       await api("/admin/staff/"+account.id+"/"+suffix,method,{...body,expectedVersion:account.version});
       await load(cursor,previous);
-      setEvents([]);setAuditNext(null);setMessage("Operación confirmada por el servidor. Una cuenta pendiente puede requerir una nueva invitación.");
+      setEvents([]);setAuditNext(null);setMessage(suffix==="invitation"?"Invitación registrada. La entrega del correo está pendiente.":
+        "Operación confirmada por el servidor. Una cuenta pendiente puede requerir una nueva invitación.");
     });
   }
   async function audit(after=0){
@@ -104,7 +105,7 @@ export default function StaffPanel(){
       void action(async()=>{
         await api("/admin/staff/invitations","POST",{email,role});
         setEmail("");await load();setEvents([]);setAuditNext(null);
-        setMessage("Invitación creada en el buzón privado de desarrollo. Caduca en 15 minutos.");
+        setMessage("Invitación registrada. La entrega del correo está pendiente.");
       });
     }}>
       <h2>Invitar personal</h2>

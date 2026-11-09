@@ -153,7 +153,7 @@ public sealed class AuthController(Database database, IConfiguration configurati
     public IActionResult Mailbox([FromQuery] string email, [FromQuery] string purpose)
     {
         if (!environment.IsDevelopment() || !configuration.GetValue<bool>("Milestone:Enabled") ||
-            (purpose != "staff-activation" && mail.Mode != "development") ||
+            mail.Mode != "development" ||
             purpose is not ("verify" or "reset" or "staff-activation")) return NotFound();
         var expected = configuration["Milestone:MailboxKey"];
         var supplied = Request.Headers["X-Dev-Mailbox-Key"].ToString();

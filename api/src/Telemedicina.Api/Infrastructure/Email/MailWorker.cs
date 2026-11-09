@@ -4,6 +4,7 @@ using MimeKit;
 using System.Security.Cryptography;
 using System.Text;
 using Telemedicina.Api.Infrastructure.Persistence;
+using Telemedicina.Api.Features.Identity;
 using static Telemedicina.Api.Infrastructure.Persistence.Database;
 
 namespace Telemedicina.Api.Infrastructure.Email;
@@ -55,9 +56,20 @@ public sealed class MailWorker(IServiceProvider services, IConfiguration configu
         var resource = row["resource_id"] as string;
         var userKey = "mailuser:" + (string)row["user_id"]!;
         Execute(c, null, "SELECT pg_advisory_lock(hashtextextended(@key,0))", ("key", userKey));
-        if (resource is not null) Execute(c, null, "SELECT pg_advisory_lock(hashtextextended(@key,0))", ("key", "delivery:" + resource));
+        var resourceLocked = false;
         try
         {
+            if (resource is not null)
+            {
+                Execute(c, null, "SELECT pg_advisory_lock(hashtextextended(@key,0))", ("key", "delivery:" + resource));
+                resourceLocked = true;
+            }
+            // A revocation may invalidate an already leased message while this worker waits.
+            // Read the current state and ciphertext only after taking the shared delivery lock.
+            row = Rows(c, null, """
+                SELECT * FROM email_outbox WHERE id=@id AND state='Sending' AND lease_token=@lease
+                """, ("id", row["id"]), ("lease", lease)).FirstOrDefault();
+            if (row is null) return;
             (string State, string? Code) result;
             if (row["expires_at"] is DateTime expiry && expiry <= DateTime.UtcNow) result = ("Expired", null);
             else if (row["resource_version"] is int version && resource is not null &&
@@ -65,7 +77,11 @@ public sealed class MailWorker(IServiceProvider services, IConfiguration configu
                 result = ("Superseded", null);
             else if (row["notification_id"] is not null && Scalar(c, null, "SELECT email_enabled FROM notification_preferences WHERE user_id=@u", ("u", row["user_id"])) is not true)
                 result = ("Superseded", null);
-            else if (!Convert.ToBoolean(Scalar(c, null, "SELECT active FROM users WHERE id=@id", ("id", row["user_id"]))))
+            else if ((string)row["kind"]! == StaffInvitations.Kind &&
+                StaffInvitations.DeliveryState(c, row) is { } invitationState)
+                result = (invitationState, null);
+            else if ((string)row["kind"]! != StaffInvitations.Kind &&
+                !Convert.ToBoolean(Scalar(c, null, "SELECT active FROM users WHERE id=@id", ("id", row["user_id"]))))
                 result = ("Superseded", null);
             else
             {
@@ -73,7 +89,7 @@ public sealed class MailWorker(IServiceProvider services, IConfiguration configu
                 deadline.CancelAfter(TimeSpan.FromSeconds(25));
                 result = await services.GetRequiredService<MailTransport>().SendAsync(row, deadline.Token);
             }
-            var attempts = (int)row["attempts"]! + 1;
+            var attempts = (int)row["attempts"]!;
             if (result.State == "Queued" && attempts >= 6) result = ("Failed", "RETRY_LIMIT");
             var delay = Math.Min(3600, settings.RetrySeconds * (1 << Math.Min(attempts - 1, 6)));
             Execute(c, null, """
@@ -81,12 +97,12 @@ public sealed class MailWorker(IServiceProvider services, IConfiguration configu
                 available_at=now()+make_interval(secs=>@delay),
                 sent_at=CASE WHEN @state IN ('Sent','Captured') THEN now() ELSE sent_at END,
                 payload_cipher=CASE WHEN @state IN ('Sent','Captured','Superseded','Expired','Failed') THEN '' ELSE payload_cipher END
-                WHERE id=@id AND lease_token=@lease
+                WHERE id=@id AND lease_token=@lease AND state='Sending'
                 """, ("state", result.State), ("code", result.Code), ("delay", delay), ("id", row["id"]), ("lease", lease));
         }
         finally
         {
-            if (resource is not null) Execute(c, null, "SELECT pg_advisory_unlock(hashtextextended(@key,0))", ("key", "delivery:" + resource));
+            if (resourceLocked) Execute(c, null, "SELECT pg_advisory_unlock(hashtextextended(@key,0))", ("key", "delivery:" + resource));
             Execute(c, null, "SELECT pg_advisory_unlock(hashtextextended(@key,0))", ("key", userKey));
         }
     }

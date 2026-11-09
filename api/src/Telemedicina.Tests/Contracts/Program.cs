@@ -210,6 +210,7 @@ public class Program
         ProfileUnitChecks.Register(Test, Assert);
         H04UnitChecks.Register(Test, Assert);
         H05UnitChecks.Register(Test, Assert);
+        StaffInvitationUnitChecks.Register(Test, Assert);
 
         Console.WriteLine("-------------------------------------------------");
         Console.WriteLine($" Summary: {_passedCount} passed, {_failedCount} failed.");

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import smtpd
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -14,6 +15,10 @@ import uuid
 
 def check_smtp():
     assert os.environ.get("MILESTONE_TEST_SYNTHETIC")=="1"
+    staff_test = "--staff-invitations" in sys.argv
+    if staff_test and not all(os.environ.get(key) for key in
+            ("Milestone__AdministratorEmail", "Milestone__AdministratorPassword")):
+        raise RuntimeError("Staff SMTP checks require a separately seeded synthetic administrator.")
     from milestone_e2e import request
     import milestone_e2e as api
     original=api.BASE
@@ -69,6 +74,54 @@ def check_smtp():
         assert request("/auth/register","POST",{"email":email,"password":password})[0]==202
         time.sleep(2)
         assert len(accepted)==1
+        if staff_test:
+            status,admin = request("/auth/login","POST",{
+                "email":env["Milestone__AdministratorEmail"],
+                "password":env["Milestone__AdministratorPassword"]})
+            assert status==200
+            staff_session=None
+            try:
+                staff_email="synthetic-smtp-staff-"+uuid.uuid4().hex+"@example.invalid"
+                status,account=request("/admin/staff/invitations","POST",
+                    {"email":staff_email,"role":"Support"},admin["accessToken"])
+                assert status==201
+                assert set(account)=={"id","email","role","status","version"}
+                assert account["status"]=="PendingActivation"
+                assert request("/auth/dev-mailbox?"+urllib.parse.urlencode(
+                    {"email":staff_email,"purpose":"staff-activation"}),
+                    extra={"X-Dev-Mailbox-Key":env["Milestone__MailboxKey"]})[0]==404
+                assert request("/admin/staff/"+account["id"]+"/invitation","POST",
+                    {"expectedVersion":account["version"]},admin["accessToken"])[0]==429
+                for _ in range(160):
+                    staff_messages=[data for recipients,data in accepted if staff_email in recipients]
+                    if staff_messages: break
+                    time.sleep(0.25)
+                else: raise RuntimeError("Pending staff SMTP invitation was not delivered.")
+                assert len(staff_messages)==1
+                message=BytesParser(policy=policy.default).parsebytes(staff_messages[0])
+                body=message.get_content()
+                tokens=re.findall(r"\b[A-F0-9]{64}\b",body)
+                assert len(tokens)==1
+                links=re.findall(r"https?://[^\s]+",body)
+                assert len(links)==1
+                link=urllib.parse.urlparse(links[0])
+                assert link.path=="/activar-personal" and not link.query and not link.fragment
+                assert tokens[0] not in links[0]
+                password=uuid.uuid4().hex+"!a9"
+                status,activation=request("/auth/staff/activate","POST",
+                    {"token":tokens[0],"password":password})
+                assert status==200 and activation=={"activated":True}
+                assert request("/auth/staff/activate","POST",
+                    {"token":tokens[0],"password":password})[0]==400
+                status,staff_session=request("/auth/login","POST",{"email":staff_email,"password":password})
+                assert status==200
+                assert request("/admin/staff/invitations","POST",
+                    {"email":"synthetic-forbidden-"+uuid.uuid4().hex+"@example.invalid","role":"Support"},
+                    staff_session["accessToken"])[0]==403
+            finally:
+                if staff_session is not None:
+                    request("/auth/logout","POST",{},staff_session["accessToken"])
+                request("/auth/logout","POST",{},admin["accessToken"])
     finally:
         server.terminate()
         try: server.wait(timeout=10)
@@ -78,3 +131,5 @@ def check_smtp():
 if __name__=="__main__":
     check_smtp()
     print("SMTP loopback retry, deduplication, private verification and single-use token: PASS")
+    if "--staff-invitations" in sys.argv:
+        print("Staff SMTP delivery, pending activation, mailbox privacy, cooldown and permissions: PASS")
