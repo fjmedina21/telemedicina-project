@@ -8,3 +8,4 @@
 - No ejecutar shell arbitrario, desplegar ni modificar archivos fuera del área autorizada desde el agente.
 - Proponer parches, nunca aplicarlos automáticamente. Toda integración requiere revisión y pruebas.
 - No inventar decisiones clínicas, seguros, consentimiento o validez legal de recetas.
+- La memoria de decisiones y operación por módulo se mantiene en `docs/Mxx.md`; consultar el documento correspondiente antes de continuar un módulo.

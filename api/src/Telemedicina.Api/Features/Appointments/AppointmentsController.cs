@@ -125,6 +125,7 @@ public sealed class AppointmentsController(Database database, NotificationServic
                 ready_at=NULL,invalidated_at=now(),updated_at=now()
             WHERE appointment_id=@id AND active
             """, ("id", id.ToString()));
+        Execute(c, t, "UPDATE video_sessions SET status='Ended',ended_at=coalesce(ended_at,now()),updated_at=now() WHERE appointment_id=@id AND status NOT IN ('Ended','Failed')", ("id", id.ToString()));
         Execute(c, t, "UPDATE appointments SET status='Cancelled',version=version+1 WHERE id=@id", ("id", id.ToString()));
         notifications.AppointmentEvent(c, t, id.ToString(), "cancelled");
         Log(c, t, "appointment.cancelled", id.ToString()); t.Commit(); return Data(new { cancelled = true });
@@ -158,6 +159,7 @@ public sealed class AppointmentsController(Database database, NotificationServic
                     ready_at=NULL,invalidated_at=now(),updated_at=now()
                 WHERE appointment_id=@id AND active
                 """, ("id", id.ToString()));
+            Execute(c, t, "UPDATE video_sessions SET status='Ended',ended_at=coalesce(ended_at,now()),updated_at=now() WHERE appointment_id=@id AND status NOT IN ('Ended','Failed')", ("id", id.ToString()));
             Execute(c, t, """
                 UPDATE appointments SET slot_id=@slot,practitioner_id=@p,start_utc=@start,end_utc=@end,
                 status='PendingValidation',coverage='ManualReview',evidence=NULL,coverage_valid_until=NULL,

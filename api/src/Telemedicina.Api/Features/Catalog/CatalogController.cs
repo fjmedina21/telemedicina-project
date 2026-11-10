@@ -64,11 +64,17 @@ public sealed class CatalogController(Database database) : ApiControllerBase(dat
     {
         using var c = Database.Open();
         return Data(Rows(c, null, """
-            SELECT p.id,p.name,p.active,p.version,p.license_ref AS "licenseRef",
+            SELECT p.id,p.name,p.active,p.version,p.license_ref AS "licenseRef",p.user_id AS "accountId",
                 ARRAY(SELECT service_id FROM practitioner_services ps
                     WHERE ps.practitioner_id=p.id AND ps.active ORDER BY service_id) AS "serviceIds"
             FROM practitioners p ORDER BY p.name
             """));
+    }
+    [HttpGet("practitioner-accounts")]
+    public IActionResult PractitionerAccounts()
+    {
+        using var c = Database.Open();
+        return Data(Rows(c, null, "SELECT id,email FROM users WHERE role='Practitioner' AND active ORDER BY email"));
     }
     [HttpPost("practitioners")]
     public IActionResult CreatePractitioner(CatalogPractitionerRequest request) => SavePractitioner(null, request);
@@ -79,6 +85,7 @@ public sealed class CatalogController(Database database) : ApiControllerBase(dat
         if (string.IsNullOrWhiteSpace(request.Name) || request.ServiceIds is null || request.ServiceIds.Any(x => !Guid.TryParse(x, out var parsed) || parsed == Guid.Empty))
             return Fail(400, "CATALOG_VALIDATION", "Revise nombre y servicios asignados.");
         var ids = request.ServiceIds.Select(x => Guid.Parse(x).ToString()).Distinct().ToArray();
+        var accountId = string.IsNullOrWhiteSpace(request.AccountId) ? null : request.AccountId.Trim();
         using var c = Database.Open(); using var t = Begin(c);
         var created = id is null; id ??= Guid.NewGuid().ToString(); var version = 1;
         var observedVersion = created ? null : Scalar(c, t, "SELECT version FROM practitioners WHERE id=@id", ("id", id));
@@ -89,6 +96,8 @@ public sealed class CatalogController(Database database) : ApiControllerBase(dat
         OfferPolicy.LockServices(c, t, ids.Concat(observedLinks));
         if (Convert.ToInt64(Scalar(c, t, "SELECT count(*) FROM services WHERE id=ANY(@ids)", ("ids", ids))) != ids.Length)
             return Fail(400, "UNKNOWN_SERVICE", "Uno de los servicios no existe.");
+        if (accountId is not null && Scalar(c, t, "SELECT id FROM users WHERE id=@id AND role='Practitioner' AND active", ("id", accountId)) is null)
+            return Fail(400, "INVALID_PRACTITIONER_ACCOUNT", "Seleccione una cuenta activa con rol Profesional.");
         if (!created)
         {
             var old = Scalar(c, t, "SELECT version FROM practitioners WHERE id=@id FOR UPDATE", ("id", id));
@@ -96,11 +105,12 @@ public sealed class CatalogController(Database database) : ApiControllerBase(dat
             if ((int)old != request.Version || !Equals(old, observedVersion) || !observedLinks.SequenceEqual(Links(), StringComparer.Ordinal))
                 return Fail(409, "VERSION_CONFLICT", "El profesional cambió. Actualice la lista.");
             version = request.Version + 1;
-            Execute(c, t, "UPDATE practitioners SET name=@name,license_ref=@license,active=@active,version=@version WHERE id=@id",
-                ("name", request.Name.Trim()), ("license", request.LicenseRef?.Trim()), ("active", request.Active), ("version", version), ("id", id));
+            Execute(c, t, "UPDATE practitioners SET name=@name,license_ref=@license,active=@active,user_id=@account,version=@version WHERE id=@id",
+                ("name", request.Name.Trim()), ("license", request.LicenseRef?.Trim()), ("active", request.Active), ("account", accountId), ("version", version), ("id", id));
         }
         else Execute(c, t, "INSERT INTO practitioners(id,name,license_ref,active) VALUES(@id,@name,@license,@active)",
             ("id", id), ("name", request.Name.Trim()), ("license", request.LicenseRef?.Trim()), ("active", request.Active));
+        Execute(c, t, "UPDATE practitioners SET user_id=@account WHERE id=@id", ("account", accountId), ("id", id));
         Execute(c, t, "UPDATE practitioner_services SET active=false WHERE practitioner_id=@id", ("id", id));
         foreach (var service in ids)
             Execute(c, t, """

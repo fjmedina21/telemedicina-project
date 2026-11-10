@@ -4,7 +4,7 @@ import {useEffect,useState} from "react";
 import {api} from "@/shared/api/client";
 import type {Identity} from "@/shared/api/identity";
 import {usePathname} from "next/navigation";
-import {CalendarDays,ClipboardList,Layers3,Mail,ShieldCheck,ArrowUpRight} from "lucide-react";
+import {CalendarDays,ClipboardList,Layers3,Mail,ShieldCheck,ArrowUpRight,Video} from "lucide-react";
 import Brand from "./brand";
 const navigation=[
   {permission:"admission.manage",href:"/admision",label:"Admisión",icon:ClipboardList},
@@ -13,6 +13,7 @@ const navigation=[
   {permission:"delivery.read",href:"/entregas",label:"Entregas de correo",icon:Mail},
   {permission:"audit.read",href:"/admin",label:"Auditoría",icon:ShieldCheck},
   {permission:"staff.read",href:"/personal",label:"Cuentas de personal",icon:ShieldCheck},
+  {permission:"video.practitioner",href:"/videoconsulta",label:"Videoconsulta",icon:Video},
   {permission:"identity.self",href:"/cuenta",label:"Mi cuenta",icon:ShieldCheck},
 ];
 export default function AppFrame({children}:{children:React.ReactNode}) {
@@ -44,7 +45,7 @@ export default function AppFrame({children}:{children:React.ReactNode}) {
     <div className="workspace">
       {!login&&<header className="workspace-bar"><span>Portal de telemedicina</span><span className="timezone">Hora de Santo Domingo · UTC−4</span></header>}
       <main id="contenido" tabIndex={-1}>{children}</main>
-      <footer className="workspace-footer">Entorno de demostración · Sin atención clínica, video ni documentos habilitados.</footer>
+      <footer className="workspace-footer">Entorno de demostración · Video sintético habilitado para H07 · Sin atención clínica.</footer>
     </div>
   </div>;
 }

@@ -2,12 +2,12 @@
 import {useState} from "react";
 import {Item} from "@/shared/api/client";
 
-type Props={services:Item[];practitioners:Item[];busy:boolean;
+type Props={services:Item[];practitioners:Item[];practitionerAccounts:Item[];busy:boolean;
   onSave:(path:string,method:string,body:unknown)=>Promise<boolean>};
 const blankService={id:"",name:"",specialty:"",durationMinutes:30,active:false,isSynthetic:true,approvalReference:"",version:0};
-const blankPractitioner={id:"",name:"",licenseRef:"",active:false,serviceIds:[] as string[],version:0};
+const blankPractitioner={id:"",name:"",licenseRef:"",active:false,serviceIds:[] as string[],accountId:"",version:0};
 
-export default function CatalogPanel({services,practitioners,busy,onSave}:Props){
+export default function CatalogPanel({services,practitioners,practitionerAccounts,busy,onSave}:Props){
   const [service,setService]=useState(blankService);
   const [person,setPerson]=useState(blankPractitioner);
   return <div className="grid gap-6 xl:grid-cols-2">
@@ -64,6 +64,12 @@ export default function CatalogPanel({services,practitioners,busy,onSave}:Props)
         <label className="block" htmlFor="license">Referencia profesional</label>
         <input id="license" className="w-full rounded border p-2" maxLength={100} value={person.licenseRef}
           onChange={e=>setPerson({...person,licenseRef:e.target.value})}/>
+        <label className="block" htmlFor="practitioner-account">Cuenta de portal del profesional</label>
+        <select id="practitioner-account" className="w-full rounded border p-2" value={person.accountId}
+          onChange={e=>setPerson({...person,accountId:e.target.value})}>
+          <option value="">Sin cuenta vinculada</option>
+          {practitionerAccounts.map(account=><option key={String(account.id)} value={String(account.id)}>{String(account.email)}</option>)}
+        </select>
         <label className="block"><input type="checkbox" checked={person.active}
           onChange={e=>setPerson({...person,active:e.target.checked})}/> Profesional activo</label>
         <fieldset className="space-y-2 rounded border p-3"><legend>Servicios asignados</legend>
@@ -86,6 +92,7 @@ export default function CatalogPanel({services,practitioners,busy,onSave}:Props)
         <button disabled={busy} className="underline" onClick={()=>setPerson({
           id:String(item.id),name:String(item.name),licenseRef:String(item.licenseRef??""),
           active:Boolean(item.active),version:Number(item.version),
+          accountId:String(item.accountId??""),
           serviceIds:Array.isArray(item.serviceIds)?item.serviceIds.map(String):[]
         })}>Editar profesional</button>
       </li>)}</ul>
