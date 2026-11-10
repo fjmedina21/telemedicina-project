@@ -26,6 +26,7 @@ runs/
 *.user
 *.suo
 # Local secrets and certificates
+api/src/env.zip
 **/secrets/
 *.pem
 *.p12
