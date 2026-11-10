@@ -1,0 +1,21 @@
+{
+  "database": "ephemeral-local-postgres17",
+  "real_email_sent": false,
+  "checks": {
+    "migrations": {
+      "exit_code": 0
+    },
+    "seed_admission": {
+      "exit_code": 0
+    },
+    "seed_admin": {
+      "exit_code": 0
+    },
+    "smtp_staff_invitations": {
+      "exit_code": 0
+    }
+  },
+  "status": "FAIL",
+  "error_type": "RuntimeError",
+  "temporary_container_removed": true
+}

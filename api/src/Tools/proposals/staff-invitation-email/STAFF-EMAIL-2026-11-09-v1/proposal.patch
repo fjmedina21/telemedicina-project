@@ -1,0 +1,394 @@
+diff --git a/api/src/Telemedicina.Api/Features/Identity/StaffInvitations.cs b/api/src/Telemedicina.Api/Features/Identity/StaffInvitations.cs
+--- a/api/src/Telemedicina.Api/Features/Identity/StaffInvitations.cs
++++ b/api/src/Telemedicina.Api/Features/Identity/StaffInvitations.cs
+@@ -1,4 +1,6 @@
+ using Npgsql;
++using Telemedicina.Api.Features.Notifications;
++using Telemedicina.Api.Infrastructure.Email;
+ using static Telemedicina.Api.Infrastructure.Persistence.Database;
+ using static Telemedicina.Api.Infrastructure.Authentication.Security;
+ 
+@@ -6,33 +8,87 @@
+ 
+ internal static class StaffInvitations
+ {
++    internal const string Kind = "staff-activation";
++
+     public static void RequireDevelopment(IHostEnvironment environment, IConfiguration config)
+     {
+         if (!environment.IsDevelopment() || !config.GetValue<bool>("Milestone:Enabled"))
+             throw new InvalidOperationException("Synthetic accounts require explicit Development configuration.");
+     }
+ 
++    internal static string ActivationUrl(IConfiguration config)
++    {
++        var origin = config["Milestone:PortalOrigin"] ?? "http://localhost:3000";
++        if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri) ||
++            uri.Scheme is not ("http" or "https") || string.IsNullOrEmpty(uri.Host) ||
++            !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Query) ||
++            !string.IsNullOrEmpty(uri.Fragment) || uri.AbsolutePath != "/" ||
++            (uri.Scheme == "http" && !uri.IsLoopback))
++            throw new InvalidOperationException("Invalid staff activation portal origin.");
++        return uri.GetLeftPart(UriPartial.Authority) + "/activar-personal";
++    }
++
+     public static void Revoke(NpgsqlConnection c, NpgsqlTransaction t, string user)
+     {
++        // Callers hold the user row first. The worker takes only this advisory lock,
++        // never a user-row lock, so invalidation and SMTP are serialized.
++        Execute(c, t, "SELECT pg_advisory_xact_lock(hashtextextended(@key,0))", ("key", "mailuser:" + user));
+         Execute(c, t, "UPDATE staff_invitations SET used=true WHERE user_id=@u AND NOT used", ("u", user));
++        Execute(c, t, """
++            UPDATE email_outbox SET
++                state=CASE WHEN state='Unknown' THEN state ELSE 'Superseded' END,
++                payload_cipher='',locked_until=NULL
++            WHERE user_id=@u AND kind=@kind AND state IN ('Queued','Sending','Unknown')
++            """, ("u", user), ("kind", Kind));
+         Execute(c, t, "DELETE FROM dev_mailbox WHERE user_id=@u AND purpose='staff-activation'", ("u", user));
+     }
+ 
+-    public static void Issue(NpgsqlConnection c, NpgsqlTransaction t, string user, string actor)
++    public static void Issue(NpgsqlConnection c, NpgsqlTransaction t, string user, string actor,
++        NotificationService notifications, MailSettings mail, IConfiguration config)
+     {
++        var url = ActivationUrl(config);
++        mail.Validate();
+         Revoke(c, t, user);
+         var token = NewToken();
+         var now = Now;
++        var expires = now + 900;
++        var hash = Hash(token);
+         Execute(c, t, """
+             INSERT INTO staff_invitations(token_hash,user_id,expires,issued_at,created_by)
+             VALUES(@h,@u,@e,@n,@actor)
+-            """, ("h", Hash(token)), ("u", user), ("e", now + 900), ("n", now), ("actor", actor));
+-        // Only the existing private, key-protected dev mailbox can retrieve this token.
+-        // No SMTP/outbox entry, token in HTTP responses, logging, or URL.
+-        Execute(c, t, """
+-            INSERT INTO dev_mailbox(user_id,purpose,token,expires)
+-            VALUES(@u,'staff-activation',@token,@e)
+-            ON CONFLICT(user_id,purpose) DO UPDATE SET token=excluded.token,expires=excluded.expires
+-            """, ("u", user), ("token", token), ("e", now + 900));
++            """, ("h", hash), ("u", user), ("e", expires), ("n", now), ("actor", actor));
++        notifications.Queue(c, t, user, Kind, Kind + ":" + hash, "Activa tu cuenta de personal",
++            "Has recibido una invitación para activar tu cuenta de personal.\n" +
++            "Abre " + url + " y copia este código de invitación:\n" + token +
++            "\nDefine tu contraseña en el portal. La invitación caduca en 15 minutos y se utiliza una sola vez." +
++            "\nSi no esperabas esta invitación, puedes ignorar este mensaje.",
++            expires: DateTimeOffset.FromUnixTimeSeconds(expires).UtcDateTime);
++        // Development capture remains private. SMTP tokens exist only in the encrypted payload.
++        if (mail.Mode == "development")
++            Execute(c, t, """
++                INSERT INTO dev_mailbox(user_id,purpose,token,expires)
++                VALUES(@u,'staff-activation',@token,@e)
++                ON CONFLICT(user_id,purpose) DO UPDATE SET token=excluded.token,expires=excluded.expires
++                """, ("u", user), ("token", token), ("e", expires));
++    }
++
++    internal static string? DeliveryState(NpgsqlConnection c, Dictionary<string, object?> row)
++    {
++        // Match the exact invitation, not merely the newest invitation for this user.
++        // Never use appointment resource/version fields to correlate identity mail.
++        return Scalar(c, null, """
++            SELECT CASE
++                WHEN i.expires<=@now THEN 'Expired'
++                WHEN i.used OR u.verified OR u.active OR u.role NOT IN ('Admission','Practitioner','Support')
++                    THEN 'Superseded'
++                ELSE 'Eligible' END
++            FROM staff_invitations i JOIN users u ON u.id=i.user_id
++            WHERE i.user_id=@u AND @key='staff-activation:' || i.token_hash
++            """, ("u", row["user_id"]), ("key", row["event_key"]), ("now", Now)) switch
++        {
++            "Eligible" => null,
++            "Expired" => "Expired",
++            _ => "Superseded"
++        };
+     }
+ }
+diff --git a/api/src/Telemedicina.Tests/Contracts/StaffInvitationUnitChecks.cs b/api/src/Telemedicina.Tests/Contracts/StaffInvitationUnitChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/api/src/Telemedicina.Tests/Contracts/StaffInvitationUnitChecks.cs
+@@ -0,0 +1,33 @@
++using Microsoft.Extensions.Configuration;
++using Telemedicina.Api.Features.Identity;
++
++namespace Telemedicina.Tests;
++
++public static class StaffInvitationUnitChecks
++{
++    public static void Register(Action<string, Action> test, Action<bool, string> assert)
++    {
++        foreach (var origin in new[] { "http://localhost:3000", "http://127.0.0.1:3000/", "http://[::1]:3000",
++            "https://portal.example.invalid" })
++            test("StaffInvitation_ValidPortal_" + origin, () =>
++            {
++                var config = new ConfigurationBuilder().AddInMemoryCollection(
++                    new Dictionary<string, string?> { ["Milestone:PortalOrigin"] = origin }).Build();
++                var url = StaffInvitations.ActivationUrl(config);
++                assert(url == new Uri(origin).GetLeftPart(UriPartial.Authority) + "/activar-personal",
++                    "Activation uses a public page without token in URL.");
++            });
++        foreach (var origin in new[] { "", "/relative", "ftp://portal.example.invalid", "http://portal.example.invalid",
++            "https://user:password@portal.example.invalid", "https://portal.example.invalid/?token=secret",
++            "https://portal.example.invalid/#secret", "https://portal.example.invalid/subpath" })
++            test("StaffInvitation_RejectPortal_" + origin, () =>
++            {
++                var config = new ConfigurationBuilder().AddInMemoryCollection(
++                    new Dictionary<string, string?> { ["Milestone:PortalOrigin"] = origin }).Build();
++                var rejected = false;
++                try { StaffInvitations.ActivationUrl(config); }
++                catch (InvalidOperationException) { rejected = true; }
++                assert(rejected, "Invalid activation origin must fail before persistence.");
++            });
++    }
++}
+diff --git a/api/src/Telemedicina.Api/Features/Identity/StaffController.cs b/api/src/Telemedicina.Api/Features/Identity/StaffController.cs
+--- a/api/src/Telemedicina.Api/Features/Identity/StaffController.cs
++++ b/api/src/Telemedicina.Api/Features/Identity/StaffController.cs
+@@ -3,6 +3,8 @@
+ using Microsoft.AspNetCore.RateLimiting;
+ using Npgsql;
+ using Telemedicina.Api.Infrastructure.Authentication;
++using Telemedicina.Api.Features.Notifications;
++using Telemedicina.Api.Infrastructure.Email;
+ using Telemedicina.Api.Infrastructure.Persistence;
+ using Telemedicina.Api.Shared;
+ using Telemedicina.Common.Models.ApiResponses;
+@@ -20,7 +22,7 @@
+ [ProducesResponseType(typeof(ErrorApiResponse), 429)]
+ [ApiController, StaffDenialAudit, Authorize(Roles = "Administrator"), Route("api/v1/admin/staff")]
+ public sealed class StaffController(Database database, IHostEnvironment environment,
+-    IConfiguration configuration) : ApiControllerBase(database)
++    IConfiguration configuration, NotificationService notifications, MailSettings mail) : ApiControllerBase(database)
+ {
+     private const string Managed = "role IN ('Admission','Practitioner','Support')";
+     private const string SelectAccount = """
+@@ -79,7 +81,7 @@
+             ("hash", Password(NewToken())), ("role", request.Role), ("actor", UserId(User)));
+         if (inserted == 0)
+             return Denied(c, t, 409, "ACCOUNT_ALREADY_EXISTS", "staff.invite");
+-        StaffInvitations.Issue(c, t, id, UserId(User));
++        StaffInvitations.Issue(c, t, id, UserId(User), notifications, mail, configuration);
+         Record(c, t, UserId(User), "staff.invited", id, HttpContext.TraceIdentifier);
+         var account = Account(Rows(c, t, SelectAccount + " WHERE id=@id", ("id", id))[0]);
+         t.Commit();
+@@ -125,7 +127,7 @@
+                 "SELECT count(*) FROM staff_invitations WHERE user_id=@u AND issued_at>@n",
+                 ("u", account.Id), ("n", Now - 60)));
+             if (recent > 0) return Denied(c, t, 429, "RATE_LIMITED", "staff.invitation");
+-            StaffInvitations.Issue(c, t, account.Id, UserId(User));
++            StaffInvitations.Issue(c, t, account.Id, UserId(User), notifications, mail, configuration);
+         }
+         else if (operation == "state")
+         {
+diff --git a/api/src/Telemedicina.Api/Features/Identity/AuthController.cs b/api/src/Telemedicina.Api/Features/Identity/AuthController.cs
+--- a/api/src/Telemedicina.Api/Features/Identity/AuthController.cs
++++ b/api/src/Telemedicina.Api/Features/Identity/AuthController.cs
+@@ -153,7 +153,7 @@
+     public IActionResult Mailbox([FromQuery] string email, [FromQuery] string purpose)
+     {
+         if (!environment.IsDevelopment() || !configuration.GetValue<bool>("Milestone:Enabled") ||
+-            (purpose != "staff-activation" && mail.Mode != "development") ||
++            mail.Mode != "development" ||
+             purpose is not ("verify" or "reset" or "staff-activation")) return NotFound();
+         var expected = configuration["Milestone:MailboxKey"];
+         var supplied = Request.Headers["X-Dev-Mailbox-Key"].ToString();
+diff --git a/api/src/Telemedicina.Api/Infrastructure/Email/MailWorker.cs b/api/src/Telemedicina.Api/Infrastructure/Email/MailWorker.cs
+--- a/api/src/Telemedicina.Api/Infrastructure/Email/MailWorker.cs
++++ b/api/src/Telemedicina.Api/Infrastructure/Email/MailWorker.cs
+@@ -4,6 +4,7 @@
+ using System.Security.Cryptography;
+ using System.Text;
+ using Telemedicina.Api.Infrastructure.Persistence;
++using Telemedicina.Api.Features.Identity;
+ using static Telemedicina.Api.Infrastructure.Persistence.Database;
+ 
+ namespace Telemedicina.Api.Infrastructure.Email;
+@@ -55,9 +56,20 @@
+         var resource = row["resource_id"] as string;
+         var userKey = "mailuser:" + (string)row["user_id"]!;
+         Execute(c, null, "SELECT pg_advisory_lock(hashtextextended(@key,0))", ("key", userKey));
+-        if (resource is not null) Execute(c, null, "SELECT pg_advisory_lock(hashtextextended(@key,0))", ("key", "delivery:" + resource));
++        var resourceLocked = false;
+         try
+         {
++            if (resource is not null)
++            {
++                Execute(c, null, "SELECT pg_advisory_lock(hashtextextended(@key,0))", ("key", "delivery:" + resource));
++                resourceLocked = true;
++            }
++            // A revocation may invalidate an already leased message while this worker waits.
++            // Read the current state and ciphertext only after taking the shared delivery lock.
++            row = Rows(c, null, """
++                SELECT * FROM email_outbox WHERE id=@id AND state='Sending' AND lease_token=@lease
++                """, ("id", row["id"]), ("lease", lease)).FirstOrDefault();
++            if (row is null) return;
+             (string State, string? Code) result;
+             if (row["expires_at"] is DateTime expiry && expiry <= DateTime.UtcNow) result = ("Expired", null);
+             else if (row["resource_version"] is int version && resource is not null &&
+@@ -65,7 +77,11 @@
+                 result = ("Superseded", null);
+             else if (row["notification_id"] is not null && Scalar(c, null, "SELECT email_enabled FROM notification_preferences WHERE user_id=@u", ("u", row["user_id"])) is not true)
+                 result = ("Superseded", null);
+-            else if (!Convert.ToBoolean(Scalar(c, null, "SELECT active FROM users WHERE id=@id", ("id", row["user_id"]))))
++            else if ((string)row["kind"]! == StaffInvitations.Kind &&
++                StaffInvitations.DeliveryState(c, row) is { } invitationState)
++                result = (invitationState, null);
++            else if ((string)row["kind"]! != StaffInvitations.Kind &&
++                !Convert.ToBoolean(Scalar(c, null, "SELECT active FROM users WHERE id=@id", ("id", row["user_id"]))))
+                 result = ("Superseded", null);
+             else
+             {
+@@ -73,7 +89,7 @@
+                 deadline.CancelAfter(TimeSpan.FromSeconds(25));
+                 result = await services.GetRequiredService<MailTransport>().SendAsync(row, deadline.Token);
+             }
+-            var attempts = (int)row["attempts"]! + 1;
++            var attempts = (int)row["attempts"]!;
+             if (result.State == "Queued" && attempts >= 6) result = ("Failed", "RETRY_LIMIT");
+             var delay = Math.Min(3600, settings.RetrySeconds * (1 << Math.Min(attempts - 1, 6)));
+             Execute(c, null, """
+@@ -81,12 +97,12 @@
+                 available_at=now()+make_interval(secs=>@delay),
+                 sent_at=CASE WHEN @state IN ('Sent','Captured') THEN now() ELSE sent_at END,
+                 payload_cipher=CASE WHEN @state IN ('Sent','Captured','Superseded','Expired','Failed') THEN '' ELSE payload_cipher END
+-                WHERE id=@id AND lease_token=@lease
++                WHERE id=@id AND lease_token=@lease AND state='Sending'
+                 """, ("state", result.State), ("code", result.Code), ("delay", delay), ("id", row["id"]), ("lease", lease));
+         }
+         finally
+         {
+-            if (resource is not null) Execute(c, null, "SELECT pg_advisory_unlock(hashtextextended(@key,0))", ("key", "delivery:" + resource));
++            if (resourceLocked) Execute(c, null, "SELECT pg_advisory_unlock(hashtextextended(@key,0))", ("key", "delivery:" + resource));
+             Execute(c, null, "SELECT pg_advisory_unlock(hashtextextended(@key,0))", ("key", userKey));
+         }
+     }
+diff --git a/portalweb/src/src/features/auth/components/staff-activation-form.tsx b/portalweb/src/src/features/auth/components/staff-activation-form.tsx
+--- a/portalweb/src/src/features/auth/components/staff-activation-form.tsx
++++ b/portalweb/src/src/features/auth/components/staff-activation-form.tsx
+@@ -8,7 +8,7 @@
+   const [busy,setBusy]=useState(false),[message,setMessage]=useState(""),[done,setDone]=useState(false);
+   return <section className="login-card" aria-busy={busy}>
+     <h1>Activar cuenta de personal</h1>
+-    <p>Utiliza tu invitación privada de desarrollo. Caduca en 15 minutos y se utiliza una sola vez.</p>
++    <p>Utiliza el código de invitación recibido por correo. Caduca en 15 minutos y se utiliza una sola vez.</p>
+     {!done&&<form className="space-y-4" autoComplete="off" onSubmit={async event=>{
+       event.preventDefault();setBusy(true);setMessage("");
+       try{
+diff --git a/portalweb/src/src/features/staff/components/staff-panel.tsx b/portalweb/src/src/features/staff/components/staff-panel.tsx
+--- a/portalweb/src/src/features/staff/components/staff-panel.tsx
++++ b/portalweb/src/src/features/staff/components/staff-panel.tsx
+@@ -81,7 +81,8 @@
+     await action(async()=>{
+       await api("/admin/staff/"+account.id+"/"+suffix,method,{...body,expectedVersion:account.version});
+       await load(cursor,previous);
+-      setEvents([]);setAuditNext(null);setMessage("Operación confirmada por el servidor. Una cuenta pendiente puede requerir una nueva invitación.");
++      setEvents([]);setAuditNext(null);setMessage(suffix==="invitation"?"Invitación registrada. La entrega del correo está pendiente.":
++        "Operación confirmada por el servidor. Una cuenta pendiente puede requerir una nueva invitación.");
+     });
+   }
+   async function audit(after=0){
+@@ -104,7 +105,7 @@
+       void action(async()=>{
+         await api("/admin/staff/invitations","POST",{email,role});
+         setEmail("");await load();setEvents([]);setAuditNext(null);
+-        setMessage("Invitación creada en el buzón privado de desarrollo. Caduca en 15 minutos.");
++        setMessage("Invitación registrada. La entrega del correo está pendiente.");
+       });
+     }}>
+       <h2>Invitar personal</h2>
+diff --git a/api/src/Telemedicina.Tests/Contracts/Program.cs b/api/src/Telemedicina.Tests/Contracts/Program.cs
+--- a/api/src/Telemedicina.Tests/Contracts/Program.cs
++++ b/api/src/Telemedicina.Tests/Contracts/Program.cs
+@@ -210,6 +210,7 @@
+         ProfileUnitChecks.Register(Test, Assert);
+         H04UnitChecks.Register(Test, Assert);
+         H05UnitChecks.Register(Test, Assert);
++        StaffInvitationUnitChecks.Register(Test, Assert);
+ 
+         Console.WriteLine("-------------------------------------------------");
+         Console.WriteLine($" Summary: {_passedCount} passed, {_failedCount} failed.");
+diff --git a/api/src/Telemedicina.Tests/Integration/smtp_fixture_test.py b/api/src/Telemedicina.Tests/Integration/smtp_fixture_test.py
+--- a/api/src/Telemedicina.Tests/Integration/smtp_fixture_test.py
++++ b/api/src/Telemedicina.Tests/Integration/smtp_fixture_test.py
+@@ -7,6 +7,7 @@
+ import re
+ import smtpd
+ import subprocess
++import sys
+ import threading
+ import time
+ import urllib.parse
+@@ -14,6 +15,10 @@
+ 
+ def check_smtp():
+     assert os.environ.get("MILESTONE_TEST_SYNTHETIC")=="1"
++    staff_test = "--staff-invitations" in sys.argv
++    if staff_test and not all(os.environ.get(key) for key in
++            ("Milestone__AdministratorEmail", "Milestone__AdministratorPassword")):
++        raise RuntimeError("Staff SMTP checks require a separately seeded synthetic administrator.")
+     from milestone_e2e import request
+     import milestone_e2e as api
+     original=api.BASE
+@@ -69,6 +74,54 @@
+         assert request("/auth/register","POST",{"email":email,"password":password})[0]==202
+         time.sleep(2)
+         assert len(accepted)==1
++        if staff_test:
++            status,admin = request("/auth/login","POST",{
++                "email":env["Milestone__AdministratorEmail"],
++                "password":env["Milestone__AdministratorPassword"]})
++            assert status==200
++            staff_session=None
++            try:
++                staff_email="synthetic-smtp-staff-"+uuid.uuid4().hex+"@example.invalid"
++                status,account=request("/admin/staff/invitations","POST",
++                    {"email":staff_email,"role":"Support"},admin["accessToken"])
++                assert status==201
++                assert set(account)=={"id","email","role","status","version"}
++                assert account["status"]=="PendingActivation"
++                assert request("/auth/dev-mailbox?"+urllib.parse.urlencode(
++                    {"email":staff_email,"purpose":"staff-activation"}),
++                    extra={"X-Dev-Mailbox-Key":env["Milestone__MailboxKey"]})[0]==404
++                assert request("/admin/staff/"+account["id"]+"/invitation","POST",
++                    {"expectedVersion":account["version"]},admin["accessToken"])[0]==429
++                for _ in range(160):
++                    staff_messages=[data for recipients,data in accepted if staff_email in recipients]
++                    if staff_messages: break
++                    time.sleep(0.25)
++                else: raise RuntimeError("Pending staff SMTP invitation was not delivered.")
++                assert len(staff_messages)==1
++                message=BytesParser(policy=policy.default).parsebytes(staff_messages[0])
++                body=message.get_content()
++                tokens=re.findall(r"\b[A-F0-9]{64}\b",body)
++                assert len(tokens)==1
++                links=re.findall(r"https?://[^\s]+",body)
++                assert len(links)==1
++                link=urllib.parse.urlparse(links[0])
++                assert link.path=="/activar-personal" and not link.query and not link.fragment
++                assert tokens[0] not in links[0]
++                password=uuid.uuid4().hex+"!a9"
++                status,activation=request("/auth/staff/activate","POST",
++                    {"token":tokens[0],"password":password})
++                assert status==200 and activation=={"activated":True}
++                assert request("/auth/staff/activate","POST",
++                    {"token":tokens[0],"password":password})[0]==400
++                status,staff_session=request("/auth/login","POST",{"email":staff_email,"password":password})
++                assert status==200
++                assert request("/admin/staff/invitations","POST",
++                    {"email":"synthetic-forbidden-"+uuid.uuid4().hex+"@example.invalid","role":"Support"},
++                    staff_session["accessToken"])[0]==403
++            finally:
++                if staff_session is not None:
++                    request("/auth/logout","POST",{},staff_session["accessToken"])
++                request("/auth/logout","POST",{},admin["accessToken"])
+     finally:
+         server.terminate()
+         try: server.wait(timeout=10)
+@@ -78,3 +131,5 @@
+ if __name__=="__main__":
+     check_smtp()
+     print("SMTP loopback retry, deduplication, private verification and single-use token: PASS")
++    if "--staff-invitations" in sys.argv:
++        print("Staff SMTP delivery, pending activation, mailbox privacy, cooldown and permissions: PASS")
