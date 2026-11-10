@@ -99,6 +99,7 @@ export default function AdmissionQueue(){
     {selected&&<section className="surface space-y-3" aria-label="Detalle de cita">
       <h2>Detalle de cita · {String(selected.patientEmail??"")}</h2>
       <p>{String(selected.serviceName??"")} · {String(selected.practitionerName??"")} · {localTime(selected.startAt)}</p>
+      <p>ID de cita: <code>{String(selected.id)}</code></p>
       <p>Estado de cita: <StatusBadge value={selected.status}/></p>
       <p>Revisión de cobertura: {coverageLabel(selected.coverageStatus)}. Método: manual.</p>
       {validityLabel(selected.coverageValidityReason)&&<p>{validityLabel(selected.coverageValidityReason)}</p>}

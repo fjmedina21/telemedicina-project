@@ -1,7 +1,7 @@
 # Hoja de ruta de hitos — Telemedicina
 
 **Alcance:** primera versión usable y evolución del MVP de los módulos M01–M12.  
-**Estado:** hitos 01–05 completados en su alcance funcional local aprobado. La base técnica de H06-SPEC-v1 está completada y deshabilitada; el flujo clínico/legal completo de M06 sigue condicionado. UAT, PR y go/no-go de producción permanecen separados.
+**Estado:** hitos 01–06 completados en sus alcances funcionales locales aprobados; H06 corresponde únicamente al alcance académico/demo H06-SPEC-v2-DEMO. UAT, PR y go/no-go de producción permanecen separados.
 
 ## Resumen
 
@@ -12,7 +12,7 @@
 | 03. Perfil completo y dependientes | M02 | Perfil propio P0 con contacto, declaraciones, fuente/fecha y completitud; dependientes P1 fuera del cierre | Hito 02; H03-SPEC-v1 aprobada | **Completado — perfil P0** |
 | 04. Catálogo y agendas operativas | M03 | Servicios, profesionales y horarios configurables; disponibilidad coherente | Hito 02; reglas de oferta y horarios | **Completado en alcance aprobado; validación local PASS** |
 | 05. Citas y cobertura | M04, M05 | Políticas aprobadas de reserva/cambio; revisión manual de cobertura sin afirmar autorización no recibida | Hitos 03–04; reglas administrativas y de cobertura | **Completado en alcance H05-SPEC-v1 (P0), validación local PASS** |
-| 06. Admisión, triaje y consentimiento | M06 | Check-in con estados auditables según reglas aprobadas | Hito 05; aprobación clínica y legal | **Base técnica H06-SPEC-v1 completada**; flujo clínico/legal condicionado |
+| 06. Admisión, triaje y consentimiento | M06 | Check-in académico con estados auditables, consentimiento demo y datos sintéticos | Hito 05; alcance académico aprobado | **Completado en alcance H06-SPEC-v2-DEMO**; sin portal H06, tutoría ni flujo clínico real |
 | 07. Videoconsulta | M07 | Sala de espera, acceso temporal, unión/reconexión y fallos controlados | Hito 06; proveedor y revisión de privacidad/seguridad | Condicionado |
 | 08. Encuentro e historia clínica | M08 | Profesional autorizado documenta y cierra el encuentro con historial trazable | Hitos 02, 03 y 07; flujo clínico aprobado | Condicionado |
 | 09. Documentos clínicos | M09 | Publicación y descarga autenticada de documentos autorizados y versionados | Hito 08; política de documentos y firma aprobada | Condicionado |
@@ -54,9 +54,9 @@ Definir anticipación, cancelación, reprogramación, no-show y atención partic
 
 ### 06. Admisión, triaje y consentimiento
 
-La base técnica de H06-SPEC-v1 está completada localmente: la API devuelve `NotConfigured` y Flutter muestra un aviso sin acciones. Evidencia: [plan de base técnica](hito-06/PLAN_BASE_TECNICA_completado.md) y [validación](hito-06/VALIDACION_BASE_TECNICA_completado.md). No incluye triaje, consentimiento ni check-in activo. El flujo completo de M06 permanece condicionado a las aprobaciones clínicas, legales y de producto.
+H06-SPEC-v2-DEMO quedó completado localmente con datos sintéticos. Incluye check-in administrativo para paciente adulto titular, consentimiento académico versionado, preflight declarativo, ventana UTC `-30/+15`, invalidación por cancelación/reprogramación, idempotencia y proyección segura para futuros consumidores. Evidencia: [plan de cierre](hito-06/PLAN_completado.md), [validación de cierre](hito-06/VALIDACION_completado.md) y [documentación técnica](../docs/M06.md).
 
-Implementar solo reglas y textos revisados por responsables clínicos y legales. La falta de consentimiento o los criterios de exclusión impiden avanzar al estado autorizado que se apruebe. No inventar triage ni recomendaciones clínicas.
+El alcance no incluye triaje clínico real, tutoría/dependientes, atención real, pantalla específica del portal, identidad documental, medios ni decisiones legales/clínicas de producción.
 
 ### 07. Videoconsulta
 

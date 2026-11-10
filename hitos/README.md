@@ -49,6 +49,8 @@ Estado: completado localmente en el alcance P0 aprobado de H05-SPEC-v1. [Plan de
 
 ### Hito 06 — Admisión virtual
 
-Estado: completada la base técnica aprobada H06-SPEC-v1, mantenida deshabilitada. El flujo completo de triaje, consentimiento y check-in continúa condicionado a aprobaciones clínicas, legales y de producto. [Plan](hito-06/PLAN_BASE_TECNICA_completado.md) y [validación](hito-06/VALIDACION_BASE_TECNICA_completado.md).
+Estado: **completado en el alcance académico/demo H06-SPEC-v2-DEMO**. Incluye check-in administrativo para paciente adulto titular, consentimiento demo versionado, preflight declarativo, ventana UTC `-30/+15`, estados auditables, idempotencia, concurrencia e invalidación por cancelación/reprogramación. [Plan de cierre](hito-06/PLAN_completado.md), [validación de cierre](hito-06/VALIDACION_completado.md) y [memoria técnica](../docs/M06.md).
+
+El cierre no habilita triaje clínico, diagnóstico, urgencias, tutoría/dependientes, identidad documental, medios, videoconsulta, atención real, portal H06 ni validez legal o clínica de producción.
 
 Los informes de navegador se validan con Playwright. Guardar evidencias dentro del hito correspondiente, sin credenciales, datos reales de pacientes, storageState ni trazas que puedan contener secretos.

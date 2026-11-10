@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 
 ROOT=Path(__file__).resolve().parent.parent
-ALLOWED_PREFIXES=("ConnectionStrings__","Milestone__","Mail__","DemoReset__")
+ALLOWED_PREFIXES=("ConnectionStrings__","Milestone__","Mail__","DemoReset__","LiveKit__")
 ALLOWED_NAMES={"ASPNETCORE_ENVIRONMENT","ASPNETCORE_URLS","DOTNET_ROLL_FORWARD"}
 
 def environment():

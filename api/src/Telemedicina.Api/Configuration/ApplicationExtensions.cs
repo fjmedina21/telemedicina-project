@@ -4,6 +4,7 @@ using Telemedicina.Api.Infrastructure.Persistence;
 using Telemedicina.Api.Infrastructure.Authentication;
 using Telemedicina.Api.Infrastructure.Email;
 using Telemedicina.Api.Features.Notifications;
+using Telemedicina.Api.Infrastructure.Video;
 
 namespace Telemedicina.Api.Configuration;
 
@@ -15,6 +16,7 @@ public static class ApplicationExtensions
         builder.Services.AddSingleton<MailSettings>();
         builder.Services.AddSingleton<MailTransport>();
         builder.Services.AddSingleton<NotificationService>();
+        builder.Services.AddSingleton<LiveKitTokenService>();
         builder.Services.AddHostedService<MailWorker>();
         builder.Services.AddAuthentication(Security.Scheme)
             .AddScheme<AuthenticationSchemeOptions, SessionHandler>(Security.Scheme, _ => { });

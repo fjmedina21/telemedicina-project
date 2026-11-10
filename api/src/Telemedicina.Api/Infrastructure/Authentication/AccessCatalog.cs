@@ -9,7 +9,8 @@ public static class AccessCatalog
         "Patient" => ["identity.self", "catalog.read", "appointments.self", "profile.self", "notifications.self"],
         "Admission" => ["identity.self", "catalog.read", "admission.manage", "catalog.manage",
             "schedule.manage", "patient.state.change", "audit.read", "delivery.read"],
-        "Practitioner" or "Support" => ["identity.self"],
+        "Practitioner" => ["identity.self", "video.practitioner"],
+        "Support" => ["identity.self"],
         "Administrator" => ["identity.self", "staff.read", "staff.invite", "staff.role.change",
             "staff.state.change", "staff.sessions.revoke", "staff.audit.read"],
         _ => []

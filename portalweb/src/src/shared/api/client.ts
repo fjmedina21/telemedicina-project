@@ -7,7 +7,8 @@ export class StaleResponse extends Error {
 }
 let sessionGeneration=0;
 let refreshing: Promise<unknown> | null = null;
-export async function api<T>(path: string, method = "GET", body?: unknown, retry = true): Promise<T> {
+export async function api<T>(path: string, method = "GET", body?: unknown, retry = true,
+  extraHeaders: Record<string,string> = {}): Promise<T> {
   // This only guards UI results; browser cookie application remains server-controlled.
   if(path==="/auth/login"||path==="/auth/logout")sessionGeneration++;
   const generation=sessionGeneration;
@@ -15,7 +16,7 @@ export async function api<T>(path: string, method = "GET", body?: unknown, retry
   try {
     response = await fetch("/api/backend" + path, {
       method, credentials: "same-origin", cache: "no-store", signal: AbortSignal.timeout(15000),
-      headers: {"Content-Type":"application/json","X-Telemedicina-Client":"milestone","X-Session-Mode":"cookie"},
+      headers: {"Content-Type":"application/json","X-Telemedicina-Client":"milestone","X-Session-Mode":"cookie",...extraHeaders},
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
@@ -27,7 +28,7 @@ export async function api<T>(path: string, method = "GET", body?: unknown, retry
     refreshing ??= api("/auth/refresh","POST",{},false).finally(() => {refreshing=null;});
     await refreshing;
     if(generation!==sessionGeneration)throw new StaleResponse();
-    return api<T>(path,method,body,false);
+    return api<T>(path,method,body,false,extraHeaders);
   }
   let parsed: {data?: T; title?: string; detail?: string; code?: string};
   try { parsed=await response.json(); }

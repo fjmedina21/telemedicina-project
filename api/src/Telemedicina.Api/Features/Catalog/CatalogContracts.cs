@@ -8,7 +8,8 @@ public sealed record CatalogServiceRequest(
     [MaxLength(250)] string? ApprovalReference, [Range(0, int.MaxValue)] int Version = 0);
 public sealed record CatalogPractitionerRequest(
     [Required, MaxLength(120)] string Name, [MaxLength(100)] string? LicenseRef,
-    bool Active, [Required, MaxLength(100)] string[] ServiceIds, [Range(0, int.MaxValue)] int Version = 0);
+    bool Active, [Required, MaxLength(100)] string[] ServiceIds, string? AccountId = null,
+    [Range(0, int.MaxValue)] int Version = 0);
 
 public sealed record SpecialtySummary(string Name);
 public sealed record ServiceSummary(string Id, string Name, string Specialty, int DurationMinutes);

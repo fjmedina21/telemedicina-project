@@ -9,6 +9,7 @@ import '../../features/patient_profile/presentation/patient_profile_form.dart';
 import '../../features/catalog/presentation/booking_form.dart';
 import '../../features/appointments/presentation/appointments_view.dart';
 import '../../features/notifications/presentation/notifications_view.dart';
+import '../../features/video_visit/presentation/video_visit_screen.dart';
 
 class PatientShell extends StatefulWidget {
   final ApiClient? api;
@@ -102,6 +103,11 @@ class _PatientShellState extends State<PatientShell> {
         detailError: c.appointmentDetailError,
         onOpen: c.openAppointment,
         onCheckIn: c.submitCheckIn,
+        onVideo: (appointment) async {
+          await Navigator.of(context).push(MaterialPageRoute(builder: (_) => VideoVisitScreen(
+            api: c.api, appointmentId: appointment['id'] as String,
+            practitionerName: appointment['practitionerName'] as String? ?? 'Profesional')));
+        },
         onFilter: (filters) => c.refreshAppointments(filters: filters),
         sessionChanges: c,
         sessionGeneration: c.api.sessionGeneration,
