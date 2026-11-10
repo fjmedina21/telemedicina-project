@@ -8,7 +8,7 @@ export default function StaffActivationForm(){
   const [busy,setBusy]=useState(false),[message,setMessage]=useState(""),[done,setDone]=useState(false);
   return <section className="login-card" aria-busy={busy}>
     <h1>Activar cuenta de personal</h1>
-    <p>Utiliza tu invitación privada de desarrollo. Caduca en 15 minutos y se utiliza una sola vez.</p>
+    <p>Utiliza el código de invitación recibido por correo. Caduca en 15 minutos y se utiliza una sola vez.</p>
     {!done&&<form className="space-y-4" autoComplete="off" onSubmit={async event=>{
       event.preventDefault();setBusy(true);setMessage("");
       try{

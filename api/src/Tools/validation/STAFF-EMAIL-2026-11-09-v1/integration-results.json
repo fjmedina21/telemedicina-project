@@ -1,0 +1,34 @@
+{
+  "database": "ephemeral-local-postgres17",
+  "real_email_sent": false,
+  "checks": {
+    "migrations": {
+      "exit_code": 0
+    },
+    "seed_admission": {
+      "exit_code": 0
+    },
+    "seed_admin": {
+      "exit_code": 0
+    },
+    "smtp_staff_invitations": {
+      "status": "PASS_PREVIOUS_RUN",
+      "log": "smtp_staff_invitations.log"
+    },
+    "leased_message_invalidated_before_send": {
+      "status": "PASS",
+      "invalidation": "controlled SQL under shared lock"
+    },
+    "exact_invitation_expiry": {
+      "status": "PASS"
+    },
+    "ordinary_inactive_mail_rejected": {
+      "status": "PASS"
+    },
+    "h02_regression": {
+      "exit_code": 0
+    }
+  },
+  "status": "PASS",
+  "temporary_container_removed": true
+}

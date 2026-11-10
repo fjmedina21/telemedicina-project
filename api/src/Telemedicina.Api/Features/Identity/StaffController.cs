@@ -3,6 +3,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Npgsql;
 using Telemedicina.Api.Infrastructure.Authentication;
+using Telemedicina.Api.Features.Notifications;
+using Telemedicina.Api.Infrastructure.Email;
 using Telemedicina.Api.Infrastructure.Persistence;
 using Telemedicina.Api.Shared;
 using Telemedicina.Common.Models.ApiResponses;
@@ -20,7 +22,7 @@ namespace Telemedicina.Api.Features.Identity;
 [ProducesResponseType(typeof(ErrorApiResponse), 429)]
 [ApiController, StaffDenialAudit, Authorize(Roles = "Administrator"), Route("api/v1/admin/staff")]
 public sealed class StaffController(Database database, IHostEnvironment environment,
-    IConfiguration configuration) : ApiControllerBase(database)
+    IConfiguration configuration, NotificationService notifications, MailSettings mail) : ApiControllerBase(database)
 {
     private const string Managed = "role IN ('Admission','Practitioner','Support')";
     private const string SelectAccount = """
@@ -79,7 +81,7 @@ public sealed class StaffController(Database database, IHostEnvironment environm
             ("hash", Password(NewToken())), ("role", request.Role), ("actor", UserId(User)));
         if (inserted == 0)
             return Denied(c, t, 409, "ACCOUNT_ALREADY_EXISTS", "staff.invite");
-        StaffInvitations.Issue(c, t, id, UserId(User));
+        StaffInvitations.Issue(c, t, id, UserId(User), notifications, mail, configuration);
         Record(c, t, UserId(User), "staff.invited", id, HttpContext.TraceIdentifier);
         var account = Account(Rows(c, t, SelectAccount + " WHERE id=@id", ("id", id))[0]);
         t.Commit();
@@ -125,7 +127,7 @@ public sealed class StaffController(Database database, IHostEnvironment environm
                 "SELECT count(*) FROM staff_invitations WHERE user_id=@u AND issued_at>@n",
                 ("u", account.Id), ("n", Now - 60)));
             if (recent > 0) return Denied(c, t, 429, "RATE_LIMITED", "staff.invitation");
-            StaffInvitations.Issue(c, t, account.Id, UserId(User));
+            StaffInvitations.Issue(c, t, account.Id, UserId(User), notifications, mail, configuration);
         }
         else if (operation == "state")
         {

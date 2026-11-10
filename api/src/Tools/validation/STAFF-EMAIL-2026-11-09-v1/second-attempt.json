@@ -1,0 +1,23 @@
+{
+  "database": "ephemeral-local-postgres17",
+  "real_email_sent": false,
+  "checks": {
+    "migrations": {
+      "exit_code": 0
+    },
+    "seed_admission": {
+      "exit_code": 0
+    },
+    "seed_admin": {
+      "exit_code": 0
+    },
+    "smtp_staff_invitations": {
+      "status": "PASS_PREVIOUS_RUN",
+      "log": "smtp_staff_invitations.log"
+    }
+  },
+  "status": "FAIL",
+  "error_type": "RuntimeError",
+  "error": "Synthetic outbox did not reach Sending; actual=Queued",
+  "temporary_container_removed": true
+}
